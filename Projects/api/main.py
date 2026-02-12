@@ -34,22 +34,33 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI()
 
-# Serve the web UI.
-app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+# Serve JS/CSS from /static/* (expects web/app.js, web/... assets)
+if not WEB_DIR.exists():
+    # Don't crash at import-time; show a readable error on /
+    pass
+else:
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     # Keep this explicit so we never depend on StaticFiles(html=True) routing.
     index_path = WEB_DIR / "index.html"
     if not index_path.exists():
-        return HTMLResponse("<h1>ShiftClipper</h1><p>Missing web/index.html</p>", status_code=500)
+        return HTMLResponse(
+            "<h1>ShiftClipper</h1><p>Missing web/index.html</p>",
+            status_code=500,
+        )
     return FileResponse(str(index_path), media_type="text/html")
 
+
 def job_dir(job_id: str) -> str:
-    return os.path.join(JOBS_DIR, job_id)
+    return os.path.join(str(JOBS_DIR), job_id)
+
 
 def meta_path(job_id: str) -> str:
     return os.path.join(job_dir(job_id), "meta.json")
+
 
 def read_json(path: str, default: Any) -> Any:
     if not os.path.exists(path):
@@ -57,10 +68,12 @@ def read_json(path: str, default: Any) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def write_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
+
 
 def set_status(
     job_id: str,
@@ -105,15 +118,32 @@ def make_proxy(in_path: str, out_path: str, max_h: int = 360, fps: int = 30) -> 
     """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", in_path,
-        # IMPORTANT: the comma in min({max_h},ih) must be escaped or ffmpeg treats it
-        # as a filter separator (causing: Missing ')' or too many args in 'min(360').
-        "-vf", f"scale=-2:min({max_h}\\,ih)",
-        "-r", str(fps),
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        in_path,
+        # IMPORTANT: escape the comma in min({max_h},ih)
+        "-vf",
+        f"scale=-2:min({max_h}\\,ih)",
+        "-r",
+        str(fps),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
         out_path,
     ]
     subprocess.run(cmd, check=False)
@@ -122,17 +152,30 @@ def make_proxy(in_path: str, out_path: str, max_h: int = 360, fps: int = 30) -> 
     except Exception:
         return False
 
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/jobs")
 def create_job(payload: Dict[str, Any] | None = None):
     job_id = uuid.uuid4().hex[:12]
     os.makedirs(job_dir(job_id), exist_ok=True)
     name = (payload or {}).get("name", "job")
-    set_status(job_id, "created", {"name": name, "created_at": time.time()})
+
+    # FIX: no 3rd positional arg; use keywords
+    set_status(
+        job_id,
+        "created",
+        name=name,
+        created_at=time.time(),
+        progress=0,
+        message="Job created.",
+        proxy_ready=False,
+    )
     return {"job_id": job_id}
+
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
@@ -140,11 +183,13 @@ def get_job(job_id: str):
     if not os.path.exists(mp):
         raise HTTPException(status_code=404, detail="Job not found")
     meta = read_json(mp, {})
+
     # Convenience fields the UI relies on
     proxy_path = meta.get("proxy_path")
     if proxy_path and os.path.exists(proxy_path):
         meta["proxy_ready"] = True
         meta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
+
     return meta
 
 
@@ -161,15 +206,18 @@ def job_status(job_id: str):
     """Status endpoint consumed by the web UI."""
     return get_job(job_id)
 
+
 @app.post("/jobs/{job_id}/upload")
 async def upload_video(job_id: str, file: UploadFile = File(...)):
     if not os.path.exists(job_dir(job_id)):
         raise HTTPException(status_code=404, detail="Job not found")
+
     ext = os.path.splitext(file.filename or "")[1] or ".mp4"
     in_path = os.path.join(job_dir(job_id), f"input{ext}")
     proxy_path = os.path.join(job_dir(job_id), "input_proxy.mp4")
 
-    set_status(job_id, "uploading", {"progress": 5, "message": "Uploading…"})
+    # FIX: keyword args only
+    set_status(job_id, "uploading", progress=5, message="Uploading…")
 
     # Stream upload to disk (don't hold big videos in RAM)
     with open(in_path, "wb") as f:
@@ -179,37 +227,41 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
                 break
             f.write(chunk)
 
-    set_status(job_id, "uploaded", {
-        "video_path": in_path,
-        "uploaded_at": time.time(),
-        "progress": 10,
-        "message": "Upload complete. Building proxy…",
-        "proxy_ready": False,
-    })
+    set_status(
+        job_id,
+        "uploaded",
+        video_path=in_path,
+        uploaded_at=time.time(),
+        progress=10,
+        message="Upload complete. Building proxy…",
+        proxy_ready=False,
+    )
 
     # Build a small proxy mp4 for fast browser playback
-    make_proxy(in_path, proxy_path, max_h=360)
-    if os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 1024:
-        set_status(job_id, "ready", {
-            "proxy_path": proxy_path,
-            "proxy_ready": True,
-            "progress": 18,
-            "message": "Proxy ready.",
-        })
+    ok = make_proxy(in_path, proxy_path, max_h=360)
+    if ok and os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 1024:
+        set_status(
+            job_id,
+            "ready",
+            proxy_path=proxy_path,
+            proxy_ready=True,
+            progress=18,
+            message="Proxy ready.",
+        )
     else:
-        set_status(job_id, "error", {
-            "progress": 0,
-            "message": "Proxy creation failed (ffmpeg error).",
-        })
+        set_status(job_id, "error", progress=0, message="Proxy creation failed (ffmpeg error).")
         raise HTTPException(status_code=500, detail="Proxy creation failed")
 
     return {"ok": True, "video_path": in_path, "proxy_path": proxy_path}
+
 
 @app.put("/jobs/{job_id}/setup")
 def setup_job(job_id: str, payload: Dict[str, Any]):
     if not os.path.exists(job_dir(job_id)):
         raise HTTPException(status_code=404, detail="Job not found")
+
     write_json(os.path.join(job_dir(job_id), "setup.json"), payload)
+
     # UI expects that after setup is saved the job becomes "ready".
     set_status(
         job_id,
@@ -221,13 +273,17 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     )
     return {"ok": True, "status": "ready", "job_id": job_id}
 
+
 @app.post("/jobs/{job_id}/run")
 def run_job(job_id: str):
     if not os.path.exists(job_dir(job_id)):
         raise HTTPException(status_code=404, detail="Job not found")
     rq_job = q.enqueue("worker.tasks.process_job", job_id)
-    set_status(job_id, "queued", {"rq_id": rq_job.get_id()})
+
+    # FIX: keyword arg
+    set_status(job_id, "queued", rq_id=rq_job.get_id(), progress=30, message="Queued for processing.")
     return {"rq_id": rq_job.get_id()}
+
 
 @app.get("/jobs/{job_id}/results")
 def results(job_id: str):
@@ -236,4 +292,5 @@ def results(job_id: str):
         raise HTTPException(status_code=404, detail="No results yet")
     return JSONResponse(read_json(rp, {}))
 
-# IMPORTANT: mount web LAST so API routes work
+# IMPORTANT: no extra mounts after this (API routes must work)
+
