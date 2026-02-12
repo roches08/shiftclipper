@@ -62,13 +62,21 @@ def write_json(path: str, obj: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
-def set_status(job_id: str, status: str, extra: Optional[Dict[str, Any]] = None) -> None:
+def set_status(job_id: str, status: str, extra: Optional[Dict[str, Any]] = None, **fields: Any) -> None:
+    """Update meta.json for a job.
+
+    Backwards compatible:
+      - older code passes a dict via `extra=...`
+      - newer code may pass keyword fields like progress=..., message=...
+    """
     meta = read_json(meta_path(job_id), {})
     meta["job_id"] = job_id
     meta["status"] = status
     meta["updated_at"] = time.time()
     if extra:
         meta.update(extra)
+    if fields:
+        meta.update(fields)
     write_json(meta_path(job_id), meta)
 
 
