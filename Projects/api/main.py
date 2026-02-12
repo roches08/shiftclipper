@@ -62,21 +62,39 @@ def write_json(path: str, obj: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
-def set_status(job_id: str, status: str, extra: Optional[Dict[str, Any]] = None, **fields: Any) -> None:
+def set_status(
+    job_id: str,
+    status: Optional[str] = None,
+    *,
+    stage: Optional[str] = None,
+    progress: Optional[int] = None,
+    message: Optional[str] = None,
+    error: Optional[str] = None,
+    **extra: Any,
+) -> None:
     """Update meta.json for a job.
 
-    Backwards compatible:
-      - older code passes a dict via `extra=...`
-      - newer code may pass keyword fields like progress=..., message=...
+    This is intentionally flexible because the UI and worker both push
+    status updates with different fields (progress/message/etc.).
     """
     meta = read_json(meta_path(job_id), {})
     meta["job_id"] = job_id
-    meta["status"] = status
+    if status is not None:
+        meta["status"] = status
+    if stage is not None:
+        meta["stage"] = stage
+    if progress is not None:
+        try:
+            meta["progress"] = int(progress)
+        except Exception:
+            meta["progress"] = progress
+    if message is not None:
+        meta["message"] = message
+    if error is not None:
+        meta["error"] = error
     meta["updated_at"] = time.time()
     if extra:
         meta.update(extra)
-    if fields:
-        meta.update(fields)
     write_json(meta_path(job_id), meta)
 
 
@@ -86,40 +104,19 @@ def make_proxy(in_path: str, out_path: str, max_h: int = 360, fps: int = 30) -> 
     Returns True if the output file exists and is non-trivial in size.
     """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    # IMPORTANT:
-    #   Do NOT use commas inside scale expressions here (e.g. min(360,ih)).
-    #   Those have repeatedly caused ffmpeg expression parse failures in the pod.
-    #   Use force_original_aspect_ratio=decrease instead.
-    # Also: ensure even dimensions (H.264 requirement) via a small pad.
-    vf = (
-        f"scale=-2:{max_h}:force_original_aspect_ratio=decrease,"
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2"
-    )
-
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", in_path,
-        "-map", "0:v:0", "-map", "0:a?",  # audio is optional
-        "-vf", vf,
+        # IMPORTANT: the comma in min({max_h},ih) must be escaped or ffmpeg treats it
+        # as a filter separator (causing: Missing ')' or too many args in 'min(360').
+        "-vf", f"scale=-2:min({max_h}\\,ih)",
         "-r", str(fps),
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         out_path,
     ]
-
-    # Capture ffmpeg output for debugging (proxy failures were silent before).
-    log_path = os.path.join(os.path.dirname(out_path), "proxy_ffmpeg.log")
-    try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write(p.stdout or "")
-    except Exception as e:
-        try:
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.write(f"Exception running ffmpeg: {e}\n")
-        except Exception:
-            pass
+    subprocess.run(cmd, check=False)
     try:
         return os.path.exists(out_path) and os.path.getsize(out_path) > 64 * 1024
     except Exception:
@@ -151,12 +148,6 @@ def get_job(job_id: str):
     return meta
 
 
-@app.get("/jobs/{job_id}/status")
-def job_status(job_id: str):
-    # UI convenience endpoint
-    return get_job(job_id)
-
-
 @app.get("/data/jobs/{job_id}/{path:path}")
 def serve_job_file(job_id: str, path: str):
     full = os.path.join(job_dir(job_id), path)
@@ -167,7 +158,7 @@ def serve_job_file(job_id: str, path: str):
 
 @app.get("/jobs/{job_id}/status")
 def job_status(job_id: str):
-    # Alias for compatibility with the web UI
+    """Status endpoint consumed by the web UI."""
     return get_job(job_id)
 
 @app.post("/jobs/{job_id}/upload")
@@ -197,8 +188,8 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
     })
 
     # Build a small proxy mp4 for fast browser playback
-    ok = make_proxy(in_path, proxy_path, max_h=360)
-    if ok:
+    make_proxy(in_path, proxy_path, max_h=360)
+    if os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 1024:
         set_status(job_id, "ready", {
             "proxy_path": proxy_path,
             "proxy_ready": True,
@@ -219,8 +210,16 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     if not os.path.exists(job_dir(job_id)):
         raise HTTPException(status_code=404, detail="Job not found")
     write_json(os.path.join(job_dir(job_id), "setup.json"), payload)
-    set_status(job_id, "ready", progress=25, message="Setup saved.")
-    return {"ok": True}
+    # UI expects that after setup is saved the job becomes "ready".
+    set_status(
+        job_id,
+        "ready",
+        progress=25,
+        stage="ready",
+        message="Setup saved.",
+        setup=payload,
+    )
+    return {"ok": True, "status": "ready", "job_id": job_id}
 
 @app.post("/jobs/{job_id}/run")
 def run_job(job_id: str):
