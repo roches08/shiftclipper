@@ -211,7 +211,7 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     if not os.path.exists(job_dir(job_id)):
         raise HTTPException(status_code=404, detail="Job not found")
     write_json(os.path.join(job_dir(job_id), "setup.json"), payload)
-    set_status(job_id, "setup_saved")
+    set_status(job_id, "ready", progress=25, message="Setup saved.")
     return {"ok": True}
 
 @app.post("/jobs/{job_id}/run")
