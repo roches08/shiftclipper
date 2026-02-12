@@ -78,17 +78,40 @@ def make_proxy(in_path: str, out_path: str, max_h: int = 360, fps: int = 30) -> 
     Returns True if the output file exists and is non-trivial in size.
     """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    # IMPORTANT:
+    #   Do NOT use commas inside scale expressions here (e.g. min(360,ih)).
+    #   Those have repeatedly caused ffmpeg expression parse failures in the pod.
+    #   Use force_original_aspect_ratio=decrease instead.
+    # Also: ensure even dimensions (H.264 requirement) via a small pad.
+    vf = (
+        f"scale=-2:{max_h}:force_original_aspect_ratio=decrease,"
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    )
+
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
         "-i", in_path,
-        "-vf", f"scale=-2:min({max_h},ih)",
+        "-map", "0:v:0", "-map", "0:a?",  # audio is optional
+        "-vf", vf,
         "-r", str(fps),
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
         "-movflags", "+faststart",
         out_path,
     ]
-    subprocess.run(cmd, check=False)
+
+    # Capture ffmpeg output for debugging (proxy failures were silent before).
+    log_path = os.path.join(os.path.dirname(out_path), "proxy_ffmpeg.log")
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(p.stdout or "")
+    except Exception as e:
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"Exception running ffmpeg: {e}\n")
+        except Exception:
+            pass
     try:
         return os.path.exists(out_path) and os.path.getsize(out_path) > 64 * 1024
     except Exception:
@@ -166,8 +189,8 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
     })
 
     # Build a small proxy mp4 for fast browser playback
-    make_proxy(in_path, proxy_path, max_h=360)
-    if os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 1024:
+    ok = make_proxy(in_path, proxy_path, max_h=360)
+    if ok:
         set_status(job_id, "ready", {
             "proxy_path": proxy_path,
             "proxy_ready": True,
