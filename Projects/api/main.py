@@ -236,9 +236,21 @@ def run_job(job_id: str):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    rq_job = q.enqueue("worker.tasks.process_job", job_id)
-    set_status(job_id, "queued", extra={"rq_id": rq_job.get_id(), "progress": 30, "message": "Queued for processing."})
+
+    # Long videos + detection can exceed the default RQ timeout (often 180s).
+    rq_job = q.enqueue("worker.tasks.process_job", job_id, job_timeout=3600)
+
+    set_status(
+        job_id,
+        "queued",
+        extra={
+            "rq_id": rq_job.get_id(),
+            "progress": 30,
+            "message": "Queued for processing.",
+        },
+    )
     return {"rq_id": rq_job.get_id()}
+
 
 
 @app.get("/jobs/{job_id}/results")
