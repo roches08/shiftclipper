@@ -2,6 +2,7 @@
 // - Relative URLs (RunPod proxy-safe)
 // - XHR upload for progress
 // - Canvas overlay draws click circles
+// - Setup includes: camera_mode, player_number, jersey_color, extend_sec, verify_mode, clicks
 
 const $ = (id) => document.getElementById(id);
 
@@ -9,7 +10,7 @@ const state = {
   jobId: null,
   polling: false,
   selectMode: false,
-  clicks: [], // {t, x, y} normalized
+  clicks: [], // {t, x, y}
   lastStatus: null,
 };
 
@@ -18,58 +19,23 @@ function setPill(text){ $('pill').textContent = text || 'idle'; }
 function setBar(pct, label){
   const v = Math.max(0, Math.min(100, Number(pct ?? 0)));
   $('barFill').style.width = `${v}%`;
-  // no fancy colors, keep simple
-  $('barFill').style.background = v >= 90 ? '#0a7a2f' : '#2b7cff';
   $('barText').textContent = label || `${v}%`;
 }
 
-function setStatus(stage, pct, message){
-  setPill(stage || 'idle');
-  const lbl = `${stage || 'idle'} — ${Math.round(Number(pct ?? 0))}%${message ? ' • ' + message : ''}`;
-  setBar(pct ?? 0, lbl);
-}
-
-function show(obj){
-  $('out').textContent = JSON.stringify(obj ?? {}, null, 2);
-}
-
-function showClips(obj){
-  $('clips').textContent = obj ? JSON.stringify(obj, null, 2) : '—';
-  // render links
-  const box = $('clipsLinks');
-  box.innerHTML = '';
-  if(!obj) return;
-  const jobId = state.jobId;
-  const mk = (href, text) => {
-    const a = document.createElement('a');
-    a.href = href;
-    a.target = '_blank';
-    a.rel = 'noreferrer';
-    a.textContent = text;
-    box.appendChild(a);
-  };
-  if(obj.combined_url) mk(obj.combined_url, '▶ Combined MP4');
-  if(Array.isArray(obj.clips)){
-    obj.clips.forEach((c, i)=>{
-      if(c && c.url) mk(c.url, `▶ Clip ${String(i+1).padStart(2,'0')} (${c.start.toFixed(2)}–${c.end.toFixed(2)}s)`);
-    });
-  }
-}
+function show(obj){ $('out').textContent = JSON.stringify(obj ?? {}, null, 2); }
+function showClips(obj){ $('clips').textContent = obj ? JSON.stringify(obj, null, 2) : '—'; }
 
 function updateButtons(meta){
   const haveJob = !!state.jobId;
-  const haveFile = !!$('file').files?.length;
   const proxyReady = !!(meta && meta.proxy_ready);
+  const clickCount = state.clicks.length;
 
-  $('btnUpload').disabled = !haveJob || !haveFile;
-  $('btnCancel').disabled = !haveJob;
-
+  $('btnUpload').disabled = !haveJob || !$('file').files?.length;
   $('btnSelect').disabled = !proxyReady;
-  $('btnClearClicks').disabled = state.clicks.length === 0;
-
-  $('btnSave').disabled = !haveJob || state.clicks.length < 3;
-  const isReady = meta && (meta.status === 'ready' || meta.stage === 'ready' || meta.status === 'uploaded' || meta.stage === 'uploaded' || meta.status === 'done');
-  $('btnRun').disabled = !haveJob || !isReady || state.clicks.length < 3;
+  $('btnClearClicks').disabled = clickCount === 0;
+  $('btnSave').disabled = !haveJob || clickCount < 3;
+  $('btnRun').disabled = !haveJob || !(meta && (meta.status === 'ready' || meta.stage === 'ready'));
+  $('btnCancel').disabled = !haveJob;
 }
 
 function renderClicks(){
@@ -77,14 +43,12 @@ function renderClicks(){
   $('clickWarn').textContent = state.clicks.length < 3 ? ' (need at least 3)' : '';
   if(state.clicks.length === 0){
     $('clickList').textContent = '—';
-  }else{
-    const last = state.clicks.slice(-8);
-    $('clickList').textContent = last.map((c, i)=>{
-      const idx = state.clicks.length - last.length + i + 1;
-      return `#${idx}: t=${c.t.toFixed(2)}s x=${c.x.toFixed(3)} y=${c.y.toFixed(3)}`;
-    }).join(' | ');
+    return;
   }
-  drawOverlay();
+  $('clickList').textContent = state.clicks
+    .slice(-12)
+    .map((c,i)=>`#${state.clicks.length - Math.min(12,state.clicks.length) + i + 1}: t=${c.t.toFixed(2)}s x=${c.x.toFixed(3)} y=${c.y.toFixed(3)}`)
+    .join(' | ');
 }
 
 async function apiJson(method, url, body){
@@ -108,7 +72,38 @@ function setVideoSrc(url){
   const sep = url.includes('?') ? '&' : '?';
   v.src = `${url}${sep}${bust}`;
   v.load();
-  // resize overlay after metadata loads
+}
+
+function resizeOverlay(){
+  const v = $('vid');
+  const c = $('overlay');
+  if(!v || !c) return;
+  const rect = v.getBoundingClientRect();
+  c.width = Math.round(rect.width);
+  c.height = Math.round(rect.height);
+  c.style.width = `${Math.round(rect.width)}px`;
+  c.style.height = `${Math.round(rect.height)}px`;
+}
+
+function drawOverlay(){
+  const v = $('vid');
+  const c = $('overlay');
+  if(!v || !c) return;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+
+  // draw click circles
+  for(const click of state.clicks){
+    const x = click.x * c.width;
+    const y = click.y * c.height;
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, Math.PI*2);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#00ff88';
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(0,255,136,0.15)';
+    ctx.fill();
+  }
 }
 
 async function pollStatus(loop=false){
@@ -121,17 +116,15 @@ async function pollStatus(loop=false){
       const meta = await apiJson('GET', `/jobs/${state.jobId}/status`);
       state.lastStatus = meta;
       show(meta);
-
-      const stage = meta.stage || meta.status || 'unknown';
-      const pct = meta.progress ?? 0;
-      setStatus(stage, pct, meta.message || '');
+      setPill(meta.stage || meta.status || 'unknown');
+      setBar(meta.progress ?? 0, `${meta.stage || meta.status || 'unknown'} — ${meta.progress ?? 0}% ${meta.message ? '• ' + meta.message : ''}`);
 
       if(meta.proxy_ready && meta.proxy_url){
-        $('previewHint').textContent = 'Proxy ready. Click Select Player to start collecting clicks.';
+        $('previewHint').textContent = 'Proxy ready. Click Select Player and click torso 3–8 times.';
         if(!$('vid').src.includes(meta.proxy_url)){
           setVideoSrc(meta.proxy_url);
         }
-      } else {
+      }else{
         $('previewHint').textContent = meta.message || 'Waiting for proxy…';
       }
 
@@ -141,10 +134,10 @@ async function pollStatus(loop=false){
       if(meta.status === 'done' || meta.status === 'error') break;
       await new Promise(res=>setTimeout(res, 1200));
     }
-  } catch(e){
-    setStatus('error', 0, String(e));
-    show({error: String(e)});
-  } finally {
+  }catch(e){
+    $('out').textContent = JSON.stringify({error: String(e)}, null, 2);
+    setPill('error');
+  }finally{
     state.polling = false;
   }
 }
@@ -157,9 +150,9 @@ async function createJob(){
   state.selectMode = false;
   $('btnSelect').textContent = 'Select Player (clicks OFF)';
   renderClicks();
-
-  show(r);
-  setStatus('created', 0, 'Job created');
+  drawOverlay();
+  setPill('created');
+  setBar(0, 'created — 0%');
   updateButtons({status:'created', stage:'created', progress:0, proxy_ready:false});
   await pollStatus(false);
 }
@@ -172,42 +165,33 @@ function uploadVideo(){
   const form = new FormData();
   form.append('file', f);
 
-  // Reset UI
-  setStatus('uploading', 0, 'Uploading…');
-  $('previewHint').textContent = 'Uploading…';
-  state.clicks = [];
-  state.selectMode = false;
-  $('btnSelect').textContent = 'Select Player (clicks OFF)';
-  renderClicks();
-  $('vid').removeAttribute('src');
-  $('vid').load();
+  setPill('uploading');
+  setBar(1, 'Uploading…');
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', `/jobs/${state.jobId}/upload`);
 
   xhr.upload.onprogress = (e)=>{
     if(e.lengthComputable){
-      // upload maps to 0-40%
-      const p = Math.max(0, Math.min(40, Math.round((e.loaded/e.total)*40)));
-      setStatus('uploading', p, `Uploading… ${Math.round((e.loaded/e.total)*100)}%`);
+      const pct = Math.max(1, Math.min(40, Math.round((e.loaded/e.total)*40)));
+      setBar(pct, `Uploading… ${Math.round((e.loaded/e.total)*100)}%`);
     }
   };
 
   xhr.onerror = ()=>{
-    setStatus('error', 0, 'Upload failed (network error)');
+    setPill('error');
+    setBar(0, 'Upload failed (network).');
   };
 
   xhr.onload = async ()=>{
     if(xhr.status >= 200 && xhr.status < 300){
-      setStatus('proxy', 40, 'Upload complete. Building proxy…');
-      try{
-        await pollStatus(true); // will switch to proxy_ready when ready
-      } catch(e){
-        setStatus('error', 0, `Proxy poll error: ${String(e)}`);
-      }
+      setPill('proxy');
+      setBar(45, 'Upload complete. Building proxy…');
+      await pollStatus(true);
     } else {
-      setStatus('error', 0, `Upload failed (HTTP ${xhr.status})`);
-      show({error: xhr.responseText || `HTTP ${xhr.status}`});
+      setPill('error');
+      setBar(0, `Upload failed (HTTP ${xhr.status}).`);
+      $('out').textContent = xhr.responseText || `HTTP ${xhr.status}`;
     }
   };
 
@@ -216,13 +200,17 @@ function uploadVideo(){
 
 async function saveSetup(){
   if(!state.jobId) return;
+
   const payload = {
     camera_mode: $('cameraMode').value,
     player_number: ($('playerNumber').value || '').trim(),
     jersey_color: $('jerseyColor').value,
+    extend_sec: Number($('extendSec').value || 20),
+    verify_mode: $('verifyMode').value === 'on',
     clicks: state.clicks,
     clicks_count: state.clicks.length,
   };
+
   const r = await apiJson('PUT', `/jobs/${state.jobId}/setup`, payload);
   show(r);
   await pollStatus(false);
@@ -230,7 +218,6 @@ async function saveSetup(){
 
 async function runJob(){
   if(!state.jobId) return;
-  setStatus('queued', 20, 'Queued…');
   const r = await apiJson('POST', `/jobs/${state.jobId}/run`);
   show(r);
   await pollStatus(true);
@@ -238,85 +225,84 @@ async function runJob(){
   try{
     const res = await apiJson('GET', `/jobs/${state.jobId}/results`);
     showClips(res);
+    renderClipsUi(res);
   }catch(e){
     showClips({error:String(e)});
+    $('clipsUi').textContent = '—';
   }
 }
 
 async function cancelJob(){
-  if(!state.jobId) return;
-  const r = await apiJson('GET', `/jobs/${state.jobId}/cancel`);
-  show(r);
-  await pollStatus(false);
+  // Simple cancel placeholder: UI only; worker doesn’t implement stop yet
+  setPill('cancel');
+  setBar(0, 'Cancelled (UI only).');
 }
 
 function toggleSelect(){
   state.selectMode = !state.selectMode;
   $('btnSelect').textContent = state.selectMode ? 'Select Player (clicks ON)' : 'Select Player (clicks OFF)';
-  $('previewHint').textContent = state.selectMode ? 'Click the player in the video 3–8 times.' : 'Selection off.';
+  $('previewHint').textContent = state.selectMode ? 'Click torso 3–8 times on the player.' : 'Selection off.';
 }
 
 function clearClicks(){
   state.clicks = [];
   renderClicks();
+  drawOverlay();
   updateButtons(state.lastStatus);
 }
 
 function handleVideoClick(ev){
   if(!state.selectMode) return;
   const v = $('vid');
-  if(!v || !v.videoWidth || !v.videoHeight) return;
+  if(!v) return;
 
   const rect = v.getBoundingClientRect();
   const x = (ev.clientX - rect.left) / rect.width;
   const y = (ev.clientY - rect.top) / rect.height;
+
   const cx = Math.max(0, Math.min(1, x));
   const cy = Math.max(0, Math.min(1, y));
-
   state.clicks.push({t: Number(v.currentTime || 0), x: cx, y: cy});
+
   renderClicks();
+  drawOverlay();
   updateButtons(state.lastStatus);
 }
 
-function drawOverlay(){
-  const v = $('vid');
-  const c = $('overlay');
-  if(!c || !v) return;
-
-  const rect = v.getBoundingClientRect();
-  const w = Math.max(1, Math.round(rect.width));
-  const h = Math.max(1, Math.round(rect.height));
-  if(c.width !== w || c.height !== h){
-    c.width = w;
-    c.height = h;
+function renderClipsUi(res){
+  const el = $('clipsUi');
+  el.innerHTML = '';
+  if(!res || !res.clips || res.clips.length === 0){
+    el.textContent = '—';
+    return;
   }
-  const ctx = c.getContext('2d');
-  ctx.clearRect(0,0,c.width,c.height);
 
-  if(state.clicks.length === 0) return;
+  const list = document.createElement('div');
+  list.style.display = 'grid';
+  list.style.gap = '8px';
 
-  const color = $('jerseyColor')?.value || '#00c853';
-  ctx.lineWidth = 3;
-
-  state.clicks.forEach((p, i)=>{
-    const x = p.x * c.width;
-    const y = p.y * c.height;
-    const r = 12;
-
-    // outer ring
-    ctx.strokeStyle = color;
-    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
-
-    // label bubble
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.beginPath(); ctx.arc(x,y,r+10,0,Math.PI*2); ctx.fill();
-
-    ctx.fillStyle = '#fff';
-    ctx.font = '12px system-ui';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(i+1), x, y);
+  res.clips.forEach((c, i)=>{
+    const a = document.createElement('a');
+    a.href = c.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = `▶ Clip ${String(i+1).padStart(2,'0')} (${c.start.toFixed(2)}–${c.end.toFixed(2)}s)`;
+    list.appendChild(a);
   });
+
+  if(res.combined_url){
+    const hr = document.createElement('div');
+    hr.style.marginTop = '8px';
+    const a = document.createElement('a');
+    a.href = res.combined_url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = `▶ Combined video`;
+    hr.appendChild(a);
+    list.appendChild(hr);
+  }
+
+  el.appendChild(list);
 }
 
 function wire(){
@@ -328,18 +314,22 @@ function wire(){
   $('btnSelect').addEventListener('click', toggleSelect);
   $('btnClearClicks').addEventListener('click', clearClicks);
 
-  $('file').addEventListener('change', ()=>updateButtons(state.lastStatus));
-  $('jerseyColor').addEventListener('change', drawOverlay);
-
+  $('file').addEventListener('change', ()=> updateButtons(state.lastStatus));
   $('vid').addEventListener('click', handleVideoClick);
-  $('vid').addEventListener('loadedmetadata', drawOverlay);
-  window.addEventListener('resize', drawOverlay);
 
-  setStatus('idle', 0, '');
+  window.addEventListener('resize', ()=>{ resizeOverlay(); drawOverlay(); });
+  $('vid').addEventListener('loadedmetadata', ()=>{ resizeOverlay(); drawOverlay(); });
+  $('vid').addEventListener('timeupdate', ()=>{ /* keep overlay stable */ });
+
+  setPill('idle');
+  setBar(0, 'idle');
   show({});
   showClips(null);
   renderClicks();
+  resizeOverlay();
+  drawOverlay();
   updateButtons(null);
 }
 
 wire();
+
