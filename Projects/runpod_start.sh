@@ -46,7 +46,7 @@ print("YOLO weights ready")
 PY
 
 echo "[ShiftClipper] Starting RQ worker..."
-nohup rq worker jobs --url redis://127.0.0.1:6379 --with-scheduler > /workspace/worker.log 2>&1 & /workspace/worker.log 2>&1 &
+nohup rq worker jobs --url redis://127.0.0.1:6379 --default-job-timeout 3600 > /workspace/worker.log 2>&1 &
 
 echo "[ShiftClipper] Starting API..."
 nohup uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > /workspace/api.log 2>&1 &
