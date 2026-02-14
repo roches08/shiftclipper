@@ -311,7 +311,7 @@ def _build_presence_spans(
     pre_roll: float,
     post_roll: float,
     min_len: float,
-    max_clip_seconds: float = 120.0
+    max_clip_seconds: float = 20.0
 ) -> List[Tuple[float, float]]:
     if not times_present:
         return []
@@ -384,18 +384,18 @@ def process_job(job_id: str) -> Dict[str, Any]:
     jersey_hsv = _bgr_to_hsv_color(_hex_to_bgr(jersey_hex))
 
     # knobs
-    min_clip_len = float(setup.get("min_clip_len", 20.0))
-    gap_merge = float(setup.get("extend_sec", 10.0))      # merge window (auto extend)
-    pre_roll = float(setup.get("pre_roll", 4.0))          # 3-5s requested; default 4
-    post_roll = float(setup.get("post_roll", 1.5))
-    sticky_seconds = float(setup.get("sticky_seconds", 1.5))
+    min_clip_len = float(setup.get("min_clip_len", 5.0))
+    gap_merge = float(setup.get("extend_sec", 1.25))      # merge window (auto extend)
+    pre_roll = float(setup.get("pre_roll", 1.25))          # 3-5s requested; default 4
+    post_roll = float(setup.get("post_roll", 1.0))
+    sticky_seconds = float(setup.get("sticky_seconds", 0.55))
 
-    detect_stride = int(setup.get("detect_stride", 3))
-    conf = float(setup.get("yolo_conf", 0.25))
+    detect_stride = int(setup.get("detect_stride", 2))
+    conf = float(setup.get("yolo_conf", 0.30))
 
-    color_threshold = float(setup.get("color_threshold", 1.05))  # lower=stricter
-    dist_gate = float(setup.get("dist_gate_norm", 0.18))
-    dist_gate2 = float(setup.get("dist_gate2_norm", 0.35))
+    color_threshold = float(setup.get("color_threshold", 0.95))  # lower=stricter
+    dist_gate = float(setup.get("dist_gate_norm", 0.14))
+    dist_gate2 = float(setup.get("dist_gate2_norm", 0.28))
 
     _set_status(job_id, status="processing", stage="seed", progress=35, message="Seeding player from clicks…")
 
@@ -590,7 +590,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
         pre_roll=pre_roll,
         post_roll=post_roll,
         min_len=min_clip_len,
-        max_clip_seconds=float(setup.get("max_clip_seconds", 120.0)),
+        max_clip_seconds=float(setup.get("max_clip_seconds", 20.0)),
     )
 
     _set_status(job_id, status="processing", stage="cutting", progress=92, message=f"Cutting {len(spans)} clip(s)…")
