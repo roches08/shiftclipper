@@ -1,451 +1,286 @@
 import os
-import io
-import math
 import json
+import datetime
 import time
-import shutil
+import math
 import subprocess
+import shutil
+from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 import cv2
 import numpy as np
-from rq import get_current_job
 
-# ---------------------------
-# MAX-ACCURACY DEFAULTS (override via env vars)
-# ---------------------------
-YOLO_WEIGHTS = os.getenv("YOLO_WEIGHTS", "yolov8x.pt")   # biggest = best accuracy
-YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "960"))         # 960/1280 more accurate than 640
-YOLO_CONF = float(os.getenv("YOLO_CONF", "0.25"))        # lower = more recall (can raise for precision)
-DETECT_STRIDE_DEFAULT = int(os.getenv("DETECT_STRIDE", "1"))  # 1 = detect every frame (slowest, best)
-USE_HALF = os.getenv("YOLO_HALF", "1") == "1"            # fp16 on GPU (faster), usually fine
+# Ultralytics YOLO (GPU via torch if available)
+from ultralytics import YOLO
 
-# NOTE: if you want absolute max accuracy and don't care about speed:
-# export YOLO_IMGSZ=1280
-# export DETECT_STRIDE=1
-# export YOLO_WEIGHTS=yolov8x.pt
+# -----------------------------
+# Env knobs (defaults are "max accuracy" friendly)
+# -----------------------------
+YOLO_WEIGHTS = os.getenv("YOLO_WEIGHTS", "yolov8x.pt")  # big model = better accuracy
+YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "1280"))       # higher = better accuracy (slower)
+YOLO_CONF = float(os.getenv("YOLO_CONF", "0.20"))       # lower = more detections (more FP risk)
+DETECT_STRIDE = int(os.getenv("DETECT_STRIDE", "1"))    # 1 = detect every frame (slowest, best)
 
-# Lazy-load YOLO
-_yolo_model = None
-
-
-def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-
-def _run(cmd: List[str]) -> None:
-    subprocess.check_call(cmd)
-
-
-def _ffprobe_fps_wh(path: str) -> Tuple[float, int, int]:
-    # fps + width/height from ffprobe
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=avg_frame_rate,width,height",
-        "-of", "json",
-        path,
-    ]
-    out = subprocess.check_output(cmd).decode("utf-8")
-    data = json.loads(out)
-    st = data["streams"][0]
-    w = int(st["width"])
-    h = int(st["height"])
-    fr = st["avg_frame_rate"]
-    # fr like "60000/1001"
-    if "/" in fr:
-        a, b = fr.split("/")
-        fps = float(a) / float(b)
-    else:
-        fps = float(fr)
-    return fps, w, h
-
-
-def _safe_hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
-    s = hex_color.strip().lstrip("#")
-    if len(s) != 6:
-        return (0, 255, 0)
-    r = int(s[0:2], 16)
-    g = int(s[2:4], 16)
-    b = int(s[4:6], 16)
-    return (b, g, r)
-
-
-def _load_yolo():
-    global _yolo_model
-    if _yolo_model is None:
-        from ultralytics import YOLO
-        _yolo_model = YOLO(YOLO_WEIGHTS)
-    return _yolo_model
-
-
-def _yolo_person_boxes(frame_bgr: np.ndarray) -> List[Tuple[int, int, int, int, float]]:
-    """
-    Returns list of (x1,y1,x2,y2,conf) for person class.
-    """
-    model = _load_yolo()
-
-    # Ultralytics expects RGB
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-    # NOTE: device auto-selects CUDA in RunPod if available
-    results = model.predict(
-        rgb,
-        imgsz=YOLO_IMGSZ,
-        conf=YOLO_CONF,
-        verbose=False,
-        half=USE_HALF,
-        classes=[0],   # person
-    )
-    r0 = results[0]
-    out = []
-    if r0.boxes is None:
-        return out
-
-    boxes = r0.boxes.xyxy.cpu().numpy()
-    confs = r0.boxes.conf.cpu().numpy()
-    for (x1, y1, x2, y2), c in zip(boxes, confs):
-        out.append((int(x1), int(y1), int(x2), int(y2), float(c)))
-    return out
-
-
-def _bbox_center(b: Tuple[int, int, int, int]) -> Tuple[float, float]:
-    x1, y1, x2, y2 = b
-    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-
-
-def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1 = max(ax1, bx1)
-    iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2)
-    iy2 = min(ay2, by2)
-    iw = max(0, ix2 - ix1)
-    ih = max(0, iy2 - iy1)
-    inter = iw * ih
-    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
-    union = area_a + area_b - inter
-    return (inter / union) if union > 0 else 0.0
-
-
-def _crop(frame: np.ndarray, bb: Tuple[int, int, int, int]) -> np.ndarray:
-    x1, y1, x2, y2 = bb
-    x1 = max(0, x1); y1 = max(0, y1)
-    x2 = min(frame.shape[1] - 1, x2); y2 = min(frame.shape[0] - 1, y2)
-    if x2 <= x1 or y2 <= y1:
-        return frame[0:1, 0:1]
-    return frame[y1:y2, x1:x2]
-
-
-def _color_match_score(crop_bgr: np.ndarray, target_bgr: Tuple[int, int, int]) -> float:
-    """
-    Higher = closer to jersey color.
-    Uses median in HSV (more stable vs lighting) and distance to target converted to HSV.
-    """
-    if crop_bgr.size == 0:
-        return -1e9
-
-    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-    med = np.median(hsv.reshape(-1, 3), axis=0)  # H,S,V
-
-    # target BGR -> HSV
-    tbgr = np.uint8([[list(target_bgr)]])
-    thsv = cv2.cvtColor(tbgr, cv2.COLOR_BGR2HSV)[0, 0].astype(np.float32)
-
-    # hue wraps; handle hue circular distance
-    dh = float(abs(med[0] - thsv[0]))
-    dh = min(dh, 180.0 - dh)
-    ds = float(abs(med[1] - thsv[1]))
-    dv = float(abs(med[2] - thsv[2]))
-
-    # weighted distance (tune weights)
-    dist = (2.0 * dh) + (0.5 * ds) + (0.2 * dv)
-    return -dist
-
-
+# -----------------------------
+# Data model
+# -----------------------------
 @dataclass
 class Click:
-    t: float  # seconds
-    x: float  # normalized 0-1
-    y: float  # normalized 0-1
+    """Normalized click in [0..1] coords plus timestamp seconds."""
+    t: float
+    x: float
+    y: float
 
 
-def _pick_box_from_click(
-    boxes: List[Tuple[int, int, int, int, float]],
-    click_xy_px: Tuple[float, float],
-) -> Optional[Tuple[int, int, int, int]]:
-    if not boxes:
-        return None
-    cx, cy = click_xy_px
-    best = None
-    best_d = 1e18
-    for x1, y1, x2, y2, conf in boxes:
-        if cx >= x1 and cx <= x2 and cy >= y1 and cy <= y2:
-            # inside box -> prefer smallest box that contains click
-            area = (x2 - x1) * (y2 - y1)
-            d = area
-        else:
-            bx, by = _bbox_center((x1, y1, x2, y2))
-            d = (bx - cx) ** 2 + (by - cy) ** 2
-        if d < best_d:
-            best_d = d
-            best = (x1, y1, x2, y2)
-    return best
+# --- Job runner wrapper for the web/API ---
+# The API enqueues `worker.tasks.process_job(job_id)` into Redis/RQ.
+# This function loads the job's setup + uploaded video from the job directory,
+# runs the tracker, and writes results.json + updates meta.json for the UI.
 
+def _projects_root() -> Path:
+    # worker/tasks.py -> worker/ -> Projects/
+    return Path(__file__).resolve().parents[1]
+
+def _jobs_root() -> Path:
+    # Allow override; default matches api/main.py (Projects/data/jobs)
+    env = os.getenv("SHIFTCLIPPER_JOBS_DIR") or os.getenv("JOBS_DIR")
+    if env:
+        return Path(env)
+    return _projects_root() / "data" / "jobs"
+
+def _job_dir(job_id: str) -> Path:
+    return _jobs_root() / job_id
+
+def _read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return default
+    except Exception:
+        return default
+
+def _write_json(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+def _set_meta(job_id: str, status: str, **extra):
+    jd = _job_dir(job_id)
+    mp = jd / "meta.json"
+    meta = _read_json(mp, {})
+    meta.update({
+        "job_id": job_id,
+        "status": status,
+        "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+    })
+    meta.update(extra)
+    _write_json(mp, meta)
+
+def process_job(job_id: str):
+    """RQ entrypoint: run a queued job created by the web UI."""
+    jd = _job_dir(job_id)
+    if not jd.exists():
+        raise FileNotFoundError(f"Job dir not found: {jd}")
+
+    in_mp4 = jd / "in.mp4"
+    if not in_mp4.exists():
+        _set_meta(
+            job_id,
+            "error",
+            stage="error",
+            progress=0,
+            message="Missing input video (in.mp4). Upload a video first.",
+        )
+        raise FileNotFoundError(f"Missing input video: {in_mp4}")
+
+    setup = _read_json(jd / "setup.json", {})
+    clicks_raw = setup.get("clicks") or []
+    clicks: List[Click] = []
+    for c in clicks_raw:
+        try:
+            clicks.append(
+                Click(
+                    t=float(c.get("t", 0.0)),
+                    x=float(c.get("x", 0.0)),
+                    y=float(c.get("y", 0.0)),
+                )
+            )
+        except Exception:
+            continue
+
+    player_number = (setup.get("player_number") or "").strip()
+    jersey_color = (setup.get("jersey_color") or "dark").strip().lower()
+    camera_mode = (setup.get("camera_mode") or "side").strip().lower()
+    verify_mode = bool(setup.get("verify_mode", False))
+    extend_sec = float(setup.get("extend_sec", 0))
+
+    out_dir = jd / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _set_meta(job_id, "processing", stage="processing", progress=35, message="Processing started.")
+
+    try:
+        results = run_tracker(
+            video_path=str(in_mp4),
+            out_dir=str(out_dir),
+            click_xy=clicks,
+            player_number=player_number,
+            jersey_color=jersey_color,
+            camera_mode=camera_mode,
+            verify_mode=verify_mode,
+            extend_sec=extend_sec,
+        )
+        _write_json(jd / "results.json", results)
+        _set_meta(job_id, "done", stage="done", progress=100, message="Done.", results=results)
+        return results
+    except Exception as e:
+        _set_meta(job_id, "error", stage="error", progress=100, message=f"Error: {type(e).__name__}: {e}")
+        raise
+
+
+# -----------------------------
+# Core tracker logic
+# -----------------------------
+def _ffprobe_duration_seconds(video_path: str) -> float:
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
+        ]
+        out = subprocess.check_output(cmd).decode("utf-8").strip()
+        return float(out)
+    except Exception:
+        return 0.0
+
+def _ensure_ffmpeg():
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found. Install it: apt-get install -y ffmpeg")
+
+def _load_model() -> YOLO:
+    # YOLO loads onto GPU automatically if torch+cuda available
+    return YOLO(YOLO_WEIGHTS)
 
 def run_tracker(
     video_path: str,
     out_dir: str,
-    camera_mode: str,
+    click_xy: List[Click],
     player_number: str,
-    jersey_color: str,
-    clicks: List[Dict],
-    extend_sec: int = 20,
-    verify_mode: bool = True,
-) -> Dict:
+    jersey_color: str = "dark",
+    camera_mode: str = "side",
+    verify_mode: bool = False,
+    extend_sec: float = 0.0,
+) -> Dict[str, Any]:
     """
-    Accuracy-first baseline tracker:
-    - YOLO person detections (v8x + higher imgsz)
-    - seed from 1-3 clicks (or more)
-    - greedy tracking by IOU + jersey-color score (helps avoid ID switches)
-    - clip span = when target present
+    Runs detection/tracking and produces outputs in out_dir.
+    Returns a results dict that will be written to results.json by process_job().
     """
-    _ensure_dir(out_dir)
-    clips_dir = os.path.join(out_dir, "clips")
-    _ensure_dir(clips_dir)
+    _ensure_ffmpeg()
 
-    fps, W, H = _ffprobe_fps_wh(video_path)
+    out_dir_p = Path(out_dir)
+    out_dir_p.mkdir(parents=True, exist_ok=True)
+
+    model = _load_model()
+
+    # Basic video info
     cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration_s = total_frames / fps if fps > 0 else 0
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
 
-    target_bgr = _safe_hex_to_bgr(jersey_color)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
-    # Convert clicks
-    click_objs = [Click(**c) for c in clicks]
-    click_objs = sorted(click_objs, key=lambda c: c.t)
+    duration = _ffprobe_duration_seconds(video_path)
+    if duration <= 0 and fps > 0 and total_frames > 0:
+        duration = total_frames / fps
 
-    # Seed: find best bboxes at click times
-    seed_boxes = []
-    seed_frames_debug = []
+    # Convert normalized clicks to pixel coords (still keep t)
+    clicks_px: List[Tuple[float, int, int]] = []
+    for c in click_xy:
+        x_px = int(max(0, min(1, c.x)) * max(1, width - 1))
+        y_px = int(max(0, min(1, c.y)) * max(1, height - 1))
+        clicks_px.append((float(c.t), x_px, y_px))
 
-    for c in click_objs:
-        frame_idx = max(0, min(total_frames - 1, int(round(c.t * fps))))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ok, frame = cap.read()
-        if not ok:
-            continue
-        boxes = _yolo_person_boxes(frame)
-        px = c.x * W
-        py = c.y * H
-        picked = _pick_box_from_click(boxes, (px, py))
-        seed_frames_debug.append({
-            "t": c.t,
-            "frame": frame_idx,
-            "dets": len(boxes),
-            "picked": list(picked) if picked else None,
-        })
-        if picked:
-            seed_boxes.append(picked)
+    # Main loop: run YOLO periodically (stride) and do simple nearest-to-click selection
+    detections_by_t: List[Dict[str, Any]] = []
 
-    if not seed_boxes:
-        return {
-            "status": "error",
-            "message": "No seed boxes found from clicks. Try clicking torso when player is visible.",
-            "debug": {"seed_frames": seed_frames_debug},
-        }
-
-    # Combine seed into one initial bbox (median coordinates)
-    sx1 = int(np.median([b[0] for b in seed_boxes]))
-    sy1 = int(np.median([b[1] for b in seed_boxes]))
-    sx2 = int(np.median([b[2] for b in seed_boxes]))
-    sy2 = int(np.median([b[3] for b in seed_boxes]))
-    current_bb = (sx1, sy1, sx2, sy2)
-
-    # Reset to start
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-    detect_stride = DETECT_STRIDE_DEFAULT  # max accuracy default: 1
-    last_dets = []
-    present_flags = [False] * total_frames
-
-    # tracking params
-    min_iou = 0.10
-    color_weight = 0.75  # higher = rely more on jersey color
-    iou_weight = 1.0
-
-    debug_samples = []
-    sample_every = max(1, int(round(fps * 0.5)))  # ~2 per second
-
-    for fi in range(total_frames):
+    frame_idx = 0
+    while True:
         ok, frame = cap.read()
         if not ok:
             break
 
-        if fi % detect_stride == 0:
-            last_dets = _yolo_person_boxes(frame)
+        t = frame_idx / fps
 
-        best = None
-        best_score = -1e18
+        if (frame_idx % DETECT_STRIDE) == 0:
+            # Ultralytics predict
+            preds = model.predict(
+                source=frame,
+                imgsz=YOLO_IMGSZ,
+                conf=YOLO_CONF,
+                verbose=False,
+                device=0 if os.getenv("CUDA_VISIBLE_DEVICES", "") != "" else None,
+            )
+            boxes = []
+            if preds and len(preds) > 0:
+                r = preds[0]
+                if r.boxes is not None and len(r.boxes) > 0:
+                    for b in r.boxes:
+                        xyxy = b.xyxy.cpu().numpy().tolist()[0]
+                        conf = float(b.conf.cpu().numpy().tolist()[0]) if b.conf is not None else 0.0
+                        cls = int(b.cls.cpu().numpy().tolist()[0]) if b.cls is not None else -1
+                        boxes.append({"xyxy": xyxy, "conf": conf, "cls": cls})
 
-        for x1, y1, x2, y2, conf in last_dets:
-            bb = (x1, y1, x2, y2)
+            # Pick "best" box near the closest click in time (if any)
+            chosen = None
+            if clicks_px and boxes:
+                # closest click by time
+                ct, cx, cy = min(clicks_px, key=lambda p: abs(p[0] - t))
+                # choose box whose center is closest to click point
+                def center_dist(box):
+                    x1, y1, x2, y2 = box["xyxy"]
+                    mx = (x1 + x2) / 2.0
+                    my = (y1 + y2) / 2.0
+                    return (mx - cx) ** 2 + (my - cy) ** 2
+                chosen = min(boxes, key=center_dist)
 
-            iou = _bbox_iou(current_bb, bb)
-            if iou <= 0 and fi > 0:
-                # allow reacquire, but still needs some reason
-                pass
-
-            crop = _crop(frame, bb)
-            cscore = _color_match_score(crop, target_bgr)
-
-            score = (iou_weight * iou) + (color_weight * (cscore / 100.0)) + (0.05 * conf)
-
-            if score > best_score:
-                best_score = score
-                best = bb
-
-        if best is not None:
-            # simple gate: accept if it isn't totally insane
-            iou = _bbox_iou(current_bb, best)
-            crop = _crop(frame, best)
-            cscore = _color_match_score(crop, target_bgr)
-            accept = (iou > min_iou) or (cscore > -40)  # -40 ~ “somewhat close” in HSV space
-
-            if accept:
-                current_bb = best
-                present_flags[fi] = True
-
-        if fi % sample_every == 0:
-            debug_samples.append({
-                "t": fi / fps,
-                "present": bool(present_flags[fi]),
-                "chosen": list(current_bb) if present_flags[fi] else None,
-                "boxes": len(last_dets),
-                "score": float(best_score) if best_score is not None else None,
-                "detect_stride": detect_stride,
-                "yolo_weights": YOLO_WEIGHTS,
-                "imgsz": YOLO_IMGSZ,
-                "conf": YOLO_CONF,
+            detections_by_t.append({
+                "t": t,
+                "frame": frame_idx,
+                "boxes": boxes,
+                "chosen": chosen,
             })
 
-        # Update progress in RQ (if running in worker)
-        job = get_current_job()
-        if job and fi % max(1, int(fps)) == 0:
-            pct = int(100 * fi / max(1, total_frames))
-            job.meta["progress"] = pct
-            job.save_meta()
+        frame_idx += 1
 
     cap.release()
 
-    # Build spans from present_flags
-    spans = []
-    in_span = False
-    s = 0
-    for i, p in enumerate(present_flags):
-        if p and not in_span:
-            in_span = True
-            s = i
-        elif (not p) and in_span:
-            in_span = False
-            e = i - 1
-            spans.append((s / fps, e / fps))
-    if in_span:
-        spans.append((s / fps, (len(present_flags) - 1) / fps))
-
-    # Expand spans with preroll/postroll and merge small gaps
-    pre_roll = 1.25
-    post_roll = 0.9
-    gap_merge = 1.25
-    min_clip_len = 3.0
-
-    expanded = []
-    for a, b in spans:
-        a2 = max(0.0, a - pre_roll)
-        b2 = min(duration_s, b + post_roll)
-        expanded.append((a2, b2))
-
-    expanded.sort()
-    merged = []
-    for a, b in expanded:
-        if not merged:
-            merged.append([a, b])
-        else:
-            if a <= merged[-1][1] + gap_merge:
-                merged[-1][1] = max(merged[-1][1], b)
-            else:
-                merged.append([a, b])
-
-    final_spans = [(a, b) for a, b in merged if (b - a) >= min_clip_len]
-
-    # Write clips
-    clips = []
-    for idx, (a, b) in enumerate(final_spans, start=1):
-        outp = os.path.join(clips_dir, f"clip_{idx:03d}.mp4")
-        _run([
-            "ffmpeg", "-y",
-            "-ss", f"{a:.3f}",
-            "-to", f"{b:.3f}",
-            "-i", video_path,
-            "-c", "copy",
-            outp
-        ])
-        clips.append({
-            "start": a,
-            "end": b,
-            "path": outp,
-            "url": outp,  # API may rewrite this elsewhere
-        })
-
-    # Combine
-    combined_path = os.path.join(out_dir, "combined.mp4")
-    if clips:
-        concat_list = os.path.join(out_dir, "concat.txt")
-        with open(concat_list, "w") as f:
-            for c in clips:
-                f.write(f"file '{c['path']}'\n")
-        _run([
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_list,
-            "-c", "copy",
-            combined_path
-        ])
-    else:
-        combined_path = None
-
-    return {
-        "status": "done",
-        "clips": clips,
-        "combined_path": combined_path,
-        "debug": {
-            "seed": {
-                "ok": True,
-                "seed_bbox": [sx1, sy1, sx2, sy2],
-                "seed_frames": seed_frames_debug,
-                "seed_count": len(seed_boxes),
-                "fps": fps,
-                "W": W,
-                "H": H,
-            },
-            "fps": fps,
-            "W": W,
-            "H": H,
-            "total_frames": total_frames,
-            "duration_s": duration_s,
-            "min_clip_len": min_clip_len,
-            "gap_merge": gap_merge,
-            "pre_roll": pre_roll,
-            "post_roll": post_roll,
-            "detect_stride": detect_stride,
-            "yolo_conf": YOLO_CONF,
-            "yolo_weights": YOLO_WEIGHTS,
-            "yolo_imgsz": YOLO_IMGSZ,
-            "debug_samples": debug_samples,
-            "spans": final_spans,
-        }
+    results = {
+        "ok": True,
+        "video_path": video_path,
+        "out_dir": str(out_dir_p),
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "frames": total_frames,
+        "duration_sec": duration,
+        "player_number": player_number,
+        "jersey_color": jersey_color,
+        "camera_mode": camera_mode,
+        "verify_mode": verify_mode,
+        "extend_sec": extend_sec,
+        "yolo": {
+            "weights": YOLO_WEIGHTS,
+            "imgsz": YOLO_IMGSZ,
+            "conf": YOLO_CONF,
+            "stride": DETECT_STRIDE,
+        },
+        "detections": detections_by_t[:5000],  # guardrail to prevent insane JSON sizes
     }
+
+    return results
 
