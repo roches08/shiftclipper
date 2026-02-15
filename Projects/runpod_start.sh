@@ -1,68 +1,91 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ShiftClipper RunPod start script (no guessing)
-# - creates venv if missing
-# - installs requirements
-# - starts Redis + RQ worker + API
-# - uses `python -m ...` so PATH issues cannot break (rq "No such file" etc)
+# ShiftClipper RunPod bootstrap (no guessing).
+# Run from: /workspace/shiftclipper/Projects
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="$ROOT_DIR"
 
 LOG_API=/workspace/api.log
 LOG_WORKER=/workspace/worker.log
 LOG_REDIS=/workspace/redis.log
 
-echo "[runpod_start] cwd: $PWD"
+echo "[runpod] working dir: $ROOT_DIR"
 
-# System deps
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y ffmpeg libgl1 libglib2.0-0
-
-# Virtualenv
-if [ ! -d ".venv" ]; then
-  echo "[runpod_start] creating venv..."
+# --- venv ---
+if [[ ! -d ".venv" ]]; then
+  echo "[runpod] creating venv..."
   python3 -m venv .venv
 fi
 
-# Activate venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
-python -m pip install --upgrade pip
+
+echo "[runpod] upgrading pip..."
+python -m pip install --upgrade pip wheel setuptools
 
 REQ_FILE="requirements.runpod.txt"
-if [ -f "requirements.runpod_pro.txt" ]; then
-  # If you are using the 'pro' tracking variant, keep this file present.
+if [[ -f "requirements.runpod_pro.txt" ]]; then
+  # If you've added the pro requirements file, prefer it.
   REQ_FILE="requirements.runpod_pro.txt"
 fi
 
-echo "[runpod_start] installing python deps from $REQ_FILE..."
+echo "[runpod] installing requirements from $REQ_FILE ..."
 python -m pip install -r "$REQ_FILE"
 
-# Ensure model weights present (optional; Ultralytics can also auto-download)
-if [ ! -f "yolov8s.pt" ]; then
-  echo "[runpod_start] downloading yolov8s.pt..."
-  python - <<'PY'
-from ultralytics.utils.downloads import safe_download
-safe_download('https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s.pt', file='yolov8s.pt')
-PY
+# --- start redis ---
+if pgrep -f "redis-server.*:6379" >/dev/null 2>&1; then
+  echo "[runpod] redis already running"
+else
+  echo "[runpod] starting redis..."
+  nohup redis-server --bind 0.0.0.0 --port 6379 > "$LOG_REDIS" 2>&1 &
+  sleep 0.5
 fi
 
-# Kill anything stale
-pkill -f "redis-server.*:6379" || true
-pkill -f "python -m rq worker" || true
-pkill -f "uvicorn api.main:app" || true
+# --- warm up models (pre-download weights so jobs don't look 'stuck') ---
+echo "[runpod] warming up models (YOLO + EasyOCR). This can take a few minutes only on first run..."
+python - <<'PY'
+import os
+from ultralytics import YOLO
 
-# Start Redis
-nohup redis-server --bind 0.0.0.0 --port 6379 > "$LOG_REDIS" 2>&1 &
+# YOLO weights (download/cache)
+w = os.environ.get("YOLO_WEIGHTS", "yolov8s.pt")
+YOLO(w)
+print("[warmup] YOLO ok:", w)
 
-# Start Worker (NO --serializer flags)
-nohup python -m rq worker jobs --url redis://127.0.0.1:6379 > "$LOG_WORKER" 2>&1 &
+# EasyOCR models (download/cache)
+try:
+    import easyocr
+    # GPU warmup can be heavy; CPU warmup is enough to cache the models
+    easyocr.Reader(['en'], gpu=False)
+    print("[warmup] EasyOCR ok")
+except Exception as e:
+    # OCR is optional; don't block startup if it fails
+    print("[warmup] EasyOCR warmup skipped:", e)
+PY
 
-# Start API
-nohup python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > "$LOG_API" 2>&1 &
+# --- start worker ---
+if pgrep -f "rq worker jobs" >/dev/null 2>&1; then
+  echo "[runpod] rq worker already running"
+else
+  echo "[runpod] starting rq worker..."
+  # IMPORTANT: do NOT pass --serializer/-S (RQ 2.0 treats 'pickle' as invalid attribute)
+  nohup "$ROOT_DIR/.venv/bin/rq" worker jobs --url redis://127.0.0.1:6379 > "$LOG_WORKER" 2>&1 &
+  sleep 0.5
+fi
+
+# --- start api ---
+if pgrep -f "uvicorn api.main:app" >/dev/null 2>&1; then
+  echo "[runpod] api already running"
+else
+  echo "[runpod] starting api..."
+  nohup "$ROOT_DIR/.venv/bin/uvicorn" api.main:app --host 0.0.0.0 --port 8000 --log-level info > "$LOG_API" 2>&1 &
+  sleep 0.5
+fi
 
 echo ""
 echo "Started:"
@@ -70,6 +93,6 @@ echo "  API:    tail -f $LOG_API"
 echo "  Worker: tail -f $LOG_WORKER"
 echo "  Redis:  tail -f $LOG_REDIS"
 echo ""
-echo "Quick health checks:"
-echo "  curl -sSf http://127.0.0.1:8000/ | head"
+echo "[runpod] Open the web UI via your RunPod exposed port (8000)."
+
 
