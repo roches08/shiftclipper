@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Always run from the folder that contains this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 export APP_ROOT="$SCRIPT_DIR"
 export JOBS_ROOT="${JOBS_ROOT:-$APP_ROOT/data/jobs}"
 export PYTHONPATH="$APP_ROOT:${PYTHONPATH:-}"
+
+# MAX accuracy defaults (override any time by setting env vars)
+export YOLO_WEIGHTS="${YOLO_WEIGHTS:-yolov8x.pt}"
+export YOLO_IMGSZ="${YOLO_IMGSZ:-960}"
+export YOLO_CONF="${YOLO_CONF:-0.25}"
+export DETECT_STRIDE="${DETECT_STRIDE:-1}"
 
 echo "[ShiftClipper] Ensuring system deps..."
 need_pkgs=()
@@ -26,11 +31,13 @@ echo "[ShiftClipper] Starting Redis..."
 redis-server --daemonize yes
 sleep 0.5
 
-echo "[ShiftClipper] Warming YOLO weights..."
+echo "[ShiftClipper] Warming YOLO weights: ${YOLO_WEIGHTS} (imgsz=${YOLO_IMGSZ}, conf=${YOLO_CONF})"
 python3 - << 'PY'
+import os
 from ultralytics import YOLO
-YOLO("yolov8n.pt")
-print("YOLO weights ready")
+w = os.getenv("YOLO_WEIGHTS", "yolov8x.pt")
+YOLO(w)
+print("YOLO weights ready:", w)
 PY
 
 echo "[ShiftClipper] Starting RQ worker..."
