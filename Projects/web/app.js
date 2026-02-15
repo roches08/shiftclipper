@@ -2,7 +2,8 @@
 // - Relative URLs (RunPod proxy-safe)
 // - XHR upload for progress
 // - Canvas overlay draws click circles
-// - Setup includes: camera_mode, player_number, jersey_color, extend_sec, verify_mode, clicks
+// - Setup includes: camera_mode, player_number, jersey_color, opponent_color, extend_sec, verify_mode, clicks
+// - Min/Max clicks configurable (default min=2, max=6)
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,6 +14,14 @@ const state = {
   clicks: [], // {t, x, y}
   lastStatus: null,
 };
+
+function num(v, fallback){
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function getMinClicks(){ return num($('minClicks')?.value, 2); }
+function getMaxClicks(){ return num($('maxClicks')?.value, 6); }
 
 function setPill(text){ $('pill').textContent = text || 'idle'; }
 
@@ -29,25 +38,46 @@ function updateButtons(meta){
   const haveJob = !!state.jobId;
   const proxyReady = !!(meta && meta.proxy_ready);
   const clickCount = state.clicks.length;
+  const minClicks = getMinClicks();
 
   $('btnUpload').disabled = !haveJob || !$('file').files?.length;
   $('btnSelect').disabled = !proxyReady;
   $('btnClearClicks').disabled = clickCount === 0;
-  $('btnSave').disabled = !haveJob || clickCount < 3;
+
+  // Save requires >= minClicks (NOT hardcoded 3)
+  $('btnSave').disabled = !haveJob || clickCount < minClicks;
+
   $('btnRun').disabled = !haveJob || !(meta && (meta.status === 'ready' || meta.stage === 'ready'));
   $('btnCancel').disabled = !haveJob;
 }
 
 function renderClicks(){
+  const minClicks = getMinClicks();
+  const maxClicks = getMaxClicks();
+
   $('clickCount').textContent = String(state.clicks.length);
-  $('clickWarn').textContent = state.clicks.length < 3 ? ' (need at least 3)' : '';
+
+  if(state.clicks.length < minClicks){
+    $('clickWarn').textContent = ` (need at least ${minClicks})`;
+  }else{
+    $('clickWarn').textContent = '';
+  }
+
+  if(state.clicks.length >= maxClicks){
+    $('clickWarn').textContent = ` (max ${maxClicks} reached)`;
+  }
+
   if(state.clicks.length === 0){
     $('clickList').textContent = '—';
     return;
   }
+
   $('clickList').textContent = state.clicks
     .slice(-12)
-    .map((c,i)=>`#${state.clicks.length - Math.min(12,state.clicks.length) + i + 1}: t=${c.t.toFixed(2)}s x=${c.x.toFixed(3)} y=${c.y.toFixed(3)}`)
+    .map((c,i)=>{
+      const idx = state.clicks.length - Math.min(12,state.clicks.length) + i + 1;
+      return `#${idx}: t=${c.t.toFixed(2)}s x=${c.x.toFixed(3)} y=${c.y.toFixed(3)}`;
+    })
     .join(' | ');
 }
 
@@ -86,13 +116,12 @@ function resizeOverlay(){
 }
 
 function drawOverlay(){
-  const v = $('vid');
   const c = $('overlay');
-  if(!v || !c) return;
+  if(!c) return;
   const ctx = c.getContext('2d');
   ctx.clearRect(0,0,c.width,c.height);
 
-  // draw click circles
+  // click circles
   for(const click of state.clicks){
     const x = click.x * c.width;
     const y = click.y * c.height;
@@ -117,10 +146,15 @@ async function pollStatus(loop=false){
       state.lastStatus = meta;
       show(meta);
       setPill(meta.stage || meta.status || 'unknown');
-      setBar(meta.progress ?? 0, `${meta.stage || meta.status || 'unknown'} — ${meta.progress ?? 0}% ${meta.message ? '• ' + meta.message : ''}`);
+      setBar(
+        meta.progress ?? 0,
+        `${meta.stage || meta.status || 'unknown'} — ${meta.progress ?? 0}% ${meta.message ? '• ' + meta.message : ''}`
+      );
 
       if(meta.proxy_ready && meta.proxy_url){
-        $('previewHint').textContent = 'Proxy ready. Click Select Player and click torso 3–8 times.';
+        const minClicks = getMinClicks();
+        const maxClicks = getMaxClicks();
+        $('previewHint').textContent = `Proxy ready. Click Select Player then click the player ${minClicks}–${maxClicks} times (torso).`;
         if(!$('vid').src.includes(meta.proxy_url)){
           setVideoSrc(meta.proxy_url);
         }
@@ -201,12 +235,24 @@ function uploadVideo(){
 async function saveSetup(){
   if(!state.jobId) return;
 
+  const minClicks = getMinClicks();
+  const maxClicks = getMaxClicks();
+
   const payload = {
     camera_mode: $('cameraMode').value,
     player_number: ($('playerNumber').value || '').trim(),
     jersey_color: $('jerseyColor').value,
-    extend_sec: Number($('extendSec').value || 20),
+    opponent_color: $('oppColor')?.value || null,
+
+    extend_sec: Number($('extendSec').value || 2),
     verify_mode: $('verifyMode').value === 'on',
+
+    // hints for backend (safe if ignored)
+    min_clicks: minClicks,
+    max_clicks: maxClicks,
+    use_color_filter: !!$('useColor')?.checked,
+    use_number_tracking: !!$('useNumber')?.checked,
+
     clicks: state.clicks,
     clicks_count: state.clicks.length,
   };
@@ -233,7 +279,7 @@ async function runJob(){
 }
 
 async function cancelJob(){
-  // Simple cancel placeholder: UI only; worker doesn’t implement stop yet
+  // UI-only placeholder
   setPill('cancel');
   setBar(0, 'Cancelled (UI only).');
 }
@@ -241,7 +287,13 @@ async function cancelJob(){
 function toggleSelect(){
   state.selectMode = !state.selectMode;
   $('btnSelect').textContent = state.selectMode ? 'Select Player (clicks ON)' : 'Select Player (clicks OFF)';
-  $('previewHint').textContent = state.selectMode ? 'Click torso 3–8 times on the player.' : 'Selection off.';
+  if(state.selectMode){
+    const minClicks = getMinClicks();
+    const maxClicks = getMaxClicks();
+    $('previewHint').textContent = `Clicks ON. Click the player ${minClicks}–${maxClicks} times (torso).`;
+  }else{
+    $('previewHint').textContent = 'Selection off.';
+  }
 }
 
 function clearClicks(){
@@ -253,6 +305,14 @@ function clearClicks(){
 
 function handleVideoClick(ev){
   if(!state.selectMode) return;
+
+  const maxClicks = getMaxClicks();
+  if(state.clicks.length >= maxClicks){
+    renderClicks();
+    updateButtons(state.lastStatus);
+    return;
+  }
+
   const v = $('vid');
   if(!v) return;
 
@@ -291,15 +351,15 @@ function renderClipsUi(res){
   });
 
   if(res.combined_url){
-    const hr = document.createElement('div');
-    hr.style.marginTop = '8px';
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '8px';
     const a = document.createElement('a');
     a.href = res.combined_url;
     a.target = '_blank';
     a.rel = 'noopener noreferrer';
     a.textContent = `▶ Combined video`;
-    hr.appendChild(a);
-    list.appendChild(hr);
+    wrap.appendChild(a);
+    list.appendChild(wrap);
   }
 
   el.appendChild(list);
@@ -317,9 +377,24 @@ function wire(){
   $('file').addEventListener('change', ()=> updateButtons(state.lastStatus));
   $('vid').addEventListener('click', handleVideoClick);
 
+  // re-render warnings when min/max changes
+  $('minClicks')?.addEventListener('change', ()=>{
+    renderClicks();
+    updateButtons(state.lastStatus);
+  });
+  $('maxClicks')?.addEventListener('change', ()=>{
+    // trim clicks if user lowers max below current count
+    const maxClicks = getMaxClicks();
+    if(state.clicks.length > maxClicks){
+      state.clicks = state.clicks.slice(0, maxClicks);
+      drawOverlay();
+    }
+    renderClicks();
+    updateButtons(state.lastStatus);
+  });
+
   window.addEventListener('resize', ()=>{ resizeOverlay(); drawOverlay(); });
   $('vid').addEventListener('loadedmetadata', ()=>{ resizeOverlay(); drawOverlay(); });
-  $('vid').addEventListener('timeupdate', ()=>{ /* keep overlay stable */ });
 
   setPill('idle');
   setBar(0, 'idle');

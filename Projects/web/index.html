@@ -20,6 +20,9 @@
     button { padding:8px 12px; border-radius:10px; border:1px solid #bbb; background:#fff; cursor:pointer; }
     button:disabled { opacity: .45; cursor:not-allowed; }
     pre { background:#0b1020; color:#e8eefc; padding:12px; border-radius:12px; overflow:auto; }
+    .hint { font-size:13px; color:#444; }
+    .small { font-size:12px; color:#666; }
+    .sep { width: 1px; height: 26px; background:#e5e5e5; display:inline-block; margin: 0 2px; }
   </style>
 </head>
 <body>
@@ -52,20 +55,50 @@
       <option value="tactical">tactical</option>
     </select>
 
+    <span class="sep"></span>
+
     <label>Jersey #</label>
-    <input id="playerNumber" type="text" inputmode="numeric" placeholder="e.g. 5" style="width:80px" />
+    <input id="playerNumber" type="text" inputmode="numeric" placeholder="e.g. 8" style="width:80px" />
 
     <label>Jersey color</label>
     <input id="jerseyColor" type="color" value="#1d3936" />
 
+    <label>Opponent color (optional)</label>
+    <input id="oppColor" type="color" value="#ffffff" />
+
+    <span class="sep"></span>
+
     <label>Auto-extend (sec)</label>
-    <input id="extendSec" type="number" min="0" max="60" value="20" style="width:90px" />
+    <input id="extendSec" type="number" min="0" max="60" value="2" style="width:90px" />
 
     <label>Verify</label>
     <select id="verifyMode">
       <option value="off" selected>off</option>
       <option value="on">on</option>
     </select>
+  </div>
+
+  <div style="margin-top:10px" class="row">
+    <label>Min clicks</label>
+    <select id="minClicks">
+      <option value="1">1</option>
+      <option value="2" selected>2</option>
+      <option value="3">3</option>
+    </select>
+
+    <label>Max clicks</label>
+    <select id="maxClicks">
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+      <option value="6" selected>6</option>
+      <option value="8">8</option>
+    </select>
+
+    <span class="sep"></span>
+
+    <label><input id="useColor" type="checkbox" checked /> Use color filter</label>
+    <label><input id="useNumber" type="checkbox" checked /> Use jersey-number tracking</label>
   </div>
 
   <div style="margin-top:10px" class="row">
@@ -76,10 +109,10 @@
     <button id="btnCancel" disabled>Cancel</button>
   </div>
 
-  <div style="margin-top:8px; font-size:13px; color:#444" id="previewHint">Upload a video to start.</div>
-  <div style="margin-top:6px; font-size:13px;">
+  <div style="margin-top:8px;" class="hint" id="previewHint">Upload a video to start.</div>
+  <div style="margin-top:6px;">
     Clicks: <b id="clickCount">0</b><span id="clickWarn"></span>
-    <div id="clickList" style="margin-top:6px; color:#666"></div>
+    <div id="clickList" class="small" style="margin-top:6px;"></div>
   </div>
 </div>
 
