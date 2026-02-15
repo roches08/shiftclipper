@@ -238,7 +238,8 @@ def run_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     # Long videos + detection can exceed the default RQ timeout (often 180s).
-    rq_job = q.enqueue("worker.tasks.process_job", job_id, job_timeout=3600)
+    from worker.tasks import process_job
+rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
 
     set_status(
         job_id,
