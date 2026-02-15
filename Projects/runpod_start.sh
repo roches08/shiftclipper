@@ -1,55 +1,70 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# ShiftClipper RunPod bootstrap (GPU-safe, one-command start)
+# Usage:
+#   bash runpod_start.sh
+#
+# Logs:
+#   /workspace/api.log
+#   /workspace/worker.log
 
-export APP_ROOT="$SCRIPT_DIR"
-export JOBS_ROOT="${JOBS_ROOT:-$APP_ROOT/data/jobs}"
-export PYTHONPATH="$APP_ROOT:${PYTHONPATH:-}"
+PROJECT_DIR="/workspace/shiftclipper/Projects"
+REDIS_URL="redis://127.0.0.1:6379"
 
-# MAX accuracy defaults (override any time by setting env vars)
-export YOLO_WEIGHTS="${YOLO_WEIGHTS:-yolov8x.pt}"
-export YOLO_IMGSZ="${YOLO_IMGSZ:-960}"
-export YOLO_CONF="${YOLO_CONF:-0.25}"
-export DETECT_STRIDE="${DETECT_STRIDE:-1}"
+echo "==> cd ${PROJECT_DIR}"
+cd "${PROJECT_DIR}"
 
-echo "[ShiftClipper] Ensuring system deps..."
-need_pkgs=()
-command -v ffmpeg >/dev/null 2>&1 || need_pkgs+=(ffmpeg)
-command -v redis-server >/dev/null 2>&1 || need_pkgs+=(redis-server)
+echo "==> System deps (ffmpeg, redis, curl, git)"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  ffmpeg redis-server curl git ca-certificates \
+  python3-venv python3-dev build-essential
+rm -rf /var/lib/apt/lists/*
 
-if [ ${#need_pkgs[@]} -gt 0 ]; then
-  apt-get update -y
-  apt-get install -y "${need_pkgs[@]}"
+echo "==> Python venv"
+if [ ! -d ".venv" ]; then
+  python3 -m venv .venv
 fi
+source .venv/bin/activate
+python -m pip install -U pip setuptools wheel
 
-echo "[ShiftClipper] Installing Python deps..."
-python3 -m pip install -r requirements.runpod.txt
+echo "==> Python deps (RunPod)"
+# Install your pinned app deps
+python -m pip install -r requirements.runpod.txt
 
-echo "[ShiftClipper] Starting Redis..."
-redis-server --daemonize yes
-sleep 0.5
+echo "==> PyTorch GPU (CUDA 12.1 wheels)"
+# L4 pods are typically CUDA 12.x. cu121 wheels are the safest default.
+python -m pip install --upgrade --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
 
-echo "[ShiftClipper] Warming YOLO weights: ${YOLO_WEIGHTS} (imgsz=${YOLO_IMGSZ}, conf=${YOLO_CONF})"
-python3 - << 'PY'
-import os
-from ultralytics import YOLO
-w = os.getenv("YOLO_WEIGHTS", "yolov8x.pt")
-YOLO(w)
-print("YOLO weights ready:", w)
+echo "==> Quick GPU sanity"
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("gpu:", torch.cuda.get_device_name(0))
 PY
 
-echo "[ShiftClipper] Starting RQ worker..."
-pkill -f "rq worker" >/dev/null 2>&1 || true
-nohup rq worker jobs --url redis://127.0.0.1:6379 > /workspace/worker.log 2>&1 &
+echo "==> Redis"
+redis-server --daemonize yes
+redis-cli ping
 
-echo "[ShiftClipper] Starting API..."
-pkill -f uvicorn >/dev/null 2>&1 || true
-nohup uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > /workspace/api.log 2>&1 &
+echo "==> Stop any old processes (best-effort)"
+pkill -f "uvicorn api.main:app" >/dev/null 2>&1 || true
+pkill -f "rq worker jobs" >/dev/null 2>&1 || true
 
-sleep 1
-echo "[ShiftClipper] Ready."
-echo "Open: http://<pod-ip>:8000"
-echo "Logs: tail -f /workspace/api.log /workspace/worker.log"
+echo "==> Start RQ worker"
+nohup .venv/bin/rq worker jobs --url "${REDIS_URL}" > /workspace/worker.log 2>&1 &
 
+echo "==> Start API"
+nohup .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > /workspace/api.log 2>&1 &
+
+echo ""
+echo "✅ Started."
+echo "API log:    tail -n 200 /workspace/api.log"
+echo "Worker log: tail -n 200 /workspace/worker.log"
+echo ""
+echo "If the UI says 'Queued for processing' forever, run:"
+echo "  tail -n 200 /workspace/worker.log"
