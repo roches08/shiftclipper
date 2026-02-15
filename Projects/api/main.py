@@ -176,8 +176,8 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
 
-    ext = os.path.splitext(file.filename or "")[1] or ".mp4"
-    in_path = str(jd / f"input{ext}")
+    # Always save to a single predictable filename so the worker/UI agree.
+    in_path = str(jd / "in.mp4")
     proxy_path = str(jd / "input_proxy.mp4")
 
     set_status(job_id, "uploading", extra={"progress": 5, "message": "Uploading…", "proxy_ready": False})
@@ -188,6 +188,13 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
             if not chunk:
                 break
             f.write(chunk)
+
+    # Persist metadata for the worker (this was missing before)
+    write_json(jd / "meta.json", {
+        "video_path": in_path,
+        "orig_filename": file.filename,
+        "uploaded_at": time.time(),
+    })
 
     set_status(job_id, "uploaded", extra={
         "video_path": in_path,
@@ -201,6 +208,11 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
     if not ok:
         set_status(job_id, "error", extra={"progress": 0, "message": "Proxy creation failed (ffmpeg)."})
         raise HTTPException(status_code=500, detail="Proxy creation failed")
+
+    # Store proxy path too (useful for UI)
+    meta = read_json(jd / "meta.json", {})
+    meta["proxy_path"] = proxy_path
+    write_json(jd / "meta.json", meta)
 
     set_status(job_id, "ready", extra={
         "proxy_path": proxy_path,
@@ -237,22 +249,41 @@ def run_job(job_id: str):
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Make sure we have an input video before we queue work
+    meta = read_json(jd / "meta.json", {})
+    video_path = meta.get("video_path")
+    if not video_path or not Path(video_path).exists():
+        # Fallback: accept common filenames if meta.json is missing/old
+        for cand in [jd / "in.mp4", jd / "input.mp4", jd / "input.mov", jd / "input.mkv"]:
+            if cand.exists():
+                video_path = str(cand)
+                meta["video_path"] = video_path
+                write_json(jd / "meta.json", meta)
+                break
+
+    if not video_path or not Path(video_path).exists():
+        set_status(
+            job_id,
+            "error",
+            stage="error",
+            progress=0,
+            message="Missing input video (in.mp4). Upload a video first.",
+        )
+        raise HTTPException(status_code=400, detail="Missing input video")
+
     # Long videos + detection can exceed the default RQ timeout (often 180s).
     from worker.tasks import process_job
-
     rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
 
     set_status(
         job_id,
         "queued",
-        extra={
-            "rq_id": rq_job.get_id(),
-            "progress": 30,
-            "message": "Queued for processing.",
-        },
+        stage="queued",
+        progress=30,
+        message="Queued for processing.",
+        rq_id=rq_job.get_id(),
     )
-    return {"rq_id": rq_job.get_id()}
-
+    return {"rq_id": rq_job.get_id(), "job_id": job_id}
 
 
 @app.get("/jobs/{job_id}/results")
