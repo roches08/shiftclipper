@@ -10,18 +10,18 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# NEW: DeepSORT tracker
+# DeepSORT tracker
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 """
-Worker: YOLO + DeepSORT tracker (accurate identity persistence)
+Worker: YOLO + DeepSORT tracker (identity persistence)
 
 Pipeline:
-1) Use clicks to seed who the player is (seed bbox).
-2) Run YOLO "person" detection at a stride.
+1) Use clicks (2-3) to seed who the player is (seed bbox).
+2) Run YOLO "person" detection at a stride on frames (supported source type).
 3) Feed detections to DeepSORT to get stable track IDs.
 4) Lock onto a target track ID based on click/seed proximity.
-5) Build "present spans" (sticky + merge gaps + pre/post roll + min clip)
+5) Build presence spans (sticky + merge gaps + pre/post roll + min clip)
 6) Cut clips and concat into combined.mp4
 """
 
@@ -41,591 +41,495 @@ def _read_json(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _write_json(path: Path, obj: Any) -> None:
+def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _set_status(job_id: str, **fields: Any) -> None:
-    mp = _job_dir(job_id) / "meta.json"
-    meta = _read_json(mp, {})
-    meta.update(fields)
-    meta["job_id"] = job_id
-    meta["updated_at"] = time.time()
-    _write_json(mp, meta)
-
-
-def _ffmpeg_cut(in_path: str, out_path: str, start: float, end: float) -> None:
-    dur = max(0.05, end - start)
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+def _ffprobe_duration(video_path: Path) -> float:
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{start:.3f}",
-        "-i", in_path,
-        "-t", f"{dur:.3f}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
-        out_path,
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
     ]
-    subprocess.run(cmd, check=False)
+    out = subprocess.check_output(cmd).decode("utf-8").strip()
+    return float(out)
 
 
-def _ffmpeg_concat(file_list_path: str, out_path: str) -> None:
+def _ffprobe_fps(video_path: Path) -> float:
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "concat", "-safe", "0",
-        "-i", file_list_path,
-        "-c", "copy",
-        out_path,
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
     ]
-    r = subprocess.run(cmd, check=False)
-    if r.returncode != 0 or (not os.path.exists(out_path)) or os.path.getsize(out_path) < 1024:
-        cmd2 = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "concat", "-safe", "0",
-            "-i", file_list_path,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            out_path,
-        ]
-        subprocess.run(cmd2, check=False)
+    out = subprocess.check_output(cmd).decode("utf-8").strip()
+    if "/" in out:
+        a, b = out.split("/")
+        a = float(a)
+        b = float(b)
+        return a / b if b else 30.0
+    return float(out)
 
 
-def _clip_box(x1, y1, x2, y2, w, h):
-    x1 = max(0, min(int(x1), w - 1))
-    y1 = max(0, min(int(y1), h - 1))
-    x2 = max(0, min(int(x2), w - 1))
-    y2 = max(0, min(int(y2), h - 1))
-    if x2 <= x1:
-        x2 = min(w - 1, x1 + 1)
-    if y2 <= y1:
-        y2 = min(h - 1, y1 + 1)
-    return x1, y1, x2, y2
-
-
-def _load_model(yolo_weights: str = "yolov8s.pt") -> YOLO:
-    """
-    Accuracy-first default: yolov8s.pt (better than v8n on hockey broadcast).
-    You can override via setup.json: "yolo_weights": "yolov8n.pt" or "yolov8m.pt"
-    """
+def _ensure_yolo(weights: str = "yolov8s.pt") -> YOLO:
     global _YOLO_MODEL
     if _YOLO_MODEL is None:
-        _YOLO_MODEL = YOLO(yolo_weights)
+        _YOLO_MODEL = YOLO(weights)
     return _YOLO_MODEL
 
 
-def _yolo_person_boxes(frame_bgr: np.ndarray, conf: float = 0.30, yolo_weights: str = "yolov8s.pt") -> List[Tuple[int, int, int, int, float]]:
-    """Run YOLO person detection on a single frame (BGR ndarray).
+def _norm_click_to_px(click: Dict[str, float], W: int, H: int) -> Tuple[int, int]:
+    x = int(round(float(click["x"]) * W))
+    y = int(round(float(click["y"]) * H))
+    return x, y
 
-    Ultralytics input handling has changed across versions; to avoid "Unsupported image type"
-    errors we:
-      - convert to RGB uint8 contiguous
-      - call predict with `source=...` and fall back to `[source]` if needed
+
+def _pick_seed_bbox_from_clicks(
+    cap: cv2.VideoCapture,
+    yolo: YOLO,
+    clicks: List[Dict[str, float]],
+    fps: float,
+    W: int,
+    H: int,
+    yolo_conf: float,
+) -> Tuple[List[int], List[Dict[str, Any]]]:
     """
-    model = _load_model(yolo_weights=yolo_weights)
+    For each click: run YOLO on that frame, pick the person box containing/closest to the click.
+    Then fuse into a single seed bbox (median corners).
+    """
+    seed_frames_debug: List[Dict[str, Any]] = []
+    picked_boxes: List[List[int]] = []
 
-    if frame_bgr is None:
-        return []
+    for c in clicks:
+        t = float(c["t"])
+        frame_idx = int(round(t * fps))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            seed_frames_debug.append({"t": t, "frame": frame_idx, "dets": 0, "picked": None})
+            continue
 
-    # BGR -> RGB, make sure it's uint8 contiguous (Ultralytics can be picky)
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    if rgb.dtype != np.uint8:
-        rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-    rgb = np.ascontiguousarray(rgb)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = yolo.predict(rgb, verbose=False, conf=yolo_conf, classes=[0])  # class 0 = person
+        boxes = []
+        if res and len(res) > 0 and res[0].boxes is not None:
+            for b in res[0].boxes.xyxy.cpu().numpy().tolist():
+                x1, y1, x2, y2 = map(int, b[:4])
+                boxes.append([x1, y1, x2, y2])
 
-    try:
-        res = model.predict(source=rgb, conf=conf, classes=[0], verbose=False)
-    except TypeError:
-        # Some versions only accept list/iterables of images
-        res = model.predict(source=[rgb], conf=conf, classes=[0], verbose=False)
-    except Exception:
-        # Last resort: also try list form
-        res = model.predict(source=[rgb], conf=conf, classes=[0], verbose=False)
+        cx, cy = _norm_click_to_px(c, W, H)
 
-    if not res:
-        return []
-    r0 = res[0]
-    if r0.boxes is None or len(r0.boxes) == 0:
-        return []
+        picked = None
+        best = 1e18
+        for (x1, y1, x2, y2) in boxes:
+            inside = (x1 <= cx <= x2) and (y1 <= cy <= y2)
+            mx = (x1 + x2) * 0.5
+            my = (y1 + y2) * 0.5
+            d = (mx - cx) ** 2 + (my - cy) ** 2
+            score = d * (0.25 if inside else 1.0)
+            if score < best:
+                best = score
+                picked = [x1, y1, x2, y2]
 
-    out: List[Tuple[int, int, int, int, float]] = []
-    xyxy = r0.boxes.xyxy.cpu().numpy()
-    confs = r0.boxes.conf.cpu().numpy()
-    for (x1, y1, x2, y2), c in zip(xyxy, confs):
-        out.append((int(x1), int(y1), int(x2), int(y2), float(c)))
-    return out
+        seed_frames_debug.append({"t": t, "frame": frame_idx, "dets": len(boxes), "picked": picked})
+        if picked is not None:
+            picked_boxes.append(picked)
+
+    if not picked_boxes:
+        # fallback seed box (center-ish) so pipeline doesn't crash
+        seed = [int(W * 0.45), int(H * 0.35), int(W * 0.55), int(H * 0.75)]
+        return seed, seed_frames_debug
+
+    arr = np.array(picked_boxes, dtype=np.float32)
+    seed = np.median(arr, axis=0).astype(int).tolist()
+    return seed, seed_frames_debug
 
 
-def _seed_from_clicks(video_path: str, clicks: List[Dict[str, Any]], conf: float = 0.30, yolo_weights: str = "yolov8s.pt") -> Dict[str, Any]:
-    cap = cv2.VideoCapture(video_path)
+def _iou(a: List[int], b: List[int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    a_area = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    b_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+    denom = (a_area + b_area - inter)
+    return float(inter) / float(denom) if denom else 0.0
+
+
+def track_presence_spans(
+    video_path: Path,
+    clicks: List[Dict[str, float]],
+    detect_stride: int = 3,
+    yolo_conf: float = 0.25,
+    dist_gate_norm: float = 0.18,
+    sticky_seconds: float = 1.5,
+    gap_merge: float = 2.0,
+    pre_roll: float = 4.0,
+    post_roll: float = 1.5,
+    min_clip_len: float = 20.0,
+    device: Optional[str] = None,
+) -> Tuple[List[Tuple[float, float]], Dict[str, Any]]:
+    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        return {"ok": False, "error": "Could not open video"}
+        raise RuntimeError(f"Could not open video: {video_path}")
 
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    fps = _ffprobe_fps(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration_s = float(total_frames) / float(fps) if fps > 0 and total_frames > 0 else _ffprobe_duration(video_path)
+
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
-    picked: List[Tuple[int, int, int, int]] = []
-    seed_frames_debug: List[Dict[str, Any]] = []
+    yolo = _ensure_yolo("yolov8s.pt")
+    if device is not None:
+        # ultralytics accepts device in predict; we pass per-call below
+        pass
 
-    for c in clicks:
-        t = float(c.get("t", 0.0))
-        x = float(c.get("x", 0.5))
-        y = float(c.get("y", 0.5))
+    # Build seed bbox using 2-3 clicks (recommended)
+    seed_bbox, seed_frames_debug = _pick_seed_bbox_from_clicks(cap, yolo, clicks, fps, W, H, yolo_conf)
 
-        frame_idx = max(0, int(round(t * fps)))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    # DeepSORT tracker
+    tracker = DeepSort(
+        max_age=30,
+        n_init=2,
+        max_iou_distance=0.7,
+        max_cosine_distance=0.4,
+        nn_budget=None,
+        override_track_class=None,
+    )
+
+    # We will lock onto one track_id that overlaps seed_bbox early on
+    target_track_id: Optional[int] = None
+
+    present_flags = []
+    debug_samples = []
+
+    # rewind
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frame_idx = 0
+
+    # distance gate in pixels
+    dist_gate_px = dist_gate_norm * math.sqrt(W * W + H * H)
+
+    last_good_bbox = seed_bbox[:]  # keep last bbox to help gating
+
+    while True:
         ok, frame = cap.read()
-        if not ok:
+        if not ok or frame is None:
+            break
+
+        t = frame_idx / fps if fps > 0 else 0.0
+
+        if frame_idx % detect_stride != 0:
+            # just carry presence as unknown; we’ll fill with sticky later
+            present_flags.append((t, None, None, None, None, None))
+            frame_idx += 1
             continue
 
-        boxes = _yolo_person_boxes(frame, conf=conf, yolo_weights=yolo_weights)
-        bb = _pick_nearest_box_to_click(boxes, (x, y), W, H)
-        seed_frames_debug.append({
-            "t": t,
-            "frame": frame_idx,
-            "dets": len(boxes),
-            "picked": list(bb) if bb else None
-        })
-        if bb:
-            picked.append(bb)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = yolo.predict(
+            rgb,
+            verbose=False,
+            conf=yolo_conf,
+            classes=[0],
+            device=device if device is not None else None,
+        )
+
+        dets = []
+        boxes = []
+        if res and len(res) > 0 and res[0].boxes is not None:
+            for b, conf in zip(res[0].boxes.xyxy.cpu().numpy(), res[0].boxes.conf.cpu().numpy()):
+                x1, y1, x2, y2 = map(int, b[:4].tolist())
+                boxes.append([x1, y1, x2, y2])
+                # DeepSORT wants: [x, y, w, h], confidence, class
+                dets.append(([x1, y1, x2 - x1, y2 - y1], float(conf), "person"))
+
+        tracks = tracker.update_tracks(dets, frame=frame)
+
+        # Convert tracks to xyxy
+        track_boxes = []
+        for trk in tracks:
+            if not trk.is_confirmed():
+                continue
+            ltrb = trk.to_ltrb()
+            x1, y1, x2, y2 = map(int, ltrb)
+            track_boxes.append((trk.track_id, [x1, y1, x2, y2]))
+
+        chosen = None
+        chosen_id = None
+        score = None
+        dist = None
+
+        # Acquire target id if not set (use IoU with seed_bbox)
+        if target_track_id is None:
+            best_iou = 0.0
+            best = None
+            for tid, bb in track_boxes:
+                i = _iou(bb, seed_bbox)
+                if i > best_iou:
+                    best_iou = i
+                    best = (tid, bb)
+            if best is not None and best_iou >= 0.10:
+                target_track_id, chosen = best[0], best[1]
+                chosen_id = target_track_id
+                last_good_bbox = chosen[:]
+
+        # If we have a target id, find it
+        if target_track_id is not None:
+            found = None
+            for tid, bb in track_boxes:
+                if tid == target_track_id:
+                    found = bb
+                    break
+
+            if found is not None:
+                # gate by distance from last bbox center (helps avoid ID switches)
+                lx1, ly1, lx2, ly2 = last_good_bbox
+                lcx, lcy = (lx1 + lx2) * 0.5, (ly1 + ly2) * 0.5
+                fx1, fy1, fx2, fy2 = found
+                fcx, fcy = (fx1 + fx2) * 0.5, (fy1 + fy2) * 0.5
+                d = math.sqrt((fcx - lcx) ** 2 + (fcy - lcy) ** 2)
+                dist = d
+
+                if d <= dist_gate_px:
+                    chosen = found
+                    chosen_id = target_track_id
+                    last_good_bbox = chosen[:]
+
+        present = chosen is not None
+
+        # score: use IoU with last_good_bbox (higher is better)
+        if chosen is not None:
+            score = _iou(chosen, last_good_bbox)
+
+        present_flags.append((t, present, chosen, score, None, dist))
+
+        # keep a small debug sample
+        if len(debug_samples) < 400:
+            debug_samples.append({
+                "t": t,
+                "present": bool(present),
+                "chosen": chosen,
+                "score": score,
+                "dist": dist,
+                "boxes": len(boxes),
+                "tracks": len(track_boxes),
+                "target_id": target_track_id
+            })
+
+        frame_idx += 1
 
     cap.release()
 
-    if len(picked) < 1:
-        return {
-            "ok": False,
-            "error": "No seed detections found from clicks",
-            "seed_frames": seed_frames_debug,
-            "fps": fps, "W": W, "H": H
-        }
+    # ---- Convert sparse present_flags into spans with sticky/gap merge ----
+    times = [x[0] for x in present_flags]
+    pres = [x[1] for x in present_flags]
 
-    # Filter outliers by area
-    areas = np.array([(x2 - x1) * (y2 - y1) for (x1, y1, x2, y2) in picked], dtype=np.float32)
-    med_area = float(np.median(areas))
-    keep: List[Tuple[int, int, int, int]] = []
-    for bb, a in zip(picked, areas):
-        if a < med_area * 0.35 or a > med_area * 2.8:
-            continue
-        keep.append(bb)
-    if keep:
-        picked = keep
+    # Treat None as False initially; sticky below will recover short misses
+    pres_bool = [bool(p) for p in pres]
 
-    xs1 = int(np.median([b[0] for b in picked]))
-    ys1 = int(np.median([b[1] for b in picked]))
-    xs2 = int(np.median([b[2] for b in picked]))
-    ys2 = int(np.median([b[3] for b in picked]))
-
-    # Clamp overly huge seed
-    bw = xs2 - xs1
-    bh = ys2 - ys1
-    max_w = int(0.50 * W)
-    max_h = int(0.70 * H)
-
-    if bw > max_w:
-        cx = (xs1 + xs2) // 2
-        xs1 = max(0, cx - max_w // 2)
-        xs2 = min(W - 1, cx + max_w // 2)
-
-    if bh > max_h:
-        cy = (ys1 + ys2) // 2
-        ys1 = max(0, cy - max_h // 2)
-        ys2 = min(H - 1, cy + max_h // 2)
-
-    return {
-        "ok": True,
-        "seed_bbox": (xs1, ys1, xs2, ys2),
-        "seed_frames": seed_frames_debug,
-        "seed_count": len(picked),
-        "fps": fps, "W": W, "H": H
-    }
-
-
-def _build_presence_spans(
-    times_present: List[float],
-    gap_merge: float,
-    pre_roll: float,
-    post_roll: float,
-    min_len: float,
-    max_clip_seconds: float = 18.0
-) -> List[Tuple[float, float]]:
-    if not times_present:
-        return []
-
-    times_present = sorted(times_present)
+    # Sticky fill (if present within +/- sticky_seconds, keep present)
+    if sticky_seconds > 0 and fps > 0:
+        sticky_frames = int(round(sticky_seconds * fps))
+        pres2 = pres_bool[:]
+        for i in range(len(pres_bool)):
+            if pres_bool[i]:
+                lo = max(0, i - sticky_frames)
+                hi = min(len(pres_bool) - 1, i + sticky_frames)
+                for k in range(lo, hi + 1):
+                    pres2[k] = True
+        pres_bool = pres2
 
     spans: List[Tuple[float, float]] = []
-    s = times_present[0]
-    e = times_present[0]
-    for t in times_present[1:]:
-        if (t - e) <= gap_merge:
-            e = t
-        else:
-            spans.append((max(0.0, s - pre_roll), e + post_roll))
-            s = t
-            e = t
-    spans.append((max(0.0, s - pre_roll), e + post_roll))
+    in_span = False
+    s0 = 0.0
 
-    merged: List[List[float]] = []
-    for (s, e) in spans:
-        if not merged:
-            merged.append([s, e])
-            continue
-        if (e - s) >= min_len:
-            merged.append([s, e])
-            continue
-        ps, pe = merged[-1]
-        if s - pe <= gap_merge:
-            merged[-1][1] = max(pe, e)
-        else:
-            merged.append([s, e])
+    for i, p in enumerate(pres_bool):
+        t = times[i]
+        if p and not in_span:
+            in_span = True
+            s0 = t
+        elif (not p) and in_span:
+            in_span = False
+            spans.append((s0, t))
 
-    final: List[Tuple[float, float]] = []
-    for s, e in merged:
-        length = e - s
-        if length < min_len:
-            continue
-        if length > max_clip_seconds:
-            cur = s
-            while cur < e:
-                nxt = min(cur + max_clip_seconds, e)
-                if (nxt - cur) >= min_len:
-                    final.append((cur, nxt))
-                cur = nxt
-        else:
-            final.append((s, e))
+    if in_span:
+        spans.append((s0, duration_s))
 
-    return final
+    # Merge gaps smaller than gap_merge
+    if gap_merge > 0 and spans:
+        merged = [spans[0]]
+        for a, b in spans[1:]:
+            pa, pb = merged[-1]
+            if a - pb <= gap_merge:
+                merged[-1] = (pa, b)
+            else:
+                merged.append((a, b))
+        spans = merged
+
+    # Apply pre/post roll and min clip length
+    final_spans = []
+    for a, b in spans:
+        a2 = max(0.0, a - pre_roll)
+        b2 = min(duration_s, b + post_roll)
+        if (b2 - a2) >= min_clip_len:
+            final_spans.append((a2, b2))
+
+    debug = {
+        "seed": {
+            "seed_bbox": seed_bbox,
+            "seed_frames": seed_frames_debug,
+            "seed_count": len(clicks),
+        },
+        "fps": fps,
+        "W": W,
+        "H": H,
+        "total_frames": total_frames,
+        "duration_s": duration_s,
+        "min_clip_len": min_clip_len,
+        "gap_merge": gap_merge,
+        "sticky_seconds": sticky_seconds,
+        "pre_roll": pre_roll,
+        "post_roll": post_roll,
+        "detect_stride": detect_stride,
+        "yolo_conf": yolo_conf,
+        "dist_gate_norm": dist_gate_norm,
+        "dist_gate_px": dist_gate_px,
+        "debug_samples": debug_samples,
+        "spans": final_spans,
+        "target_track_id": target_track_id,
+    }
+
+    return final_spans, debug
+
+
+def _run(cmd: List[str]) -> None:
+    subprocess.check_call(cmd)
+
+
+def _cut_clip(in_path: Path, out_path: Path, start: float, end: float) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss", f"{start:.3f}",
+        "-to", f"{end:.3f}",
+        "-i", str(in_path),
+        "-c", "copy",
+        str(out_path),
+    ]
+    _run(cmd)
+
+
+def _concat_clips(clip_paths: List[Path], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    list_file = out_path.parent / "concat_list.txt"
+    list_file.write_text("\n".join([f"file '{p.as_posix()}'" for p in clip_paths]), encoding="utf-8")
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-c", "copy",
+        str(out_path),
+    ]
+    _run(cmd)
 
 
 def process_job(job_id: str) -> Dict[str, Any]:
-    try:
-        jd = _job_dir(job_id)
-        setup = _read_json(jd / "setup.json", {})
-        meta = _read_json(jd / "meta.json", {})
+    job_dir = _job_dir(job_id)
+    in_path = job_dir / "in.mp4"
+    setup_path = job_dir / "setup.json"
+    status_path = job_dir / "status.json"
 
-        video_path = meta.get("video_path")
-        if not video_path or not os.path.exists(video_path):
-            _set_status(job_id, status="error", stage="error", progress=0, error="Missing video. Upload first.")
-            return {"status": "error", "error": "Missing video"}
+    setup = _read_json(setup_path, {})
+    clicks = setup.get("clicks", []) or []
 
-        clicks = setup.get("clicks") or setup.get("seeds") or []
-        if not clicks:
-            _set_status(job_id, status="error", stage="error", progress=0, error="No clicks found. Click the player at least 3 times.")
-            return {"status": "error", "error": "No clicks"}
+    # Recommend 2-3 clicks; but allow 1+
+    if len(clicks) < 1:
+        raise RuntimeError("No clicks provided. Provide at least 1 click to seed tracking.")
 
-        # Accuracy-first defaults
-        yolo_weights = str(setup.get("yolo_weights", "yolov8s.pt"))
-        conf = float(setup.get("yolo_conf", 0.30))
-        detect_stride = int(setup.get("detect_stride", 2))  # YOLO every 2 frames is accurate and manageable on L4
+    # Parameters (safe defaults)
+    detect_stride = int(setup.get("detect_stride", 3))
+    yolo_conf = float(setup.get("yolo_conf", 0.25))
+    dist_gate_norm = float(setup.get("dist_gate_norm", 0.18))
 
-        # Pro hockey clip shaping defaults
-        min_clip_len = float(setup.get("min_clip_len", 5.0))
-        gap_merge = float(setup.get("gap_merge", 1.25))
-        pre_roll = float(setup.get("pre_roll", 1.25))
-        post_roll = float(setup.get("post_roll", 0.90))
-        sticky_seconds = float(setup.get("sticky_seconds", 0.55))
-        max_clip_seconds = float(setup.get("max_clip_seconds", 18.0))
+    sticky_seconds = float(setup.get("sticky_seconds", 1.5))
+    gap_merge = float(setup.get("gap_merge", 2.0))
+    pre_roll = float(setup.get("pre_roll", 4.0))
+    post_roll = float(setup.get("post_roll", 1.5))
+    min_clip_len = float(setup.get("min_clip_len", 20.0))
 
-        # DeepSORT tuning (accuracy-focused)
-        tracker = DeepSort(
-            max_age=int(setup.get("ds_max_age", 45)),
-            n_init=int(setup.get("ds_n_init", 2)),
-            max_iou_distance=float(setup.get("ds_max_iou", 0.8)),
-            max_cosine_distance=float(setup.get("ds_max_cos", 0.15)),
-            nn_budget=int(setup.get("ds_nn_budget", 100)),
-        )
+    # Update job status
+    status = _read_json(status_path, {})
+    status.update({
+        "job_id": job_id,
+        "status": "running",
+        "stage": "tracking",
+        "progress": 5,
+        "message": "Tracking player…",
+        "updated_at": time.time(),
+        "setup": setup,
+    })
+    _write_json(status_path, status)
 
-        # ROI detection after lock (reduces false candidates + speeds up)
-        roi_enable = bool(setup.get("roi_enable", True))
-        roi_pad_frac = float(setup.get("roi_pad_frac", 0.55))  # 0.4–0.7 reasonable
+    spans, debug = track_presence_spans(
+        in_path,
+        clicks=clicks,
+        detect_stride=detect_stride,
+        yolo_conf=yolo_conf,
+        dist_gate_norm=dist_gate_norm,
+        sticky_seconds=sticky_seconds,
+        gap_merge=gap_merge,
+        pre_roll=pre_roll,
+        post_roll=post_roll,
+        min_clip_len=min_clip_len,
+        device="0" if os.environ.get("CUDA_VISIBLE_DEVICES") not in (None, "", "-1") else None,
+    )
 
-        _set_status(job_id, status="processing", stage="seed", progress=35, message="Seeding player from clicks…")
+    # Cut clips
+    clips_dir = job_dir / "clips"
+    clip_infos = []
+    clip_paths = []
 
-        seed_info = _seed_from_clicks(video_path, clicks, conf=conf, yolo_weights=yolo_weights)
-        if not seed_info.get("ok"):
-            _set_status(job_id, status="error", stage="error", progress=0, error=seed_info.get("error", "Seed failed"))
-            results = {"status": "error", "job_id": job_id, "error": seed_info.get("error", "Seed failed"), "debug": seed_info}
-            _write_json(jd / "results.json", results)
-            return results
+    status.update({"stage": "clipping", "progress": 60, "message": "Cutting clips…", "updated_at": time.time()})
+    _write_json(status_path, status)
 
-        seed_bbox = seed_info["seed_bbox"]
-        fps = float(seed_info["fps"] or 30.0)
-        W = int(seed_info["W"] or 0)
-        H = int(seed_info["H"] or 0)
+    for i, (a, b) in enumerate(spans, start=1):
+        outp = clips_dir / f"clip_{i:03d}.mp4"
+        _cut_clip(in_path, outp, a, b)
+        clip_paths.append(outp)
+        clip_infos.append({
+            "start": a,
+            "end": b,
+            "path": str(outp),
+            "url": f"/data/jobs/{job_id}/clips/{outp.name}",
+        })
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            _set_status(job_id, status="error", stage="error", progress=0, error="Could not open video")
-            return {"status": "error", "error": "Could not open video"}
+    combined_path = job_dir / "combined.mp4"
+    if clip_paths:
+        status.update({"stage": "combining", "progress": 85, "message": "Combining clips…", "updated_at": time.time()})
+        _write_json(status_path, status)
+        _concat_clips(clip_paths, combined_path)
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        duration_s = (total_frames / fps) if (total_frames > 0 and fps > 0) else None
-
-        # tracking loop
-        times_present: List[float] = []
-        last_center = ((seed_bbox[0] + seed_bbox[2]) * 0.5, (seed_bbox[1] + seed_bbox[3]) * 0.5)
-        last_present_t: Optional[float] = None
-        lost_since_t: Optional[float] = None
-
-        target_track_id: Optional[int] = None
-
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        frame_idx = 0
-        sampled = 0
-
-        debug_samples: List[Dict[str, Any]] = []
-        max_debug = 120
-
-        _set_status(job_id, status="processing", stage="tracking", progress=45, message="Tracking (YOLO + DeepSORT)…")
-
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            t = frame_idx / fps if fps > 0 else 0.0
-            do_detect = (frame_idx % max(1, detect_stride) == 0)
-
-            present_now = False
-            chosen_bb = None
-            boxes_count = None
-            used_roi = False
-
-            if do_detect:
-                sampled += 1
-
-                # ROI crop around last_center once we have a target and are not heavily lost
-                frame_for_det = frame
-                x_off, y_off = 0, 0
-
-                if roi_enable and target_track_id is not None and (lost_since_t is None or (t - lost_since_t) < 1.0):
-                    pad_w = int(roi_pad_frac * W)
-                    pad_h = int(roi_pad_frac * H)
-                    cx, cy = int(last_center[0]), int(last_center[1])
-
-                    x1 = max(0, cx - pad_w // 2)
-                    x2 = min(W, cx + pad_w // 2)
-                    y1 = max(0, cy - pad_h // 2)
-                    y2 = min(H, cy + pad_h // 2)
-
-                    # avoid tiny ROI
-                    if (x2 - x1) > 320 and (y2 - y1) > 180:
-                        frame_for_det = frame[y1:y2, x1:x2]
-                        x_off, y_off = x1, y1
-                        used_roi = True
-
-                boxes = _yolo_person_boxes(frame_for_det, conf=conf, yolo_weights=yolo_weights)
-                boxes_count = len(boxes)
-
-                detections = []
-                for (x1, y1, x2, y2, c) in boxes:
-                    # map back to full frame coords if ROI
-                    x1 += x_off
-                    x2 += x_off
-                    y1 += y_off
-                    y2 += y_off
-
-                    bw = x2 - x1
-                    bh = y2 - y1
-                    if bw <= 0 or bh <= 0:
-                        continue
-
-                    area_frac = (bw * bh) / float(W * H + 1e-6)
-                    if area_frac < 0.003 or area_frac > 0.25:
-                        continue
-
-                    ar = bh / float(bw + 1e-6)
-                    if ar < 1.2 or ar > 6.0:
-                        continue
-
-                    detections.append(([x1, y1, bw, bh], float(c), "person"))
-
-                tracks = tracker.update_tracks(detections, frame=frame)
-
-                seed_cx = (seed_bbox[0] + seed_bbox[2]) * 0.5
-                seed_cy = (seed_bbox[1] + seed_bbox[3]) * 0.5
-
-                best_lock = None
-                best_d = 1e18
-
-                for tr in tracks:
-                    if not tr.is_confirmed():
-                        continue
-
-                    ltrb = tr.to_ltrb()
-                    x1, y1, x2, y2 = map(int, ltrb)
-                    cx = (x1 + x2) * 0.5
-                    cy = (y1 + y2) * 0.5
-
-                    if target_track_id is not None:
-                        if tr.track_id == target_track_id:
-                            chosen_bb = (x1, y1, x2, y2)
-                            present_now = True
-                            break
-                        continue
-
-                    # Before locking: pick closest to seed center (clicks drove seed bbox)
-                    d = (cx - seed_cx) ** 2 + (cy - seed_cy) ** 2
-                    if d < best_d:
-                        best_d = d
-                        best_lock = (tr.track_id, (x1, y1, x2, y2))
-
-                if target_track_id is None and best_lock is not None:
-                    target_track_id, chosen_bb = best_lock
-                    present_now = True
-
-            # update sticky / lost tracking
-            if present_now and chosen_bb is not None:
-                last_center = ((chosen_bb[0] + chosen_bb[2]) * 0.5, (chosen_bb[1] + chosen_bb[3]) * 0.5)
-                last_present_t = t
-                lost_since_t = None
-                times_present.append(t)
-            else:
-                if lost_since_t is None:
-                    lost_since_t = t
-                if last_present_t is not None and (t - last_present_t) <= sticky_seconds:
-                    times_present.append(t)
-
-            # debug sample
-            if do_detect and len(debug_samples) < max_debug:
-                debug_samples.append({
-                    "t": t,
-                    "present": present_now,
-                    "chosen": list(chosen_bb) if chosen_bb else None,
-                    "boxes": boxes_count,
-                    "roi": used_roi,
-                    "track_id": target_track_id,
-                })
-
-            # progress updates
-            if do_detect and sampled % 200 == 0 and total_frames > 0:
-                prog = 45 + int(45.0 * (frame_idx / float(total_frames)))
-                _set_status(job_id, progress=min(90, prog), message=f"Tracking… {t:.1f}s")
-
-            frame_idx += 1
-
-        cap.release()
-
-        if not times_present:
-            _set_status(
-                job_id,
-                status="error",
-                stage="error",
-                progress=0,
-                error="No track matched. Try clicks with the player clearly visible (not on bench / not occluded)."
-            )
-            results = {
-                "status": "error",
-                "job_id": job_id,
-                "error": "No matches",
-                "debug": {
-                    "seed": seed_info,
-                    "sampled": sampled,
-                    "debug_samples": debug_samples,
-                }
-            }
-            _write_json(jd / "results.json", results)
-            return results
-
-        spans = _build_presence_spans(
-            times_present,
-            gap_merge=gap_merge,
-            pre_roll=pre_roll,
-            post_roll=post_roll,
-            min_len=min_clip_len,
-            max_clip_seconds=max_clip_seconds,
-        )
-
-        _set_status(job_id, status="processing", stage="cutting", progress=92, message=f"Cutting {len(spans)} clip(s)…")
-
-        clips_dir = jd / "clips"
-        clips_dir.mkdir(parents=True, exist_ok=True)
-
-        clips = []
-        for i, (s, e) in enumerate(spans, start=1):
-            out_path = str(clips_dir / f"clip_{i:03d}.mp4")
-            _ffmpeg_cut(video_path, out_path, s, e)
-            clips.append({
-                "start": float(s),
-                "end": float(e),
-                "path": out_path,
-                "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4",
-            })
-
-        list_path = str(jd / "concat.txt")
-        with open(list_path, "w", encoding="utf-8") as f:
-            for c in clips:
-                f.write(f"file '{c['path']}'\n")
-
-        combined_path = str(jd / "combined.mp4")
-        _ffmpeg_concat(list_path, combined_path)
-
-        results = {
-            "status": "done",
-            "job_id": job_id,
-            "camera_mode": setup.get("camera_mode", "broadcast"),
-            "player_number": setup.get("player_number", ""),
-            "jersey_color": setup.get("jersey_color", ""),
-            "clicks_count": len(clicks),
-            "clicks": clicks,
-            "clips": clips,
-            "combined_path": combined_path,
-            "combined_url": f"/data/jobs/{job_id}/combined.mp4",
-            "debug": {
-                "seed": {
-                    "seed_bbox": list(seed_bbox),
-                    "seed_frames": seed_info.get("seed_frames", []),
-                    "seed_count": seed_info.get("seed_count", 0),
-                },
-                "fps": fps,
-                "W": W, "H": H,
-                "total_frames": total_frames,
-                "duration_s": duration_s,
-                "min_clip_len": min_clip_len,
-                "gap_merge": gap_merge,
-                "sticky_seconds": sticky_seconds,
-                "pre_roll": pre_roll,
-                "post_roll": post_roll,
-                "detect_stride": detect_stride,
-                "yolo_conf": conf,
-                "yolo_weights": yolo_weights,
-                "ds": {
-                    "max_age": int(setup.get("ds_max_age", 45)),
-                    "n_init": int(setup.get("ds_n_init", 2)),
-                    "max_iou": float(setup.get("ds_max_iou", 0.8)),
-                    "max_cos": float(setup.get("ds_max_cos", 0.20)),
-                    "nn_budget": int(setup.get("ds_nn_budget", 100)),
-                },
-                "roi_enable": roi_enable,
-                "roi_pad_frac": roi_pad_frac,
-                "sampled_detect_frames": sampled,
-                "debug_samples": debug_samples,
-                "spans": spans,
-                "target_track_id": target_track_id,
-            }
-        }
-
-        _write_json(jd / "results.json", results)
-        _set_status(
-            job_id,
-            status="done",
-            stage="done",
-            progress=100,
-            message="Done.",
-            clips=clips,
-            combined_path=combined_path,
-            combined_url=results["combined_url"],
-        )
-        return results
-
-    except Exception as e:
-        # Make sure the UI does not sit on 'queued' forever if something blows up.
-        try:
-            _set_status(job_id, status='error', stage='error', progress=100, message=f'Error: {e}')
-        except Exception:
-            pass
-        # Do not re-raise; keep worker alive and let UI show the error.
-        return None
+    status.update({
+        "status": "done",
+        "stage": "done",
+        "progress": 100,
+        "message": "Done.",
+        "updated_at": time.time(),
+        "clips": clip_infos,
+        "combined_path": str(combined_path),
+        "combined_url": f"/data/jobs/{job_id}/combined.mp4",
+        "debug": debug,
+    })
+    _write_json(status_path, status)
+    return status
