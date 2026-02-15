@@ -46,7 +46,7 @@ pkill -f "uvicorn api.main:app" || true
 pkill -f "rq worker jobs" || true
 
 echo "==> Start RQ worker"
-nohup rq worker jobs --url redis://127.0.0.1:6379 --serializer pickle > /workspace/worker.log 2>&1 &
+nohup "$VENV_DIR/bin/rq" worker jobs --url redis://127.0.0.1:6379 > /workspace/worker.log 2>&1 &
 
 echo "==> Start API"
 nohup uvicorn api.main:app --host 0.0.0.0 --port 8000 --log-level info > /workspace/api.log 2>&1 &
