@@ -239,7 +239,8 @@ def run_job(job_id: str):
 
     # Long videos + detection can exceed the default RQ timeout (often 180s).
     from worker.tasks import process_job
-rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
+
+    rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
 
     set_status(
         job_id,
