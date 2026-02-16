@@ -29,8 +29,23 @@ function setBar(pct, label){
   $('barText').textContent = label || `${v}%`;
 }
 
-function show(obj){ $('out').textContent = JSON.stringify(obj ?? {}, null, 2); }
-function showClips(obj){ $('clips').textContent = obj ? JSON.stringify(obj, null, 2) : '—'; }
+function show(obj){ $('out').innerHTML = syntaxHighlightJson(obj ?? {}); }
+function showClips(obj){ $('clips').innerHTML = obj ? syntaxHighlightJson(obj) : '—'; }
+
+function syntaxHighlightJson(obj){
+  const raw = JSON.stringify(obj ?? {}, null, 2);
+  const escaped = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  return escaped.replace(/"[^"\n]*"(?=\s*:)|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?/g, (m) => {
+    if (m.startsWith('"')) return `<span class="j-key">${m}</span>`;
+    if (m === 'true' || m === 'false' || m === 'null') return `<span class="j-bool">${m}</span>`;
+    if (/^-?\d/.test(m)) return `<span class="j-num">${m}</span>`;
+    return m;
+  });
+}
 
 function updateButtons(meta){
   const haveJob = !!state.jobId;
@@ -41,7 +56,10 @@ function updateButtons(meta){
   $('btnSelect').disabled = !proxyReady;
   $('btnClearClicks').disabled = clickCount === 0;
   $('btnSave').disabled = !haveJob || clickCount < 3;
-  $('btnRun').disabled = !haveJob || !(meta && (meta.status === 'ready' || meta.stage === 'ready'));
+  const status = meta?.status || meta?.stage;
+  const isReady = meta && (meta.status === 'ready' || meta.stage === 'ready');
+  const isBlocked = ['queued','processing','running','done','error','cancelled'].includes(String(status));
+  $('btnRun').disabled = !haveJob || !isReady || isBlocked;
   $('btnCancel').disabled = !haveJob;
 }
 
@@ -138,7 +156,7 @@ async function pollStatus(loop=false){
       updateButtons(meta);
 
       if(!loop) break;
-      if(meta.status === 'done' || meta.status === 'error') break;
+      if(['done','error','cancelled'].includes(meta.status)) break;
       await new Promise(res=>setTimeout(res, 1200));
     }
   }catch(e){
@@ -241,15 +259,18 @@ async function runJob(){
 }
 
 async function cancelJob(){
-  // Simple cancel placeholder: UI only; worker doesn’t implement stop yet
-  setPill('cancel');
-  setBar(0, 'Cancelled (UI only).');
+  if(!state.jobId) return;
+  const r = await apiJson('POST', `/jobs/${state.jobId}/cancel`);
+  show(r);
+  setPill('cancelled');
+  setBar(100, 'Cancelled.');
+  await pollStatus(false);
 }
 
 function toggleSelect(){
   state.selectMode = !state.selectMode;
   $('btnSelect').textContent = state.selectMode ? 'Select Player (clicks ON)' : 'Select Player (clicks OFF)';
-  $('previewHint').textContent = state.selectMode ? 'Click torso 3–8 times on the player.' : 'Selection off.';
+  $('previewHint').textContent = state.selectMode ? 'Click torso 3–8 times on the player.' : 'Selection off. Save setup when done.';
 }
 
 function clearClicks(){

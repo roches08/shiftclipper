@@ -9,6 +9,10 @@ import subprocess
 import redis
 from rq import Queue
 from rq.job import Job
+try:
+    from rq.command import send_stop_job_command
+except Exception:  # pragma: no cover
+    send_stop_job_command = None
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -117,6 +121,43 @@ def set_status(
 
     meta["updated_at"] = time.time()
     write_json(mp, meta)
+
+
+def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
+    src = payload or {}
+
+    camera_mode = str(src.get("camera_mode") or "broadcast").lower()
+    if camera_mode not in {"broadcast", "tactical"}:
+        camera_mode = "broadcast"
+
+    verify_mode = bool(src.get("verify_mode", False))
+    extend_sec = max(0.0, min(60.0, float(src.get("extend_sec") or 20.0)))
+    detect_stride = 1 if camera_mode == "tactical" else 2
+
+    clicks = []
+    for raw in (src.get("clicks") or []):
+        try:
+            x = max(0.0, min(1.0, float(raw.get("x", 0.0))))
+            y = max(0.0, min(1.0, float(raw.get("y", 0.0))))
+            t = max(0.0, float(raw.get("t", 0.0)))
+            clicks.append({"t": t, "x": x, "y": y})
+        except Exception:
+            continue
+
+    return {
+        "camera_mode": camera_mode,
+        "player_number": str(src.get("player_number") or "").strip(),
+        "jersey_color": str(src.get("jersey_color") or "#203524"),
+        "opponent_color": str(src.get("opponent_color") or "#ffffff"),
+        "extend_sec": extend_sec,
+        "verify_mode": verify_mode,
+        "clicks": clicks,
+        "clicks_count": len(clicks),
+        # Derived worker params so dropdown choices have direct backend effect.
+        "detect_stride": detect_stride,
+        "post_roll": extend_sec,
+        "ocr_min_conf": 0.35 if verify_mode else 1.01,
+    }
 
 
 def make_proxy(in_path: str, out_path: str, max_h: int = 360, fps: int = 30) -> bool:
@@ -263,7 +304,8 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    write_json(jd / "setup.json", payload)
+    setup = normalize_setup(payload)
+    write_json(jd / "setup.json", setup)
 
     set_status(
         job_id,
@@ -271,9 +313,9 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
         stage="ready",
         progress=25,
         message="Setup saved.",
-        setup=payload,
+        setup=setup,
     )
-    return {"ok": True, "status": "ready", "job_id": job_id}
+    return {"ok": True, "status": "ready", "job_id": job_id, "setup": setup}
 
 
 @app.post("/jobs/{job_id}/run")
@@ -304,6 +346,10 @@ def run_job(job_id: str):
         )
         raise HTTPException(status_code=400, detail="Missing input video")
 
+    if meta.get("cancel_requested"):
+        meta["cancel_requested"] = False
+        write_json(meta_path(job_id), meta)
+
     # Long videos + detection can exceed the default RQ timeout (often 180s).
     from worker.tasks import process_job
     rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
@@ -317,6 +363,34 @@ def run_job(job_id: str):
         rq_id=rq_job.get_id(),
     )
     return {"rq_id": rq_job.get_id(), "job_id": job_id}
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    jd = job_dir(job_id)
+    if not jd.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    meta = read_json(meta_path(job_id), {})
+    meta["cancel_requested"] = True
+    write_json(meta_path(job_id), meta)
+
+    rq_id = meta.get("rq_id")
+    if rq_id and send_stop_job_command is not None:
+        try:
+            send_stop_job_command(rconn, rq_id)
+        except Exception:
+            # Worker may already be idle or not yet started.
+            pass
+
+    set_status(
+        job_id,
+        "cancelled",
+        stage="cancelled",
+        progress=100,
+        message="Job cancelled.",
+    )
+    return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
 
 @app.get("/jobs/{job_id}/results")
