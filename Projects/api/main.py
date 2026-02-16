@@ -29,13 +29,13 @@ ShiftClipper API (RunPod friendly)
 
 BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parents[1])).resolve()  # Projects/
 DATA_DIR = BASE_DIR / "data"
-JOBS_DIR = DATA_DIR / "jobs"
+JOBS_DIR = Path(os.getenv("JOBS_DIR", str(DATA_DIR / "jobs"))).resolve()
 WEB_DIR = BASE_DIR / "web"
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 rconn = redis.from_url(REDIS_URL, decode_responses=True)
 q = Queue("jobs", connection=rconn)
-print(f"Connected to Redis at: {REDIS_URL}")
+print(f"Connected to Redis at: {REDIS_URL} | queue=jobs | jobs_dir={JOBS_DIR}")
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -220,10 +220,11 @@ def job_status(job_id: str):
                     # show last line of stacktrace for quick debugging
                     msg = exc.splitlines()[-1][:500]
                 meta.update({
-                    "status": "error",
-                    "stage": "error",
+                    "status": "failed",
+                    "stage": "failed",
                     "progress": 100,
                     "message": msg,
+                    "error": msg,
                     "updated_at": time.time(),
                 })
                 write_json(mp, meta)

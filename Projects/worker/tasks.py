@@ -40,7 +40,7 @@ log.setLevel(logging.INFO)
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(BASE_DIR, "data")
-JOBS_DIR = os.path.join(DATA_DIR, "jobs")
+JOBS_DIR = os.path.abspath(os.getenv("JOBS_DIR", os.path.join(DATA_DIR, "jobs")))
 
 
 def _ensure_dirs() -> None:
@@ -636,8 +636,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
       fail_meta_path = os.path.join(failed_job_dir, "job.json")
       fail_meta = {
         "job_id": job_id,
-        "status": "error",
-        "stage": "error",
+        "status": "failed",
+        "stage": "failed",
         "progress": 100,
         "message": f"Error: {e}",
         "error": {"type": type(e).__name__, "detail": str(e), "traceback": tb},

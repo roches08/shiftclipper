@@ -34,7 +34,11 @@ pkill -f "uvicorn api.main:app" || true
 pkill -f "rq worker" || true
 
 echo "==> Start worker"
-export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
+export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
+export RQ_QUEUES="${RQ_QUEUES:-jobs}"
+mkdir -p "$JOBS_DIR"
+echo "Worker env: REDIS_URL=$REDIS_URL RQ_QUEUES=$RQ_QUEUES JOBS_DIR=$JOBS_DIR"
 nohup "$PROJECTS_DIR/.venv/bin/python" -m worker.main > /workspace/worker.log 2>&1 &
 
 echo "==> Start API"
