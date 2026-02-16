@@ -8,6 +8,7 @@ import subprocess
 
 import redis
 from rq import Queue
+from rq.job import Job
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -154,6 +155,31 @@ def job_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     meta = read_json(mp, {})
 
+    rq_id = meta.get("rq_id")
+    if rq_id:
+        try:
+            rq_job = Job.fetch(rq_id, connection=rconn)
+            if rq_job.is_failed:
+                meta["status"] = "error"
+                meta["stage"] = "error"
+                meta["progress"] = 0
+                if rq_job.exc_info:
+                    meta["error"] = rq_job.exc_info.splitlines()[-1]
+            elif rq_job.is_finished:
+                meta["status"] = meta.get("status") or "done"
+                meta["stage"] = meta.get("stage") or "done"
+                meta["progress"] = int(meta.get("progress", 100))
+            else:
+                rq_meta = rq_job.meta or {}
+                if "progress" in rq_meta:
+                    meta["progress"] = int(rq_meta.get("progress", meta.get("progress", 0)))
+                if "stage" in rq_meta:
+                    meta["stage"] = rq_meta.get("stage")
+                if meta.get("status") not in {"done", "error"}:
+                    meta["status"] = "processing"
+        except Exception:
+            pass
+
     # Convenience fields UI expects
     proxy_path = meta.get("proxy_path")
     if proxy_path and os.path.exists(proxy_path):
@@ -292,4 +318,3 @@ def results(job_id: str):
     if not rp.exists():
         raise HTTPException(status_code=404, detail="No results yet")
     return JSONResponse(read_json(rp, {}))
-

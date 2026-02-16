@@ -42,6 +42,19 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 JOBS_DIR = os.path.join(DATA_DIR, "jobs")
 
 
+def _read_json(path: str, default: Any) -> Any:
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_json(path: str, payload: Any) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 def _ensure_dirs() -> None:
     os.makedirs(JOBS_DIR, exist_ok=True)
 
@@ -486,12 +499,13 @@ def process_job(job_id: str) -> Dict[str, Any]:
     cur = get_current_job()
 
     job_dir = os.path.join(JOBS_DIR, job_id)
-    meta_path = os.path.join(job_dir, "job.json")
+    meta_path = os.path.join(job_dir, "meta.json")
+    setup_path = os.path.join(job_dir, "setup.json")
+    results_path = os.path.join(job_dir, "results.json")
     if not os.path.exists(meta_path):
         raise RuntimeError(f"Missing job meta: {meta_path}")
 
-    with open(meta_path, "r", encoding="utf-8") as f:
-        jobmeta = json.load(f)
+    jobmeta = _read_json(meta_path, {})
 
     in_path = jobmeta.get("video_path") or os.path.join(job_dir, "in.mp4")
     if not os.path.exists(in_path):
@@ -506,8 +520,14 @@ def process_job(job_id: str) -> Dict[str, Any]:
     jobmeta["proxy_path"] = proxy_path
     jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
     jobmeta["proxy_ready"] = True
+    jobmeta["status"] = "processing"
+    jobmeta["stage"] = "tracking"
+    jobmeta["progress"] = max(40, int(jobmeta.get("progress", 0)))
+    jobmeta["updated_at"] = time.time()
+    _write_json(meta_path, jobmeta)
 
-    setup = jobmeta.get("setup") or {}
+    setup = _read_json(setup_path, {})
+    jobmeta["setup"] = setup
     clicks = setup.get("clicks") or []
     jersey_color = setup.get("jersey_color") or "#203524"
     opponent_color = setup.get("opponent_color") or None
@@ -557,9 +577,16 @@ def process_job(job_id: str) -> Dict[str, Any]:
     jobmeta["progress"] = 100
     jobmeta["stage"] = "done"
     jobmeta["updated_at"] = time.time()
-
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(jobmeta, f, indent=2)
+    _write_json(meta_path, jobmeta)
+    _write_json(results_path, {
+        "job_id": job_id,
+        "clips": clips,
+        "combined_path": jobmeta["combined_path"],
+        "combined_url": jobmeta["combined_url"],
+        "debug": debug,
+        "status": "done",
+        "updated_at": jobmeta["updated_at"],
+    })
 
     if cur:
         cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
