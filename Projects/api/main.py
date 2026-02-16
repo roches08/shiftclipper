@@ -32,10 +32,10 @@ DATA_DIR = BASE_DIR / "data"
 JOBS_DIR = DATA_DIR / "jobs"
 WEB_DIR = BASE_DIR / "web"
 
-REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
-REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:6379")
-rconn = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+rconn = redis.from_url(REDIS_URL, decode_responses=True)
 q = Queue("jobs", connection=rconn)
+print(f"Connected to Redis at: {REDIS_URL}")
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
