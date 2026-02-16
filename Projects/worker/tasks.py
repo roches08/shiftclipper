@@ -165,9 +165,45 @@ def _iou(a: List[int], b: List[int]) -> float:
     return float(inter) / float(denom) if denom else 0.0
 
 
+def _mean_rgb_in_bbox(frame_bgr: np.ndarray, bb_xyxy: List[int]) -> np.ndarray:
+    """Mean RGB (normalized 0..1) in the central torso region of a bbox."""
+    x1, y1, x2, y2 = bb_xyxy
+    h = max(1, y2 - y1)
+    w = max(1, x2 - x1)
+
+    cx1 = x1 + int(0.20 * w)
+    cx2 = x1 + int(0.80 * w)
+    cy1 = y1 + int(0.25 * h)
+    cy2 = y1 + int(0.70 * h)
+
+    cx1 = max(0, cx1)
+    cy1 = max(0, cy1)
+    cx2 = min(frame_bgr.shape[1], cx2)
+    cy2 = min(frame_bgr.shape[0], cy2)
+
+    roi = frame_bgr[cy1:cy2, cx1:cx2]
+    if roi.size == 0:
+        return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    m = rgb.reshape(-1, 3).mean(axis=0).astype(np.float32) / 255.0
+    return m
+
+
+def _color_sim(a_rgb_norm: np.ndarray, b_rgb_norm: np.ndarray) -> float:
+    """Cosine similarity in RGB space (0..1-ish)."""
+    a = a_rgb_norm.astype(np.float32)
+    b = b_rgb_norm.astype(np.float32)
+    na = float(np.linalg.norm(a) + 1e-6)
+    nb = float(np.linalg.norm(b) + 1e-6)
+    return float(np.dot(a, b) / (na * nb))
+
+
 def track_presence_spans(
     video_path: Path,
     clicks: List[Dict[str, float]],
+    jersey_hex: Optional[str] = None,
+    opponent_hex: Optional[str] = None,
+    player_number: Optional[str] = None,
     detect_stride: int = 3,
     yolo_conf: float = 0.25,
     dist_gate_norm: float = 0.18,
@@ -176,8 +212,17 @@ def track_presence_spans(
     pre_roll: float = 4.0,
     post_roll: float = 1.5,
     min_clip_len: float = 20.0,
+    color_sim_min: float = 0.86,
+    ocr_stride_s: float = 1.0,
     device: Optional[str] = None,
 ) -> Tuple[List[Tuple[float, float]], Dict[str, Any]]:
+    import torch
+    import re
+    try:
+        import easyocr
+    except Exception:
+        easyocr = None
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -190,9 +235,29 @@ def track_presence_spans(
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
     yolo = _ensure_yolo("yolov8s.pt")
-    if device is not None:
-        # ultralytics accepts device in predict; we pass per-call below
-        pass
+    # Default: use GPU if available
+    if device is None:
+        device = 0 if bool(torch.cuda.is_available()) else 'cpu'
+
+    # Jersey color signatures
+    target_rgb = None
+    opp_rgb = None
+    if jersey_hex:
+        h = jersey_hex.strip().lstrip('#')
+        if len(h) == 6:
+            target_rgb = np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=np.float32) / 255.0
+    if opponent_hex:
+        h = opponent_hex.strip().lstrip('#')
+        if len(h) == 6:
+            opp_rgb = np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=np.float32) / 255.0
+
+    # OCR init (only if user provides a target number)
+    ocr = None
+    if player_number and easyocr is not None:
+        try:
+            ocr = easyocr.Reader(['en'], gpu=bool(torch.cuda.is_available()))
+        except Exception:
+            ocr = None
 
     # Build seed bbox using 2-3 clicks (recommended)
     seed_bbox, seed_frames_debug = _pick_seed_bbox_from_clicks(cap, yolo, clicks, fps, W, H, yolo_conf)
@@ -221,6 +286,36 @@ def track_presence_spans(
     dist_gate_px = dist_gate_norm * math.sqrt(W * W + H * H)
 
     last_good_bbox = seed_bbox[:]  # keep last bbox to help gating
+
+    next_ocr_t = 0.0
+    num_bad_streak = 0
+    num_ok_streak = 0
+
+    def _read_number(frame_bgr: np.ndarray, bb: List[int]) -> Optional[str]:
+        if ocr is None:
+            return None
+        x1, y1, x2, y2 = bb
+        w = max(1, x2 - x1)
+        h = max(1, y2 - y1)
+        # torso crop
+        cx1 = x1 + int(0.20 * w)
+        cx2 = x1 + int(0.80 * w)
+        cy1 = y1 + int(0.15 * h)
+        cy2 = y1 + int(0.65 * h)
+        cx1 = max(0, cx1); cy1 = max(0, cy1)
+        cx2 = min(frame_bgr.shape[1], cx2); cy2 = min(frame_bgr.shape[0], cy2)
+        crop = frame_bgr[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            return None
+        try:
+            out = ocr.readtext(crop, detail=1, paragraph=False, allowlist='0123456789')
+        except Exception:
+            return None
+        if not out:
+            return None
+        best = sorted(out, key=lambda x: float(x[2]), reverse=True)[0]
+        txt = re.sub(r"\D+", "", str(best[1]))
+        return txt or None
 
     while True:
         ok, frame = cap.read()
@@ -255,14 +350,26 @@ def track_presence_spans(
 
         tracks = tracker.update_tracks(dets, frame=frame)
 
-        # Convert tracks to xyxy
+        # Convert tracks to xyxy (with optional jersey-color gating)
         track_boxes = []
         for trk in tracks:
             if not trk.is_confirmed():
                 continue
             ltrb = trk.to_ltrb()
             x1, y1, x2, y2 = map(int, ltrb)
-            track_boxes.append((trk.track_id, [x1, y1, x2, y2]))
+            bb = [max(0, x1), max(0, y1), min(W - 1, x2), min(H - 1, y2)]
+
+            if target_rgb is not None:
+                m = _mean_rgb_in_bbox(frame, bb)
+                sim = _color_sim(m, target_rgb)
+                if sim < float(color_sim_min):
+                    continue
+                if opp_rgb is not None:
+                    sim_opp = _color_sim(m, opp_rgb)
+                    if sim_opp > sim:
+                        continue
+
+            track_boxes.append((trk.track_id, bb))
 
         chosen = None
         chosen_id = None
@@ -306,12 +413,29 @@ def track_presence_spans(
                     last_good_bbox = chosen[:]
 
         present = chosen is not None
+        chosen_num = None
+
+        # Sparse jersey-number validation (prevents ID swaps when tracking gets confused)
+        if present and chosen is not None and player_number and (t >= next_ocr_t):
+            next_ocr_t = t + max(0.25, float(ocr_stride_s))
+            chosen_num = _read_number(frame, chosen)
+            if chosen_num is None:
+                pass
+            elif str(chosen_num) == str(player_number):
+                num_ok_streak += 1
+                num_bad_streak = 0
+            else:
+                num_bad_streak += 1
+                num_ok_streak = 0
+
+        if player_number and num_bad_streak >= 2:
+            present = False
 
         # score: use IoU with last_good_bbox (higher is better)
         if chosen is not None:
             score = _iou(chosen, last_good_bbox)
 
-        present_flags.append((t, present, chosen, score, None, dist))
+        present_flags.append((t, present, chosen, score, chosen_num, dist))
 
         # keep a small debug sample
         if len(debug_samples) < 400:
@@ -321,6 +445,7 @@ def track_presence_spans(
                 "chosen": chosen,
                 "score": score,
                 "dist": dist,
+                "ocr": chosen_num,
                 "boxes": len(boxes),
                 "tracks": len(track_boxes),
                 "target_id": target_track_id
@@ -402,6 +527,12 @@ def track_presence_spans(
         "post_roll": post_roll,
         "detect_stride": detect_stride,
         "yolo_conf": yolo_conf,
+        "device": device,
+        "jersey_hex": jersey_hex,
+        "opponent_hex": opponent_hex,
+        "player_number": str(player_number) if player_number is not None else None,
+        "color_sim_min": color_sim_min,
+        "ocr_stride_s": ocr_stride_s,
         "dist_gate_norm": dist_gate_norm,
         "dist_gate_px": dist_gate_px,
         "debug_samples": debug_samples,

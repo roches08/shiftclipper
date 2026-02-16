@@ -16,6 +16,19 @@ LOG_REDIS=/workspace/redis.log
 
 echo "[runpod] working dir: $ROOT_DIR"
 
+# --- system deps (fresh pods need these) ---
+echo "[runpod] installing system deps..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  ffmpeg \
+  redis-server \
+  ca-certificates \
+  curl \
+  git \
+  libgl1 \
+  libglib2.0-0
+
 # --- venv ---
 if [[ ! -d ".venv" ]]; then
   echo "[runpod] creating venv..."
@@ -50,6 +63,7 @@ fi
 echo "[runpod] warming up models (YOLO + EasyOCR). This can take a few minutes only on first run..."
 python - <<'PY'
 import os
+import torch
 from ultralytics import YOLO
 
 # YOLO weights (download/cache)
@@ -60,9 +74,10 @@ print("[warmup] YOLO ok:", w)
 # EasyOCR models (download/cache)
 try:
     import easyocr
-    # GPU warmup can be heavy; CPU warmup is enough to cache the models
-    easyocr.Reader(['en'], gpu=False)
-    print("[warmup] EasyOCR ok")
+    use_gpu = bool(torch.cuda.is_available())
+    print(f"[warmup] torch.cuda.is_available() = {use_gpu}")
+    easyocr.Reader(['en'], gpu=use_gpu)
+    print(f"[warmup] EasyOCR ok (gpu={use_gpu})")
 except Exception as e:
     # OCR is optional; don't block startup if it fails
     print("[warmup] EasyOCR warmup skipped:", e)
