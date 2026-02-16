@@ -3,7 +3,7 @@ import time
 import argparse
 
 import redis
-from rq import Connection, Queue, Worker
+from rq import Queue, Worker
 from rq.job import Job
 
 
@@ -43,9 +43,8 @@ def main() -> None:
     if args.self_test:
         raise SystemExit(run_self_test(conn))
 
-    with Connection(conn):
-        worker = Worker([Queue(name, connection=conn) for name in QUEUE_NAMES])
-        worker.work()
+    worker = Worker([Queue(name, connection=conn) for name in QUEUE_NAMES], connection=conn)
+    worker.work()
 
 
 if __name__ == "__main__":
