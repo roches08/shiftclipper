@@ -1,160 +1,191 @@
-import os
+from __future__ import annotations
+
 import json
+import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-
-from rq import Queue
+from pydantic import BaseModel
 from redis import Redis
+from rq import Queue
 
-APP_ROOT = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parents[1])).resolve()
-JOBS_DIR = APP_ROOT / "data" / "jobs"
+# Project dirs
+BASE_DIR = Path(__file__).resolve().parents[1]  # .../Projects
+WEB_DIR = BASE_DIR / "web"
+DATA_DIR = BASE_DIR / "data"
+JOBS_DIR = DATA_DIR / "jobs"
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+# ✅ Ensure required directories exist BEFORE mounting StaticFiles
+WEB_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 redis_conn = Redis.from_url(REDIS_URL)
-q = Queue("jobs", connection=redis_conn)
+queue = Queue("jobs", connection=redis_conn)
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Static mounts
+app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
 
-# static web UI
-WEB_DIR = APP_ROOT / "web"
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
-# serve generated data
-DATA_DIR = APP_ROOT / "data"
-app.mount("/data", StaticFiles(directory=DATA_DIR), name="data")
+class CreateJobReq(BaseModel):
+    camera_mode: str = "broadcast"
 
 
 def _job_dir(job_id: str) -> Path:
     return JOBS_DIR / job_id
 
 
-def _read_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    return json.loads(path.read_text(encoding="utf-8"))
+def _read_status(job_id: str) -> Dict[str, Any]:
+    p = _job_dir(job_id) / "status.json"
+    if not p.exists():
+        return {"job_id": job_id, "status": "new", "progress": 0, "message": "New job."}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"job_id": job_id, "status": "error", "progress": 0, "message": "Corrupt status.json"}
 
 
-def _write_json(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
-
-
-def _meta_path(job_id: str) -> Path:
-    return _job_dir(job_id) / "meta.json"
-
-
-def _set_status(job_id: str, **fields: Any) -> Dict[str, Any]:
-    mp = _meta_path(job_id)
-    meta = _read_json(mp, {})
-    meta.update(fields)
-    meta["job_id"] = job_id
-    meta["updated_at"] = time.time()
-    _write_json(mp, meta)
-    return meta
+def _write_status(job_id: str, payload: Dict[str, Any]) -> None:
+    d = _job_dir(job_id)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "status.json"
+    payload.setdefault("job_id", job_id)
+    payload["updated_at"] = time.time()
+    p.write_text(json.dumps(payload, indent=2))
 
 
 @app.get("/", response_class=HTMLResponse)
-def index():
-    index_path = WEB_DIR / "index.html"
-    if not index_path.exists():
-        return "<h1>ShiftClipper</h1><p>Missing web/index.html</p>"
-    return index_path.read_text(encoding="utf-8")
+def root() -> Any:
+    index = WEB_DIR / "index.html"
+    if not index.exists():
+        return HTMLResponse(
+            "<h3>Missing web/index.html</h3>"
+            "<p>Expected at /workspace/shiftclipper/Projects/web/index.html</p>",
+            status_code=500,
+        )
+    return FileResponse(index)
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "web_dir": str(WEB_DIR),
+        "data_dir": str(DATA_DIR),
+        "jobs_dir": str(JOBS_DIR),
+        "redis": REDIS_URL,
+    }
 
 
 @app.post("/jobs")
-def create_job():
+def create_job(req: CreateJobReq) -> Dict[str, Any]:
     job_id = os.urandom(6).hex()
-    jd = _job_dir(job_id)
-    jd.mkdir(parents=True, exist_ok=True)
-    _set_status(job_id, status="created", stage="created", progress=0, message="Job created.")
+    d = _job_dir(job_id)
+    d.mkdir(parents=True, exist_ok=True)
+    _write_status(
+        job_id,
+        {
+            "status": "created",
+            "progress": 0,
+            "message": "Job created.",
+            "camera_mode": req.camera_mode,
+        },
+    )
     return {"job_id": job_id}
 
 
 @app.get("/jobs/{job_id}/status")
-def job_status(job_id: str):
-    mp = _meta_path(job_id)
-    if not mp.exists():
-        raise HTTPException(status_code=404, detail="Job not found")
-    return _read_json(mp, {})
+def get_status(job_id: str) -> Dict[str, Any]:
+    return _read_status(job_id)
 
 
 @app.post("/jobs/{job_id}/upload")
-async def upload_video(job_id: str, file: UploadFile = File(...)):
-    jd = _job_dir(job_id)
-    if not jd.exists():
-        raise HTTPException(status_code=404, detail="Job not found")
+async def upload(job_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+    d = _job_dir(job_id)
+    if not d.exists():
+        raise HTTPException(status_code=404, detail="Unknown job_id")
 
-    in_path = jd / "in.mp4"
-    orig_filename = file.filename or "upload"
-    content = await file.read()
-    in_path.write_bytes(content)
+    in_path = d / "in.mp4"
+    with in_path.open("wb") as f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
 
-    # reset status after upload
-    _set_status(
+    _write_status(
         job_id,
-        status="uploaded",
-        stage="uploaded",
-        progress=5,
-        message="Uploaded.",
-        orig_filename=orig_filename,
-        video_path=str(in_path),
-        uploaded_at=time.time(),
+        {
+            "status": "uploaded",
+            "progress": 5,
+            "message": "Uploaded.",
+            "orig_filename": file.filename,
+            "video_path": str(in_path),
+        },
     )
-    return {"ok": True, "job_id": job_id, "video_path": str(in_path)}
+    return {"ok": True}
+
+
+class SetupReq(BaseModel):
+    player_number: str = ""
+    jersey_color: str = "#203524"
+    opponent_color: str = "#ffffff"
+    extend_sec: float = 2.0
+    verify_mode: bool = False
+    clicks: list[dict] = []
 
 
 @app.put("/jobs/{job_id}/setup")
-async def setup_job(job_id: str, payload: Dict[str, Any]):
-    jd = _job_dir(job_id)
-    if not jd.exists():
-        raise HTTPException(status_code=404, detail="Job not found")
+def set_setup(job_id: str, req: SetupReq) -> Dict[str, Any]:
+    d = _job_dir(job_id)
+    if not d.exists():
+        raise HTTPException(status_code=404, detail="Unknown job_id")
 
-    meta = _set_status(job_id, setup=payload, status="ready", stage="ready", progress=10, message="Setup saved.")
-    return {"ok": True, "job_id": job_id, "setup": meta.get("setup", {})}
+    setup_path = d / "setup.json"
+    setup_path.write_text(req.model_dump_json(indent=2))
+
+    st = _read_status(job_id)
+    st["setup"] = req.model_dump()
+    st["clicks_count"] = len(req.clicks)
+    st["status"] = "ready"
+    st["progress"] = max(int(st.get("progress", 0)), 10)
+    st["message"] = "Setup saved."
+    _write_status(job_id, st)
+
+    return {"ok": True}
 
 
 @app.post("/jobs/{job_id}/run")
-def run_job(job_id: str):
-    """
-    IMPORTANT FIX:
-    - Do NOT enqueue again if already queued/processing/done.
-    - If previous attempt failed, allow re-run (new rq_id) but only once per click.
-    """
-    mp = _meta_path(job_id)
-    if not mp.exists():
-        raise HTTPException(status_code=404, detail="Job not found")
+def run_job(job_id: str) -> Dict[str, Any]:
+    d = _job_dir(job_id)
+    if not d.exists():
+        raise HTTPException(status_code=404, detail="Unknown job_id")
 
-    meta = _read_json(mp, {})
-    status = (meta.get("status") or "").lower()
-    stage = (meta.get("stage") or "").lower()
+    in_path = d / "in.mp4"
+    if not in_path.exists() or in_path.stat().st_size == 0:
+        raise HTTPException(status_code=400, detail="Upload a video first.")
 
-    # already running or done -> don't enqueue again
-    if status in {"queued", "processing"} or stage in {"queued", "processing"}:
-        return {"ok": True, "job_id": job_id, "status": meta.get("status"), "rq_id": meta.get("rq_id")}
+    setup_path = d / "setup.json"
+    if not setup_path.exists():
+        raise HTTPException(status_code=400, detail="Save setup first.")
 
-    if status == "done":
-        return {"ok": True, "job_id": job_id, "status": "done", "rq_id": meta.get("rq_id")}
-
-    # enqueue
-    _set_status(job_id, status="queued", stage="queued", progress=12, message="Queued for processing...")
-    from worker.tasks import process_job  # local import for worker
-
-    rq_job = q.enqueue(process_job, job_id, job_timeout=60 * 60 * 6)  # up to 6 hours
-    _set_status(job_id, rq_id=rq_job.get_id())
-
-    return {"ok": True, "job_id": job_id, "status": "queued", "rq_id": rq_job.get_id()}
+    rq_job = queue.enqueue("worker.tasks.process_job", job_id, job_timeout=3600)
+    st = _read_status(job_id)
+    st.update(
+        {
+            "status": "queued",
+            "progress": 15,
+            "message": "Queued for processing.",
+            "rq_id": rq_job.id,
+        }
+    )
+    _write_status(job_id, st)
+    return {"ok": True, "rq_id": rq_job.id}
 
