@@ -61,6 +61,7 @@ function updateButtons(meta){
   const isBlocked = ['queued','processing','running','done','error','failed','cancelled'].includes(String(status));
   $('btnRun').disabled = !haveJob || !isReady || isBlocked;
   $('btnCancel').disabled = !haveJob;
+  $('btnRetry').disabled = !haveJob || !['failed','cancelled'].includes(String(meta?.status || ''));
 }
 
 function renderClicks(){
@@ -267,6 +268,20 @@ async function cancelJob(){
   await pollStatus(false);
 }
 
+async function retryJob(){
+  if(!state.jobId) return;
+  const r = await apiJson('POST', `/jobs/${state.jobId}/retry`);
+  show(r);
+  setPill('queued');
+  setBar(30, 'Retried and queued.');
+  await pollStatus(true);
+}
+
+async function cleanupJobs(){
+  const r = await apiJson('POST', '/jobs/cleanup?days=7&max_count=100');
+  show(r);
+}
+
 function toggleSelect(){
   state.selectMode = !state.selectMode;
   $('btnSelect').textContent = state.selectMode ? 'Select Player (clicks ON)' : 'Select Player (clicks OFF)';
@@ -342,10 +357,12 @@ function wire(){
   const btnCancel = must("btnCancel");
   const btnSelect = must("btnSelect");
   const btnClearClicks = must("btnClearClicks");
+  const btnRetry = must("btnRetry");
+  const btnCleanup = must("btnCleanup");
   const fileEl = must("file");
   const vidEl = must("vid");
   const canvasEl = must("overlay");
-  if(!btnCreate||!btnUpload||!btnSave||!btnRun||!btnCancel||!btnSelect||!btnClearClicks||!fileEl||!vidEl||!canvasEl){
+  if(!btnCreate||!btnUpload||!btnSave||!btnRun||!btnCancel||!btnSelect||!btnClearClicks||!btnRetry||!btnCleanup||!fileEl||!vidEl||!canvasEl){
     alert("UI is missing required elements. Hard refresh the page or re-upload web files.");
     return;
   }
@@ -355,6 +372,8 @@ function wire(){
   btnSave.addEventListener('click', saveSetup);
   btnRun.addEventListener('click', runJob);
   btnCancel.addEventListener('click', cancelJob);
+  btnRetry.addEventListener('click', retryJob);
+  btnCleanup.addEventListener('click', cleanupJobs);
   btnSelect.addEventListener('click', toggleSelect);
   btnClearClicks.addEventListener('click', clearClicks);
 
