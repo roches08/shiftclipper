@@ -1,118 +1,142 @@
-from __future__ import annotations
+cd /workspace/shiftclipper/Projects
 
-import json
+cat > api/main.py <<'PY'
 import os
+import json
 import time
+import shutil
 from pathlib import Path
-from typing import Any, Dict
+from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from redis import Redis
-from rq import Queue
 
-# Project dirs
-BASE_DIR = Path(__file__).resolve().parents[1]  # .../Projects
-WEB_DIR = BASE_DIR / "web"
-DATA_DIR = BASE_DIR / "data"
+# ------------------------
+# Paths / constants
+# ------------------------
+ROOT = Path(__file__).resolve().parents[1]  # Projects/
+WEB_DIR = ROOT / "web"
+DATA_DIR = ROOT / "data"
 JOBS_DIR = DATA_DIR / "jobs"
 
-# ✅ Ensure required directories exist BEFORE mounting StaticFiles
-WEB_DIR.mkdir(parents=True, exist_ok=True)
+# Ensure required dirs exist (prevents "Directory does not exist" crash)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
-redis_conn = Redis.from_url(REDIS_URL)
-queue = Queue("jobs", connection=redis_conn)
-
-app = FastAPI()
-
-# Static mounts
-app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
-app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
-
-
-class CreateJobReq(BaseModel):
-    camera_mode: str = "broadcast"
-
-
+# ------------------------
+# Helpers
+# ------------------------
 def _job_dir(job_id: str) -> Path:
     return JOBS_DIR / job_id
 
+def _status_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "status.json"
 
-def _read_status(job_id: str) -> Dict[str, Any]:
-    p = _job_dir(job_id) / "status.json"
+def _load_status(job_id: str) -> Dict[str, Any]:
+    p = _status_path(job_id)
     if not p.exists():
-        return {"job_id": job_id, "status": "new", "progress": 0, "message": "New job."}
-    try:
-        return json.loads(p.read_text())
-    except Exception:
-        return {"job_id": job_id, "status": "error", "progress": 0, "message": "Corrupt status.json"}
+        raise HTTPException(status_code=404, detail="Job not found")
+    return json.loads(p.read_text())
 
+def _save_status(job_id: str, data: Dict[str, Any]) -> None:
+    p = _status_path(job_id)
+    p.write_text(json.dumps(data, indent=2))
 
-def _write_status(job_id: str, payload: Dict[str, Any]) -> None:
-    d = _job_dir(job_id)
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / "status.json"
-    payload.setdefault("job_id", job_id)
-    payload["updated_at"] = time.time()
-    p.write_text(json.dumps(payload, indent=2))
+def _now() -> float:
+    return time.time()
 
+def _new_job_id() -> str:
+    return os.urandom(6).hex()
 
-@app.get("/", response_class=HTMLResponse)
-def root() -> Any:
-    index = WEB_DIR / "index.html"
-    if not index.exists():
-        return HTMLResponse(
-            "<h3>Missing web/index.html</h3>"
-            "<p>Expected at /workspace/shiftclipper/Projects/web/index.html</p>",
-            status_code=500,
-        )
-    return FileResponse(index)
-
-
-@app.get("/health")
-def health() -> Dict[str, Any]:
+def _init_status(job_id: str) -> Dict[str, Any]:
     return {
-        "ok": True,
-        "web_dir": str(WEB_DIR),
-        "data_dir": str(DATA_DIR),
-        "jobs_dir": str(JOBS_DIR),
-        "redis": REDIS_URL,
+        "job_id": job_id,
+        "status": "created",
+        "stage": "created",
+        "progress": 0,
+        "message": "Created.",
+        "uploaded_at": None,
+        "updated_at": _now(),
+        "orig_filename": None,
+        "video_path": None,
+        "proxy_ready": False,
+        "proxy_path": None,
+        "proxy_url": None,
+        "setup": {
+            "camera_mode": "broadcast",
+            "player_number": "",
+            "jersey_color": "#203524",
+            "opponent_color": "#ffffff",
+            "extend_sec": 2,
+            "verify_mode": False,
+            "clicks": [],
+            "clicks_count": 0
+        },
+        "clips": [],
+        "combined_path": None,
+        "combined_url": None,
+        "error": None,
     }
 
+# ------------------------
+# API Models
+# ------------------------
+class SetupPayload(BaseModel):
+    camera_mode: str = "broadcast"
+    player_number: str = ""
+    jersey_color: str = "#203524"
+    opponent_color: str = "#ffffff"
+    extend_sec: float = 2.0
+    verify_mode: bool = False
+    clicks: list = []
+
+# ------------------------
+# App
+# ------------------------
+app = FastAPI()
+
+# Static routes
+app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    index_path = WEB_DIR / "index.html"
+    if not index_path.exists():
+        return HTMLResponse(
+            "Missing web/index.html. Copy web files into Projects/web/",
+            status_code=500
+        )
+    return HTMLResponse(index_path.read_text())
 
 @app.post("/jobs")
-def create_job(req: CreateJobReq) -> Dict[str, Any]:
-    job_id = os.urandom(6).hex()
-    d = _job_dir(job_id)
-    d.mkdir(parents=True, exist_ok=True)
-    _write_status(
-        job_id,
-        {
-            "status": "created",
-            "progress": 0,
-            "message": "Job created.",
-            "camera_mode": req.camera_mode,
-        },
-    )
+def create_job():
+    """
+    Create a job. No body required.
+    """
+    job_id = _new_job_id()
+    jd = _job_dir(job_id)
+    jd.mkdir(parents=True, exist_ok=True)
+    (jd / "clips").mkdir(parents=True, exist_ok=True)
+
+    st = _init_status(job_id)
+    _save_status(job_id, st)
     return {"job_id": job_id}
 
-
 @app.get("/jobs/{job_id}/status")
-def get_status(job_id: str) -> Dict[str, Any]:
-    return _read_status(job_id)
-
+def job_status(job_id: str):
+    return _load_status(job_id)
 
 @app.post("/jobs/{job_id}/upload")
-async def upload(job_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
-    d = _job_dir(job_id)
-    if not d.exists():
-        raise HTTPException(status_code=404, detail="Unknown job_id")
+async def upload_video(job_id: str, file: UploadFile = File(...)):
+    jd = _job_dir(job_id)
+    if not jd.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    in_path = d / "in.mp4"
+    in_path = jd / "in.mp4"
+    # Save upload
     with in_path.open("wb") as f:
         while True:
             chunk = await file.read(1024 * 1024)
@@ -120,72 +144,73 @@ async def upload(job_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
                 break
             f.write(chunk)
 
-    _write_status(
-        job_id,
-        {
-            "status": "uploaded",
-            "progress": 5,
-            "message": "Uploaded.",
-            "orig_filename": file.filename,
-            "video_path": str(in_path),
-        },
-    )
+    st = _load_status(job_id)
+    st["status"] = "uploaded"
+    st["stage"] = "uploaded"
+    st["progress"] = 5
+    st["message"] = "Uploaded."
+    st["uploaded_at"] = _now()
+    st["updated_at"] = _now()
+    st["orig_filename"] = file.filename
+    st["video_path"] = str(in_path)
+    st["error"] = None
+    _save_status(job_id, st)
+
+    # Worker will generate proxy + clips after /run
     return {"ok": True}
-
-
-class SetupReq(BaseModel):
-    player_number: str = ""
-    jersey_color: str = "#203524"
-    opponent_color: str = "#ffffff"
-    extend_sec: float = 2.0
-    verify_mode: bool = False
-    clicks: list[dict] = []
-
 
 @app.put("/jobs/{job_id}/setup")
-def set_setup(job_id: str, req: SetupReq) -> Dict[str, Any]:
-    d = _job_dir(job_id)
-    if not d.exists():
-        raise HTTPException(status_code=404, detail="Unknown job_id")
+def save_setup(job_id: str, payload: SetupPayload):
+    st = _load_status(job_id)
 
-    setup_path = d / "setup.json"
-    setup_path.write_text(req.model_dump_json(indent=2))
-
-    st = _read_status(job_id)
-    st["setup"] = req.model_dump()
-    st["clicks_count"] = len(req.clicks)
-    st["status"] = "ready"
-    st["progress"] = max(int(st.get("progress", 0)), 10)
-    st["message"] = "Setup saved."
-    _write_status(job_id, st)
-
+    clicks = payload.clicks or []
+    st["setup"] = {
+        "camera_mode": payload.camera_mode,
+        "player_number": payload.player_number,
+        "jersey_color": payload.jersey_color,
+        "opponent_color": payload.opponent_color,
+        "extend_sec": payload.extend_sec,
+        "verify_mode": payload.verify_mode,
+        "clicks": clicks,
+        "clicks_count": len(clicks),
+    }
+    st["updated_at"] = _now()
+    _save_status(job_id, st)
     return {"ok": True}
 
-
 @app.post("/jobs/{job_id}/run")
-def run_job(job_id: str) -> Dict[str, Any]:
-    d = _job_dir(job_id)
-    if not d.exists():
-        raise HTTPException(status_code=404, detail="Unknown job_id")
+def run_job(job_id: str):
+    """
+    Enqueue the job in Redis/RQ.
+    """
+    st = _load_status(job_id)
+    if not st.get("video_path"):
+        raise HTTPException(status_code=400, detail="Missing input video. Upload a video first.")
 
-    in_path = d / "in.mp4"
-    if not in_path.exists() or in_path.stat().st_size == 0:
-        raise HTTPException(status_code=400, detail="Upload a video first.")
+    # Lazy import so API can boot even if worker deps are still installing
+    try:
+        import redis
+        from rq import Queue
+        from worker.tasks import process_job
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Worker/queue not ready: {e}")
 
-    setup_path = d / "setup.json"
-    if not setup_path.exists():
-        raise HTTPException(status_code=400, detail="Save setup first.")
+    r = redis.Redis.from_url("redis://127.0.0.1:6379")
+    q = Queue("jobs", connection=r)
 
-    rq_job = queue.enqueue("worker.tasks.process_job", job_id, job_timeout=3600)
-    st = _read_status(job_id)
-    st.update(
-        {
-            "status": "queued",
-            "progress": 15,
-            "message": "Queued for processing.",
-            "rq_id": rq_job.id,
-        }
-    )
-    _write_status(job_id, st)
-    return {"ok": True, "rq_id": rq_job.id}
+    st["status"] = "queued"
+    st["stage"] = "queued"
+    st["progress"] = 10
+    st["message"] = "Queued for processing…"
+    st["updated_at"] = _now()
+    _save_status(job_id, st)
+
+    job = q.enqueue(process_job, job_id)
+    st = _load_status(job_id)
+    st["rq_id"] = job.id
+    st["updated_at"] = _now()
+    _save_status(job_id, st)
+
+    return {"ok": True, "rq_id": job.id}
+PY
 
