@@ -1,0 +1,34 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ./Projects
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RQ_QUEUES: jobs
+      JOBS_DIR: /app/data/jobs
+    volumes:
+      - ./Projects/data/jobs:/app/data/jobs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: ./Projects
+    command: python -m worker.main
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RQ_QUEUES: jobs
+      JOBS_DIR: /app/data/jobs
+      WORKER_VERIFY_ONLY: "1"
+    volumes:
+      - ./Projects/data/jobs:/app/data/jobs
+    depends_on:
+      - redis

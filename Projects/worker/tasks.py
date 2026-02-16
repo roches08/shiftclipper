@@ -9,7 +9,10 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
+try:
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
 import numpy as np
 
 from rq import get_current_job
@@ -543,7 +546,39 @@ def process_job(job_id: str) -> Dict[str, Any]:
       jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
       jobmeta["proxy_ready"] = True
 
+      setup_path = os.path.join(job_dir, "setup.json")
       setup = jobmeta.get("setup") or {}
+      if (not setup) and os.path.exists(setup_path):
+          with open(setup_path, "r", encoding="utf-8") as f:
+              setup = json.load(f)
+      verify_only = bool(setup.get("verify_mode", False)) or os.getenv("WORKER_VERIFY_ONLY", "0") == "1"
+      if cv2 is None and not verify_only:
+          raise RuntimeError("opencv-python is not installed; set verify_mode=true or WORKER_VERIFY_ONLY=1 for wiring checks")
+
+      if verify_only:
+          jobmeta["clips"] = []
+          jobmeta["combined_path"] = None
+          jobmeta["combined_url"] = None
+          jobmeta["debug"] = {
+              "verify_only": True,
+              "reason": "verify_mode enabled" if bool(setup.get("verify_mode", False)) else "WORKER_VERIFY_ONLY=1",
+              "cv2_available": bool(cv2 is not None),
+          }
+          jobmeta["status"] = "done"
+          jobmeta["progress"] = 100
+          jobmeta["stage"] = "done"
+          jobmeta["message"] = "Verify-only mode completed (queue + status wiring)."
+          jobmeta["updated_at"] = time.time()
+          with open(meta_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+          results_path = os.path.join(job_dir, "results.json")
+          with open(results_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+          if cur:
+              cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
+              cur.save_meta()
+          return jobmeta
+
       clicks = setup.get("clicks") or []
       jersey_color = setup.get("jersey_color") or "#203524"
       opponent_color = setup.get("opponent_color") or None
@@ -648,3 +683,13 @@ def process_job(job_id: str) -> Dict[str, Any]:
     except Exception:
       pass
     raise
+
+
+def self_test_task(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "payload": payload or {},
+        "worker_pid": os.getpid(),
+        "cv2_available": bool(cv2 is not None),
+        "updated_at": time.time(),
+    }

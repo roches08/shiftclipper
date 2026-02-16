@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 import subprocess
+import shutil
 
 import redis
 from rq import Queue
@@ -33,9 +34,10 @@ JOBS_DIR = Path(os.getenv("JOBS_DIR", str(DATA_DIR / "jobs"))).resolve()
 WEB_DIR = BASE_DIR / "web"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
 rconn = redis.from_url(REDIS_URL, decode_responses=True)
-q = Queue("jobs", connection=rconn)
-print(f"Connected to Redis at: {REDIS_URL} | queue=jobs | jobs_dir={JOBS_DIR}")
+q = Queue(QUEUE_NAMES[0], connection=rconn)
+print(f"API starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -207,19 +209,25 @@ def job_status(job_id: str):
 
     meta = read_json(mp, {})
 
+    rq_state = None
+
     # Reflect actual RQ state so the UI never sits "queued" forever
     rq_id = meta.get("rq_id")
     if rq_id:
         try:
             rconn = redis.from_url(REDIS_URL)
             rq_job = Job.fetch(rq_id, connection=rconn)
-            if rq_job.is_failed:
+            rq_state = rq_job.get_status(refresh=True)
+            rq_meta = rq_job.meta or {}
+
+            if rq_state == "failed" or rq_job.is_failed:
                 exc = (rq_job.exc_info or "").strip()
                 msg = "Worker failed."
                 if exc:
                     # show last line of stacktrace for quick debugging
                     msg = exc.splitlines()[-1][:500]
                 meta.update({
+                    "rq_state": "failed",
                     "status": "failed",
                     "stage": "failed",
                     "progress": 100,
@@ -228,6 +236,27 @@ def job_status(job_id: str):
                     "updated_at": time.time(),
                 })
                 write_json(mp, meta)
+            elif rq_state == "started":
+                meta["rq_state"] = "started"
+                meta["status"] = "processing"
+                if rq_meta.get("stage"):
+                    meta["stage"] = rq_meta.get("stage")
+                else:
+                    meta["stage"] = meta.get("stage") or "processing"
+                if rq_meta.get("progress") is not None:
+                    meta["progress"] = int(rq_meta.get("progress"))
+                meta["message"] = meta.get("message") or "Processing…"
+            elif rq_state == "queued":
+                meta["rq_state"] = "queued"
+                if meta.get("status") not in {"cancelled", "failed", "done"}:
+                    meta["status"] = "queued"
+                    meta["stage"] = "queued"
+            elif rq_state == "finished":
+                meta["rq_state"] = "finished"
+                if meta.get("status") not in {"done", "cancelled", "failed"}:
+                    meta["status"] = "done"
+                    meta["stage"] = "done"
+                    meta["progress"] = 100
         except Exception:
             # If Redis/RQ lookup fails, do not break status endpoint.
             pass
@@ -236,7 +265,19 @@ def job_status(job_id: str):
     meta["proxy_ready"] = bool(meta.get("proxy_path") and Path(meta["proxy_path"]).exists())
     if meta.get("proxy_path"):
         meta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
-    return meta
+    status_payload = {
+        "job_id": job_id,
+        "rq_state": rq_state or meta.get("rq_state"),
+        "status": meta.get("status"),
+        "stage": meta.get("stage"),
+        "progress": meta.get("progress", 0),
+        "message": meta.get("message"),
+        "error": meta.get("error"),
+        "updated_at": meta.get("updated_at"),
+        "proxy_ready": meta.get("proxy_ready"),
+        "proxy_url": meta.get("proxy_url"),
+    }
+    return status_payload
 @app.get("/data/jobs/{job_id}/{path:path}")
 def serve_job_file(job_id: str, path: str):
     full = job_dir(job_id) / path
@@ -265,11 +306,13 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
             f.write(chunk)
 
     # Persist metadata for the worker (this was missing before)
-    write_json(meta_path(job_id), {
+    meta = read_json(meta_path(job_id), {})
+    meta.update({
         "video_path": in_path,
         "orig_filename": file.filename,
         "uploaded_at": time.time(),
     })
+    write_json(meta_path(job_id), meta)
 
     set_status(job_id, "uploaded", extra={
         "video_path": in_path,
@@ -377,6 +420,14 @@ def cancel_job(job_id: str):
     write_json(meta_path(job_id), meta)
 
     rq_id = meta.get("rq_id")
+    if rq_id:
+        try:
+            rq_job = Job.fetch(rq_id, connection=rconn)
+            if rq_job.get_status(refresh=True) == "queued":
+                rq_job.cancel()
+        except Exception:
+            pass
+
     if rq_id and send_stop_job_command is not None:
         try:
             send_stop_job_command(rconn, rq_id)
@@ -392,6 +443,50 @@ def cancel_job(job_id: str):
         message="Job cancelled.",
     )
     return {"ok": True, "job_id": job_id, "status": "cancelled"}
+
+
+@app.post("/jobs/{job_id}/retry")
+def retry_job(job_id: str):
+    jd = job_dir(job_id)
+    if not jd.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    meta = read_json(meta_path(job_id), {})
+    if meta.get("status") not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=400, detail="Only failed/cancelled jobs can be retried")
+
+    from worker.tasks import process_job
+    rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
+    set_status(
+        job_id,
+        "queued",
+        stage="queued",
+        progress=30,
+        message="Retried and queued for processing.",
+        error=None,
+        cancel_requested=False,
+        rq_id=rq_job.get_id(),
+    )
+    return {"ok": True, "job_id": job_id, "rq_id": rq_job.get_id(), "status": "queued"}
+
+
+@app.post("/jobs/cleanup")
+def cleanup_jobs(days: int = 7, max_count: int = 200):
+    if max_count < 1:
+        raise HTTPException(status_code=400, detail="max_count must be >= 1")
+    cutoff = time.time() - (max(0, days) * 86400)
+    entries = []
+    for p in JOBS_DIR.iterdir():
+        if p.is_dir():
+            entries.append((p, p.stat().st_mtime))
+    entries.sort(key=lambda x: x[1], reverse=True)
+
+    removed = []
+    for idx, (path, mtime) in enumerate(entries):
+        if idx >= max_count or mtime < cutoff:
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(path.name)
+
+    return {"ok": True, "removed": removed, "kept": max(0, len(entries) - len(removed))}
 
 
 @app.get("/jobs/{job_id}/results")
