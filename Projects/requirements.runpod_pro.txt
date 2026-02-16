@@ -21,3 +21,6 @@ deep-sort-realtime>=1.3.2
 
 # Optional but common
 pydantic
+
+# pkg_resources is provided by setuptools and required by deep-sort-realtime
+setuptools>=65
