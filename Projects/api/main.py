@@ -29,6 +29,7 @@ JOBS_DIR = DATA_DIR / "jobs"
 WEB_DIR = BASE_DIR / "web"
 
 REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:6379")
 rconn = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
 q = Queue("jobs", connection=rconn)
 
@@ -320,7 +321,15 @@ def run_job(job_id: str):
 
 @app.get("/jobs/{job_id}/results")
 def results(job_id: str):
-    rp = job_dir(job_id) / "results.json"
-    if not rp.exists():
-        raise HTTPException(status_code=404, detail="No results yet")
-    return JSONResponse(read_json(rp, {}))
+    jd = job_dir(job_id)
+    results_path = jd / "results.json"
+    meta = read_json(meta_path(job_id), {})
+
+    if results_path.exists():
+        return JSONResponse(read_json(results_path, {}))
+
+    # Fallback for workers that persist final data in job.json only.
+    if meta.get("status") == "done":
+        return JSONResponse(meta)
+
+    raise HTTPException(status_code=404, detail="No results yet")
