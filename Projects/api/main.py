@@ -2,10 +2,12 @@ import os
 import json
 import uuid
 import time
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 import subprocess
 import shutil
+from urllib.parse import urlparse
 
 import redis
 from rq import Queue
@@ -35,9 +37,24 @@ WEB_DIR = BASE_DIR / "web"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
+log = logging.getLogger("api")
+
+
+def describe_redis(url: str) -> str:
+    parsed = urlparse(url)
+    db = parsed.path.lstrip("/") or "0"
+    return f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 6379}/{db}"
+
+
 rconn = redis.from_url(REDIS_URL, decode_responses=True)
 q = Queue(QUEUE_NAMES[0], connection=rconn)
-print(f"API starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
+print(
+    "API starting "
+    f"| redis={REDIS_URL} "
+    f"| redis_endpoint={describe_redis(REDIS_URL)} "
+    f"| queues={QUEUE_NAMES} "
+    f"| jobs_dir={JOBS_DIR}"
+)
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -259,7 +276,7 @@ def job_status(job_id: str):
                     meta["progress"] = 100
         except Exception:
             # If Redis/RQ lookup fails, do not break status endpoint.
-            pass
+            log.exception("status lookup failed | job_id=%s | redis_endpoint=%s", job_id, describe_redis(REDIS_URL))
 
     # Convenience flags for the UI
     meta["proxy_ready"] = bool(meta.get("proxy_path") and Path(meta["proxy_path"]).exists())
@@ -397,6 +414,13 @@ def run_job(job_id: str):
     # Long videos + detection can exceed the default RQ timeout (often 180s).
     from worker.tasks import process_job
     rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
+    log.info(
+        "job enqueued | job_id=%s | rq_id=%s | queue=%s | redis_endpoint=%s",
+        job_id,
+        rq_job.get_id(),
+        q.name,
+        describe_redis(REDIS_URL),
+    )
 
     set_status(
         job_id,
@@ -456,6 +480,13 @@ def retry_job(job_id: str):
 
     from worker.tasks import process_job
     rq_job = q.enqueue(process_job, job_id, job_timeout=3600)
+    log.info(
+        "job retried | job_id=%s | rq_id=%s | queue=%s | redis_endpoint=%s",
+        job_id,
+        rq_job.get_id(),
+        q.name,
+        describe_redis(REDIS_URL),
+    )
     set_status(
         job_id,
         "queued",
