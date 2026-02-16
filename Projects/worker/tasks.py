@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import traceback
 import math
 import time
 import shutil
@@ -482,87 +483,118 @@ def concat_clips(clip_paths: List[str], out_path: str) -> None:
 
 
 def process_job(job_id: str) -> Dict[str, Any]:
-    _ensure_dirs()
-    cur = get_current_job()
+  try:
+      _ensure_dirs()
+      cur = get_current_job()
 
-    job_dir = os.path.join(JOBS_DIR, job_id)
-    meta_path = os.path.join(job_dir, "job.json")
-    if not os.path.exists(meta_path):
-        raise RuntimeError(f"Missing job meta: {meta_path}")
+      job_dir = os.path.join(JOBS_DIR, job_id)
+      meta_path = os.path.join(job_dir, "job.json")
+      alt_meta_path = os.path.join(job_dir, "meta.json")
+      if (not os.path.exists(meta_path)) and os.path.exists(alt_meta_path):
+          meta_path = alt_meta_path
 
-    with open(meta_path, "r", encoding="utf-8") as f:
-        jobmeta = json.load(f)
+      if not os.path.exists(meta_path):
+          raise RuntimeError(f"Missing job meta: {meta_path}")
 
-    in_path = jobmeta.get("video_path") or os.path.join(job_dir, "in.mp4")
-    if not os.path.exists(in_path):
-        raise RuntimeError(f"Missing input video: {in_path}")
+      jobmeta = None
+      for _ in range(10):
+          try:
+              with open(meta_path, "r", encoding="utf-8") as f:
+                  jobmeta = json.load(f)
+              break
+          except Exception:
+              time.sleep(0.05)
 
-    proxy_path = os.path.join(job_dir, "input_proxy.mp4")
-    if cur:
-        cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
-        cur.save_meta()
-    make_proxy(in_path, proxy_path)
+      if not isinstance(jobmeta, dict):
+          raise RuntimeError("Could not read job meta JSON")
 
-    jobmeta["proxy_path"] = proxy_path
-    jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
-    jobmeta["proxy_ready"] = True
+      in_path = jobmeta.get("video_path") or os.path.join(job_dir, "in.mp4")
+      if not os.path.exists(in_path):
+          raise RuntimeError(f"Missing input video: {in_path}")
 
-    setup = jobmeta.get("setup") or {}
-    clicks = setup.get("clicks") or []
-    jersey_color = setup.get("jersey_color") or "#203524"
-    opponent_color = setup.get("opponent_color") or None
-    player_number = str(setup.get("player_number") or "")
+      proxy_path = os.path.join(job_dir, "input_proxy.mp4")
+      if cur:
+          cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
+          cur.save_meta()
+      make_proxy(in_path, proxy_path)
 
-    params = TrackingParams(
-        detect_stride=int(setup.get("detect_stride") or 2),
-        yolo_conf=float(setup.get("yolo_conf") or 0.25),
-        pre_roll=float(setup.get("pre_roll") or 2.0),
-        post_roll=float(setup.get("post_roll") or 2.0),
-        gap_merge=float(setup.get("gap_merge") or 1.0),
-        min_clip_len=float(setup.get("min_clip_len") or 6.0),
-    )
+      jobmeta["proxy_path"] = proxy_path
+      jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
+      jobmeta["proxy_ready"] = True
 
-    if cur:
-        cur.meta = {**(cur.meta or {}), "stage": "tracking", "progress": 5}
-        cur.save_meta()
+      setup = jobmeta.get("setup") or {}
+      clicks = setup.get("clicks") or []
+      jersey_color = setup.get("jersey_color") or "#203524"
+      opponent_color = setup.get("opponent_color") or None
+      player_number = str(setup.get("player_number") or "")
 
-    spans, debug = track_presence_spans_pro(
-        video_path=in_path,
-        clicks=clicks,
-        player_number=player_number,
-        jersey_color_hex=jersey_color,
-        opponent_color_hex=opponent_color,
-        params=params,
-    )
+      params = TrackingParams(
+          detect_stride=int(setup.get("detect_stride") or 2),
+          yolo_conf=float(setup.get("yolo_conf") or 0.25),
+          pre_roll=float(setup.get("pre_roll") or 2.0),
+          post_roll=float(setup.get("post_roll") or 2.0),
+          gap_merge=float(setup.get("gap_merge") or 1.0),
+          min_clip_len=float(setup.get("min_clip_len") or 6.0),
+      )
 
-    clips_dir = os.path.join(job_dir, "clips")
-    os.makedirs(clips_dir, exist_ok=True)
+      if cur:
+          cur.meta = {**(cur.meta or {}), "stage": "tracking", "progress": 5}
+          cur.save_meta()
 
-    clips: List[Dict[str, Any]] = []
-    clip_paths: List[str] = []
-    for i, (a, b) in enumerate(spans, start=1):
-        outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
-        cut_clip(in_path, a, b, outp)
-        clip_paths.append(outp)
-        clips.append({"start": float(a), "end": float(b), "path": outp, "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4"})
+      spans, debug = track_presence_spans_pro(
+          video_path=in_path,
+          clicks=clicks,
+          player_number=player_number,
+          jersey_color_hex=jersey_color,
+          opponent_color_hex=opponent_color,
+          params=params,
+      )
 
-    combined_path = os.path.join(job_dir, "combined.mp4")
-    concat_clips(clip_paths, combined_path)
+      clips_dir = os.path.join(job_dir, "clips")
+      os.makedirs(clips_dir, exist_ok=True)
 
-    jobmeta["clips"] = clips
-    jobmeta["combined_path"] = combined_path if os.path.exists(combined_path) else None
-    jobmeta["combined_url"] = f"/data/jobs/{job_id}/combined.mp4" if os.path.exists(combined_path) else None
-    jobmeta["debug"] = debug
-    jobmeta["status"] = "done"
-    jobmeta["progress"] = 100
-    jobmeta["stage"] = "done"
-    jobmeta["updated_at"] = time.time()
+      clips: List[Dict[str, Any]] = []
+      clip_paths: List[str] = []
+      for i, (a, b) in enumerate(spans, start=1):
+          outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
+          cut_clip(in_path, a, b, outp)
+          clip_paths.append(outp)
+          clips.append({"start": float(a), "end": float(b), "path": outp, "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4"})
 
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(jobmeta, f, indent=2)
+      combined_path = os.path.join(job_dir, "combined.mp4")
+      concat_clips(clip_paths, combined_path)
 
-    if cur:
-        cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
-        cur.save_meta()
+      jobmeta["clips"] = clips
+      jobmeta["combined_path"] = combined_path if os.path.exists(combined_path) else None
+      jobmeta["combined_url"] = f"/data/jobs/{job_id}/combined.mp4" if os.path.exists(combined_path) else None
+      jobmeta["debug"] = debug
+      jobmeta["status"] = "done"
+      jobmeta["progress"] = 100
+      jobmeta["stage"] = "done"
+      jobmeta["updated_at"] = time.time()
 
-    return jobmeta
+      with open(meta_path, "w", encoding="utf-8") as f:
+          json.dump(jobmeta, f, indent=2)
+
+      if cur:
+          cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
+          cur.save_meta()
+
+      return jobmeta
+  except Exception as e:
+    tb = traceback.format_exc()
+    try:
+      job_dir = _job_dir(job_id)
+      _ensure_dirs(job_dir)
+      _write_job_meta(job_dir, {
+        'job_id': job_id,
+        'status': 'error',
+        'stage': 'error',
+        'progress': 100,
+        'message': f'Error: {e}',
+        'error': {'type': type(e).__name__, 'detail': str(e), 'traceback': tb},
+        'updated_at': time.time(),
+      })
+    except Exception:
+      pass
+    raise

@@ -120,7 +120,7 @@ async function pollStatus(loop=false){
       setBar(meta.progress ?? 0, `${meta.stage || meta.status || 'unknown'} — ${meta.progress ?? 0}% ${meta.message ? '• ' + meta.message : ''}`);
 
       if(meta.proxy_ready && meta.proxy_url){
-        $('previewHint').textContent = 'Proxy ready. Click Select Player and click torso 3–8 times.';
+        $('previewHint').textContent = 'Proxy ready. Click Select Player and click torso 2–3 times (more is optional).';
         if(!$('vid').src.includes(meta.proxy_url)){
           setVideoSrc(meta.proxy_url);
         }
@@ -307,20 +307,35 @@ function renderClipsUi(res){
 }
 
 function wire(){
-  $('btnCreate').addEventListener('click', createJob);
-  $('btnUpload').addEventListener('click', uploadVideo);
-  $('btnSave').addEventListener('click', saveSetup);
-  $('btnRun').addEventListener('click', runJob);
-  $('btnCancel').addEventListener('click', cancelJob);
-  $('btnSelect').addEventListener('click', toggleSelect);
-  $('btnClearClicks').addEventListener('click', clearClicks);
+  const btnCreate = must("btnCreate");
+  const btnUpload = must("btnUpload");
+  const btnSave = must("btnSave");
+  const btnRun = must("btnRun");
+  const btnCancel = must("btnCancel");
+  const btnSelect = must("btnSelect");
+  const btnClearClicks = must("btnClearClicks");
+  const fileEl = must("file");
+  const vidEl = must("vid");
+  const canvasEl = must("overlay");
+  if(!btnCreate||!btnUpload||!btnSave||!btnRun||!btnCancel||!btnSelect||!btnClearClicks||!fileEl||!vidEl||!canvasEl){
+    alert("UI is missing required elements. Hard refresh the page or re-upload web files.");
+    return;
+  }
 
-  $('file').addEventListener('change', ()=> updateButtons(state.lastStatus));
-  $('vid').addEventListener('click', handleVideoClick);
+  btnCreate.addEventListener('click', createJob);
+  btnUpload.addEventListener('click', uploadVideo);
+  btnSave.addEventListener('click', saveSetup);
+  btnRun.addEventListener('click', runJob);
+  btnCancel.addEventListener('click', cancelJob);
+  btnSelect.addEventListener('click', toggleSelect);
+  btnClearClicks.addEventListener('click', clearClicks);
+
+  fileEl.addEventListener('change', ()=> updateButtons(state.lastStatus));
+  vidEl.addEventListener('click', handleVideoClick);
 
   window.addEventListener('resize', ()=>{ resizeOverlay(); drawOverlay(); });
-  $('vid').addEventListener('loadedmetadata', ()=>{ resizeOverlay(); drawOverlay(); });
-  $('vid').addEventListener('timeupdate', ()=>{ /* keep overlay stable */ });
+  vidEl.addEventListener('loadedmetadata', ()=>{ resizeOverlay(); drawOverlay(); });
+  vidEl.addEventListener('timeupdate', ()=>{ /* keep overlay stable */ });
 
   setPill('idle');
   setBar(0, 'idle');
@@ -332,5 +347,8 @@ function wire(){
   updateButtons(null);
 }
 
-wire();
-
+if(document.readyState === "loading"){
+  document.addEventListener("DOMContentLoaded", wire);
+}else{
+  wire();
+}

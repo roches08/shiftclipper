@@ -8,6 +8,7 @@ import subprocess
 
 import redis
 from rq import Queue
+from rq.job import Job
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,20 +47,29 @@ def job_dir(job_id: str) -> Path:
 
 
 def meta_path(job_id: str) -> Path:
-    return job_dir(job_id) / "meta.json"
+    return job_dir(job_id) / "job.json"
 
 
 def read_json(path: Path, default: Any) -> Any:
+    """Read JSON safely (handles empty/partial files)."""
     if not path.exists():
         return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
 def write_json(path: Path, obj: Any) -> None:
+    """Atomic JSON write to avoid partial files seen by other threads."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
 
 
 def set_status(
@@ -152,16 +162,38 @@ def job_status(job_id: str):
     mp = meta_path(job_id)
     if not mp.exists():
         raise HTTPException(status_code=404, detail="Job not found")
+
     meta = read_json(mp, {})
 
-    # Convenience fields UI expects
-    proxy_path = meta.get("proxy_path")
-    if proxy_path and os.path.exists(proxy_path):
-        meta["proxy_ready"] = True
+    # Reflect actual RQ state so the UI never sits "queued" forever
+    rq_id = meta.get("rq_id")
+    if rq_id:
+        try:
+            rconn = redis.from_url(REDIS_URL)
+            rq_job = Job.fetch(rq_id, connection=rconn)
+            if rq_job.is_failed:
+                exc = (rq_job.exc_info or "").strip()
+                msg = "Worker failed."
+                if exc:
+                    # show last line of stacktrace for quick debugging
+                    msg = exc.splitlines()[-1][:500]
+                meta.update({
+                    "status": "error",
+                    "stage": "error",
+                    "progress": 100,
+                    "message": msg,
+                    "updated_at": time.time(),
+                })
+                write_json(mp, meta)
+        except Exception:
+            # If Redis/RQ lookup fails, do not break status endpoint.
+            pass
+
+    # Convenience flags for the UI
+    meta["proxy_ready"] = bool(meta.get("proxy_path") and Path(meta["proxy_path"]).exists())
+    if meta.get("proxy_path"):
         meta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
     return meta
-
-
 @app.get("/data/jobs/{job_id}/{path:path}")
 def serve_job_file(job_id: str, path: str):
     full = job_dir(job_id) / path
@@ -190,7 +222,7 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
             f.write(chunk)
 
     # Persist metadata for the worker (this was missing before)
-    write_json(jd / "meta.json", {
+    write_json(meta_path(job_id), {
         "video_path": in_path,
         "orig_filename": file.filename,
         "uploaded_at": time.time(),
@@ -210,9 +242,9 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Proxy creation failed")
 
     # Store proxy path too (useful for UI)
-    meta = read_json(jd / "meta.json", {})
+    meta = read_json(meta_path(job_id), {})
     meta["proxy_path"] = proxy_path
-    write_json(jd / "meta.json", meta)
+    write_json(meta_path(job_id), meta)
 
     set_status(job_id, "ready", extra={
         "proxy_path": proxy_path,
@@ -250,7 +282,7 @@ def run_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     # Make sure we have an input video before we queue work
-    meta = read_json(jd / "meta.json", {})
+    meta = read_json(meta_path(job_id), {})
     video_path = meta.get("video_path")
     if not video_path or not Path(video_path).exists():
         # Fallback: accept common filenames if meta.json is missing/old
@@ -258,7 +290,7 @@ def run_job(job_id: str):
             if cand.exists():
                 video_path = str(cand)
                 meta["video_path"] = video_path
-                write_json(jd / "meta.json", meta)
+                write_json(meta_path(job_id), meta)
                 break
 
     if not video_path or not Path(video_path).exists():
@@ -292,4 +324,3 @@ def results(job_id: str):
     if not rp.exists():
         raise HTTPException(status_code=404, detail="No results yet")
     return JSONResponse(read_json(rp, {}))
-
