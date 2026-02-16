@@ -5,6 +5,13 @@
 // - Setup includes: camera_mode, player_number, jersey_color, extend_sec, verify_mode, clicks
 
 const $ = (id) => document.getElementById(id);
+const must = (id) => {
+  const el = document.getElementById(id);
+  if (!el) {
+    console.error(`Missing required element: #${id}`);
+  }
+  return el;
+};
 
 const state = {
   jobId: null,

@@ -576,6 +576,10 @@ def process_job(job_id: str) -> Dict[str, Any]:
       with open(meta_path, "w", encoding="utf-8") as f:
           json.dump(jobmeta, f, indent=2)
 
+      results_path = os.path.join(job_dir, "results.json")
+      with open(results_path, "w", encoding="utf-8") as f:
+          json.dump(jobmeta, f, indent=2)
+
       if cur:
           cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
           cur.save_meta()
@@ -584,17 +588,21 @@ def process_job(job_id: str) -> Dict[str, Any]:
   except Exception as e:
     tb = traceback.format_exc()
     try:
-      job_dir = _job_dir(job_id)
-      _ensure_dirs(job_dir)
-      _write_job_meta(job_dir, {
-        'job_id': job_id,
-        'status': 'error',
-        'stage': 'error',
-        'progress': 100,
-        'message': f'Error: {e}',
-        'error': {'type': type(e).__name__, 'detail': str(e), 'traceback': tb},
-        'updated_at': time.time(),
-      })
+      os.makedirs(JOBS_DIR, exist_ok=True)
+      failed_job_dir = os.path.join(JOBS_DIR, job_id)
+      os.makedirs(failed_job_dir, exist_ok=True)
+      fail_meta_path = os.path.join(failed_job_dir, "job.json")
+      fail_meta = {
+        "job_id": job_id,
+        "status": "error",
+        "stage": "error",
+        "progress": 100,
+        "message": f"Error: {e}",
+        "error": {"type": type(e).__name__, "detail": str(e), "traceback": tb},
+        "updated_at": time.time(),
+      }
+      with open(fail_meta_path, "w", encoding="utf-8") as f:
+        json.dump(fail_meta, f, indent=2)
     except Exception:
       pass
     raise
