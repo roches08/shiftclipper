@@ -102,6 +102,7 @@ class TrackingParams:
     min_clip_len: float = 6.0
     ocr_stride_s: float = 0.8
     ocr_min_conf: float = 0.35
+    verify_mode: bool = True
 
 
 def _device() -> str:
@@ -119,7 +120,9 @@ def _load_yolo(model_path: str) -> Any:
     return YOLO(model_path)
 
 
-def _load_ocr() -> Optional[Any]:
+def _load_ocr(enabled: bool = True) -> Optional[Any]:
+    if not enabled:
+        return None
     if easyocr is None:
         return None
     try:
@@ -172,6 +175,7 @@ def track_presence_spans_pro(
     jersey_color_hex: str,
     opponent_color_hex: Optional[str],
     params: TrackingParams,
+    cancel_check: Optional[Any] = None,
 ) -> Tuple[List[Tuple[float, float]], Dict[str, Any]]:
 
     if DeepSort is None:
@@ -183,7 +187,7 @@ def track_presence_spans_pro(
 
     yolo = _load_yolo(model_path)
 
-    ocr = _load_ocr()
+    ocr = _load_ocr(params.verify_mode)
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -255,6 +259,8 @@ def track_presence_spans_pro(
 
     frame_idx = 0
     while True:
+        if cancel_check and cancel_check():
+            raise RuntimeError("Job cancelled by user.")
         ok, frame = cap.read()
         if not ok:
             break
@@ -483,6 +489,18 @@ def concat_clips(clip_paths: List[str], out_path: str) -> None:
 
 
 def process_job(job_id: str) -> Dict[str, Any]:
+
+  class JobCancelled(Exception):
+      pass
+
+  def is_cancel_requested(path: str) -> bool:
+      try:
+          with open(path, "r", encoding="utf-8") as f:
+              meta = json.load(f)
+          return bool(meta.get("cancel_requested"))
+      except Exception:
+          return False
+
   try:
       _ensure_dirs()
       cur = get_current_job()
@@ -512,6 +530,9 @@ def process_job(job_id: str) -> Dict[str, Any]:
       if not os.path.exists(in_path):
           raise RuntimeError(f"Missing input video: {in_path}")
 
+      if is_cancel_requested(meta_path):
+          raise JobCancelled("Job cancelled before processing started.")
+
       proxy_path = os.path.join(job_dir, "input_proxy.mp4")
       if cur:
           cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
@@ -532,9 +553,11 @@ def process_job(job_id: str) -> Dict[str, Any]:
           detect_stride=int(setup.get("detect_stride") or 2),
           yolo_conf=float(setup.get("yolo_conf") or 0.25),
           pre_roll=float(setup.get("pre_roll") or 2.0),
-          post_roll=float(setup.get("post_roll") or 2.0),
+          post_roll=float(setup.get("post_roll") or setup.get("extend_sec") or 2.0),
           gap_merge=float(setup.get("gap_merge") or 1.0),
           min_clip_len=float(setup.get("min_clip_len") or 6.0),
+          ocr_min_conf=float(setup.get("ocr_min_conf") or 0.35),
+          verify_mode=bool(setup.get("verify_mode", True)),
       )
 
       if cur:
@@ -548,6 +571,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
           jersey_color_hex=jersey_color,
           opponent_color_hex=opponent_color,
           params=params,
+          cancel_check=lambda: is_cancel_requested(meta_path),
       )
 
       clips_dir = os.path.join(job_dir, "clips")
@@ -556,6 +580,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
       clips: List[Dict[str, Any]] = []
       clip_paths: List[str] = []
       for i, (a, b) in enumerate(spans, start=1):
+          if is_cancel_requested(meta_path):
+              raise JobCancelled("Job cancelled while building clips.")
           outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
           cut_clip(in_path, a, b, outp)
           clip_paths.append(outp)
@@ -585,6 +611,22 @@ def process_job(job_id: str) -> Dict[str, Any]:
           cur.save_meta()
 
       return jobmeta
+  except JobCancelled as e:
+    fail_meta = {
+      "job_id": job_id,
+      "status": "cancelled",
+      "stage": "cancelled",
+      "progress": 100,
+      "message": str(e),
+      "updated_at": time.time(),
+    }
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    failed_job_dir = os.path.join(JOBS_DIR, job_id)
+    os.makedirs(failed_job_dir, exist_ok=True)
+    fail_meta_path = os.path.join(failed_job_dir, "job.json")
+    with open(fail_meta_path, "w", encoding="utf-8") as f:
+      json.dump(fail_meta, f, indent=2)
+    return fail_meta
   except Exception as e:
     tb = traceback.format_exc()
     try:
