@@ -1,5 +1,12 @@
+# macOS finder metadata
 .DS_Store
+**/.DS_Store
+
+# local runtime artifacts
 Projects/data/jobs/
+data/jobs/
+
+# local virtualenv + Python cache
 Projects/.venv/
 __pycache__/
 *.pyc
