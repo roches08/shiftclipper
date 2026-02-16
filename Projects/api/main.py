@@ -183,6 +183,31 @@ def health():
     return {"status": "ok", "root": str(BASE_DIR)}
 
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        redis.from_url(REDIS_URL).ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+
+    jobs_dir_ok = JOBS_DIR.exists() and JOBS_DIR.is_dir()
+    status_code = 200 if redis_ok and jobs_dir_ok else 503
+    payload = {
+        "status": "ready" if status_code == 200 else "not_ready",
+        "redis": redis_ok,
+        "jobs_dir": str(JOBS_DIR),
+        "jobs_dir_ok": jobs_dir_ok,
+        "queue": QUEUE_NAMES[0] if QUEUE_NAMES else "jobs",
+    }
+    return JSONResponse(payload, status_code=status_code)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     index_path = WEB_DIR / "index.html"
