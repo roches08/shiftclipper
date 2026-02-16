@@ -3,7 +3,7 @@ import time
 import argparse
 
 import redis
-from rq import Connection, Queue, Worker
+from rq import Queue, Worker
 from rq.job import Job
 
 
@@ -37,15 +37,15 @@ def main() -> None:
         f.write("ok\n")
     os.remove(probe_path)
 
-    conn = redis.from_url(REDIS_URL)
+    conn = redis.Redis.from_url(REDIS_URL)
     print(f"Worker starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))
 
-    with Connection(conn):
-        worker = Worker([Queue(name, connection=conn) for name in QUEUE_NAMES])
-        worker.work()
+    queues = [Queue(name, connection=conn) for name in QUEUE_NAMES]
+    worker = Worker(queues, connection=conn)
+    worker.work()
 
 
 if __name__ == "__main__":
