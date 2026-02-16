@@ -31,7 +31,7 @@ redis-cli ping >/dev/null
 
 echo "==> Stop old"
 pkill -f "uvicorn api.main:app" || true
-pkill -f "rq worker" || true
+pkill -f "python -m worker.main" || true
 
 echo "==> Start worker"
 export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
@@ -40,6 +40,14 @@ export RQ_QUEUES="${RQ_QUEUES:-jobs}"
 mkdir -p "$JOBS_DIR"
 echo "Worker env: REDIS_URL=$REDIS_URL RQ_QUEUES=$RQ_QUEUES JOBS_DIR=$JOBS_DIR"
 nohup "$PROJECTS_DIR/.venv/bin/python" -m worker.main > /workspace/worker.log 2>&1 &
+sleep 1
+if pgrep -f "python -m worker.main" >/dev/null; then
+  echo "Worker started and running."
+else
+  echo "Worker failed to stay running; see /workspace/worker.log"
+  tail -n 120 /workspace/worker.log || true
+  exit 1
+fi
 
 echo "==> Start API"
 nohup "$PROJECTS_DIR/.venv/bin/uvicorn" api.main:app --host 0.0.0.0 --port 8000 --log-level info > /workspace/api.log 2>&1 &
@@ -48,3 +56,4 @@ echo
 echo "✅ Started (PRO)."
 echo "API log:    tail -n 200 /workspace/api.log"
 echo "Worker log: tail -n 200 /workspace/worker.log"
+echo "Queue check: redis-cli llen rq:queue:jobs"

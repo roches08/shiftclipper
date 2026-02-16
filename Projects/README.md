@@ -73,6 +73,14 @@ curl -s -X POST "http://127.0.0.1:8000/jobs/cleanup?days=7&max_count=100"
 
 ## Troubleshooting: “queued forever”
 
+Quick queue verify after posting a job:
+
+```bash
+redis-cli llen rq:queue:jobs
+```
+
+The length should drop as soon as the worker picks the queued job.
+
 - Confirm worker is running and listening on the same `RQ_QUEUES` queue as API enqueue target.
 - Confirm API and worker share the same `JOBS_DIR` mount.
 - Use `/jobs/<id>/status` and check `rq_state`; status now derives from RQ (`queued/started/finished/failed`) and merges file status.
