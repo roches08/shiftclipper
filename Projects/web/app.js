@@ -58,7 +58,7 @@ function updateButtons(meta){
   $('btnSave').disabled = !haveJob || clickCount < 3;
   const status = meta?.status || meta?.stage;
   const isReady = meta && (meta.status === 'ready' || meta.stage === 'ready');
-  const isBlocked = ['queued','processing','running','done','error','cancelled'].includes(String(status));
+  const isBlocked = ['queued','processing','running','done','error','failed','cancelled'].includes(String(status));
   $('btnRun').disabled = !haveJob || !isReady || isBlocked;
   $('btnCancel').disabled = !haveJob;
 }
@@ -156,7 +156,7 @@ async function pollStatus(loop=false){
       updateButtons(meta);
 
       if(!loop) break;
-      if(['done','error','cancelled'].includes(meta.status)) break;
+      if(['done','error','failed','cancelled'].includes(meta.status)) break;
       await new Promise(res=>setTimeout(res, 1200));
     }
   }catch(e){
