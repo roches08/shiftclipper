@@ -1,0 +1,23 @@
+# RunPod GPU requirements for ShiftClipper (PRO tracking)
+# Install these inside Projects/.venv
+
+# Core app
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+rq
+redis
+requests
+
+# Video + math
+numpy
+opencv-python
+scipy
+
+# Detection + tracking (PRO)
+ultralytics>=8.2.0
+deep-sort-realtime>=1.3.2
+
+# Optional but common
+pydantic

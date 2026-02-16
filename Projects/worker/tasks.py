@@ -1,666 +1,568 @@
 import os
+import re
 import json
-import time
 import math
-import subprocess
-from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
+import time
+import shutil
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
-# DeepSORT tracker
-from deep_sort_realtime.deepsort_tracker import DeepSort
+from rq import get_current_job
 
-"""
-Worker: YOLO + DeepSORT tracker (identity persistence)
-
-Pipeline:
-1) Use clicks (2-3) to seed who the player is (seed bbox).
-2) Run YOLO "person" detection at a stride on frames (supported source type).
-3) Feed detections to DeepSORT to get stable track IDs.
-4) Lock onto a target track ID based on click/seed proximity.
-5) Build presence spans (sticky + merge gaps + pre/post roll + min clip)
-6) Cut clips and concat into combined.mp4
-"""
-
-BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parents[1])).resolve()
-JOBS_DIR = BASE_DIR / "data" / "jobs"
-
-_YOLO_MODEL: Optional[YOLO] = None
-
-
-def _job_dir(job_id: str) -> Path:
-    return JOBS_DIR / job_id
-
-
-def _read_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-def _ffprobe_duration(video_path: Path) -> float:
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path),
-    ]
-    out = subprocess.check_output(cmd).decode("utf-8").strip()
-    return float(out)
-
-
-def _ffprobe_fps(video_path: Path) -> float:
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=r_frame_rate",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path),
-    ]
-    out = subprocess.check_output(cmd).decode("utf-8").strip()
-    if "/" in out:
-        a, b = out.split("/")
-        a = float(a)
-        b = float(b)
-        return a / b if b else 30.0
-    return float(out)
-
-
-def _ensure_yolo(weights: str = "yolov8s.pt") -> YOLO:
-    global _YOLO_MODEL
-    if _YOLO_MODEL is None:
-        _YOLO_MODEL = YOLO(weights)
-    return _YOLO_MODEL
-
-
-def _norm_click_to_px(click: Dict[str, float], W: int, H: int) -> Tuple[int, int]:
-    x = int(round(float(click["x"]) * W))
-    y = int(round(float(click["y"]) * H))
-    return x, y
-
-
-def _pick_seed_bbox_from_clicks(
-    cap: cv2.VideoCapture,
-    yolo: YOLO,
-    clicks: List[Dict[str, float]],
-    fps: float,
-    W: int,
-    H: int,
-    yolo_conf: float,
-) -> Tuple[List[int], List[Dict[str, Any]]]:
-    """
-    For each click: run YOLO on that frame, pick the person box containing/closest to the click.
-    Then fuse into a single seed bbox (median corners).
-    """
-    seed_frames_debug: List[Dict[str, Any]] = []
-    picked_boxes: List[List[int]] = []
-
-    for c in clicks:
-        t = float(c["t"])
-        frame_idx = int(round(t * fps))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            seed_frames_debug.append({"t": t, "frame": frame_idx, "dets": 0, "picked": None})
-            continue
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = yolo.predict(rgb, verbose=False, conf=yolo_conf, classes=[0])  # class 0 = person
-        boxes = []
-        if res and len(res) > 0 and res[0].boxes is not None:
-            for b in res[0].boxes.xyxy.cpu().numpy().tolist():
-                x1, y1, x2, y2 = map(int, b[:4])
-                boxes.append([x1, y1, x2, y2])
-
-        cx, cy = _norm_click_to_px(c, W, H)
-
-        picked = None
-        best = 1e18
-        for (x1, y1, x2, y2) in boxes:
-            inside = (x1 <= cx <= x2) and (y1 <= cy <= y2)
-            mx = (x1 + x2) * 0.5
-            my = (y1 + y2) * 0.5
-            d = (mx - cx) ** 2 + (my - cy) ** 2
-            score = d * (0.25 if inside else 1.0)
-            if score < best:
-                best = score
-                picked = [x1, y1, x2, y2]
-
-        seed_frames_debug.append({"t": t, "frame": frame_idx, "dets": len(boxes), "picked": picked})
-        if picked is not None:
-            picked_boxes.append(picked)
-
-    if not picked_boxes:
-        # fallback seed box (center-ish) so pipeline doesn't crash
-        seed = [int(W * 0.45), int(H * 0.35), int(W * 0.55), int(H * 0.75)]
-        return seed, seed_frames_debug
-
-    arr = np.array(picked_boxes, dtype=np.float32)
-    seed = np.median(arr, axis=0).astype(int).tolist()
-    return seed, seed_frames_debug
-
-
-def _iou(a: List[int], b: List[int]) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
-    inter = iw * ih
-    if inter <= 0:
-        return 0.0
-    a_area = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    b_area = max(0, bx2 - bx1) * max(0, by2 - by1)
-    denom = (a_area + b_area - inter)
-    return float(inter) / float(denom) if denom else 0.0
-
-
-def _mean_rgb_in_bbox(frame_bgr: np.ndarray, bb_xyxy: List[int]) -> np.ndarray:
-    """Mean RGB (normalized 0..1) in the central torso region of a bbox."""
-    x1, y1, x2, y2 = bb_xyxy
-    h = max(1, y2 - y1)
-    w = max(1, x2 - x1)
-
-    cx1 = x1 + int(0.20 * w)
-    cx2 = x1 + int(0.80 * w)
-    cy1 = y1 + int(0.25 * h)
-    cy2 = y1 + int(0.70 * h)
-
-    cx1 = max(0, cx1)
-    cy1 = max(0, cy1)
-    cx2 = min(frame_bgr.shape[1], cx2)
-    cy2 = min(frame_bgr.shape[0], cy2)
-
-    roi = frame_bgr[cy1:cy2, cx1:cx2]
-    if roi.size == 0:
-        return np.array([0.0, 0.0, 0.0], dtype=np.float32)
-    rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-    m = rgb.reshape(-1, 3).mean(axis=0).astype(np.float32) / 255.0
-    return m
-
-
-def _color_sim(a_rgb_norm: np.ndarray, b_rgb_norm: np.ndarray) -> float:
-    """Cosine similarity in RGB space (0..1-ish)."""
-    a = a_rgb_norm.astype(np.float32)
-    b = b_rgb_norm.astype(np.float32)
-    na = float(np.linalg.norm(a) + 1e-6)
-    nb = float(np.linalg.norm(b) + 1e-6)
-    return float(np.dot(a, b) / (na * nb))
-
-
-def track_presence_spans(
-    video_path: Path,
-    clicks: List[Dict[str, float]],
-    jersey_hex: Optional[str] = None,
-    opponent_hex: Optional[str] = None,
-    player_number: Optional[str] = None,
-    detect_stride: int = 3,
-    yolo_conf: float = 0.25,
-    dist_gate_norm: float = 0.18,
-    sticky_seconds: float = 1.5,
-    gap_merge: float = 2.0,
-    pre_roll: float = 4.0,
-    post_roll: float = 1.5,
-    min_clip_len: float = 20.0,
-    color_sim_min: float = 0.86,
-    ocr_stride_s: float = 1.0,
-    device: Optional[str] = None,
-) -> Tuple[List[Tuple[float, float]], Dict[str, Any]]:
+# --- Optional heavy deps (installed in requirements.runpod_pro.txt) ---
+try:
     import torch
-    import re
-    try:
-        import easyocr
-    except Exception:
-        easyocr = None
+except Exception:  # pragma: no cover
+    torch = None
 
-    cap = cv2.VideoCapture(str(video_path))
+try:
+    from ultralytics import YOLO
+except Exception:  # pragma: no cover
+    YOLO = None
+
+try:
+    import easyocr
+except Exception:  # pragma: no cover
+    easyocr = None
+
+try:
+    from deep_sort_realtime.deepsort_tracker import DeepSort
+except Exception:  # pragma: no cover
+    DeepSort = None
+
+log = logging.getLogger("worker")
+log.setLevel(logging.INFO)
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+JOBS_DIR = os.path.join(DATA_DIR, "jobs")
+
+
+def _ensure_dirs() -> None:
+    os.makedirs(JOBS_DIR, exist_ok=True)
+
+
+def _hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
+    h = (hex_color or "").strip().lstrip("#")
+    if len(h) != 6:
+        return (0, 0, 0)
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return (b, g, r)
+
+
+def _mean_color_bgr(img: np.ndarray) -> Tuple[float, float, float]:
+    if img.size == 0:
+        return (0.0, 0.0, 0.0)
+    m = img.reshape(-1, 3).mean(axis=0)
+    return float(m[0]), float(m[1]), float(m[2])
+
+
+def _color_sim(bgr_a: Tuple[float, float, float], bgr_b: Tuple[float, float, float]) -> float:
+    da = np.array(bgr_a, dtype=np.float32)
+    db = np.array(bgr_b, dtype=np.float32)
+    dist = float(np.linalg.norm(da - db))
+    return max(0.0, 1.0 - dist / 441.0)
+
+
+def _clip_box(x1: int, y1: int, x2: int, y2: int, w: int, h: int) -> Tuple[int, int, int, int]:
+    x1 = max(0, min(w - 1, x1))
+    x2 = max(0, min(w - 1, x2))
+    y1 = max(0, min(h - 1, y1))
+    y2 = max(0, min(h - 1, y2))
+    if x2 <= x1:
+        x2 = min(w - 1, x1 + 1)
+    if y2 <= y1:
+        y2 = min(h - 1, y1 + 1)
+    return x1, y1, x2, y2
+
+
+def _parse_digits(text: str) -> Optional[str]:
+    if not text:
+        return None
+    digits = re.sub(r"\D+", "", text)
+    return digits or None
+
+
+@dataclass
+class TrackingParams:
+    yolo_conf: float = 0.25
+    detect_stride: int = 2
+    max_age: int = 40
+    n_init: int = 2
+    pre_roll: float = 2.0
+    post_roll: float = 2.0
+    gap_merge: float = 1.0
+    min_clip_len: float = 6.0
+    ocr_stride_s: float = 0.8
+    ocr_min_conf: float = 0.35
+
+
+def _device() -> str:
+    if torch is None:
+        return "cpu"
+    try:
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _load_yolo(model_path: str) -> Any:
+    if YOLO is None:
+        raise RuntimeError("ultralytics is not installed")
+    return YOLO(model_path)
+
+
+def _load_ocr() -> Optional[Any]:
+    if easyocr is None:
+        return None
+    try:
+        return easyocr.Reader(["en"], gpu=_device().startswith("cuda"))
+    except Exception:
+        return easyocr.Reader(["en"], gpu=False)
+
+
+def _extract_person_dets(yolo_res: Any) -> List[Tuple[Tuple[int, int, int, int], float]]:
+    dets: List[Tuple[Tuple[int, int, int, int], float]] = []
+    boxes = getattr(yolo_res, "boxes", None)
+    if boxes is None:
+        return dets
+    xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else np.array(boxes.xyxy)
+    conf = boxes.conf.cpu().numpy() if hasattr(boxes.conf, "cpu") else np.array(boxes.conf)
+    cls = boxes.cls.cpu().numpy() if hasattr(boxes.cls, "cpu") else np.array(boxes.cls)
+    for (x1, y1, x2, y2), c, k in zip(xyxy, conf, cls):
+        if int(k) != 0:
+            continue
+        dets.append(((int(x1), int(y1), int(x2), int(y2)), float(c)))
+    return dets
+
+
+def _best_track_for_click(tracks: List[Any], click_xy: Tuple[float, float], W: int, H: int) -> Optional[int]:
+    cx, cy = click_xy
+    px = int(cx * W)
+    py = int(cy * H)
+    best_id = None
+    best_dist = 1e18
+    for tr in tracks:
+        if not tr.is_confirmed():
+            continue
+        l, t, r, b = tr.to_ltrb()
+        l, t, r, b = int(l), int(t), int(r), int(b)
+        if px < l or px > r or py < t or py > b:
+            continue
+        mx = (l + r) / 2.0
+        my = (t + b) / 2.0
+        d = (mx - px) ** 2 + (my - py) ** 2
+        if d < best_dist:
+            best_dist = d
+            best_id = tr.track_id
+    return best_id
+
+
+def track_presence_spans_pro(
+    video_path: str,
+    clicks: List[Dict[str, float]],
+    player_number: str,
+    jersey_color_hex: str,
+    opponent_color_hex: Optional[str],
+    params: TrackingParams,
+) -> Tuple[List[Tuple[float, float]], Dict[str, Any]]:
+
+    if DeepSort is None:
+        raise RuntimeError("deep-sort-realtime is not installed")
+
+    model_path = os.path.join(BASE_DIR, "yolov8s.pt")
+    if not os.path.exists(model_path):
+        model_path = "yolov8s.pt"
+
+    yolo = _load_yolo(model_path)
+
+    ocr = _load_ocr()
+
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
 
-    fps = _ffprobe_fps(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration_s = float(total_frames) / float(fps) if fps > 0 and total_frames > 0 else _ffprobe_duration(video_path)
-
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    duration_s = (total_frames / fps) if total_frames and fps else 0.0
 
-    yolo = _ensure_yolo("yolov8s.pt")
-    # Default: use GPU if available
-    if device is None:
-        device = 0 if bool(torch.cuda.is_available()) else 'cpu'
+    player_bgr = _hex_to_bgr(jersey_color_hex)
+    opp_bgr = _hex_to_bgr(opponent_color_hex) if opponent_color_hex else None
+    target_digits = re.sub(r"\D+", "", (player_number or ""))
+    target_digits = target_digits.lstrip("0") or target_digits
 
-    # Jersey color signatures
-    target_rgb = None
-    opp_rgb = None
-    if jersey_hex:
-        h = jersey_hex.strip().lstrip('#')
-        if len(h) == 6:
-            target_rgb = np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=np.float32) / 255.0
-    if opponent_hex:
-        h = opponent_hex.strip().lstrip('#')
-        if len(h) == 6:
-            opp_rgb = np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=np.float32) / 255.0
-
-    # OCR init (only if user provides a target number)
-    ocr = None
-    if player_number and easyocr is not None:
-        try:
-            ocr = easyocr.Reader(['en'], gpu=bool(torch.cuda.is_available()))
-        except Exception:
-            ocr = None
-
-    # Build seed bbox using 2-3 clicks (recommended)
-    seed_bbox, seed_frames_debug = _pick_seed_bbox_from_clicks(cap, yolo, clicks, fps, W, H, yolo_conf)
-
-    # DeepSORT tracker
     tracker = DeepSort(
-        max_age=30,
-        n_init=2,
+        max_age=params.max_age,
+        n_init=params.n_init,
+        nms_max_overlap=1.0,
         max_iou_distance=0.7,
         max_cosine_distance=0.4,
         nn_budget=None,
-        override_track_class=None,
+        embedder="mobilenet",
+        half=True,
+        bgr=True,
+        embedder_gpu=_device().startswith("cuda"),
     )
 
-    # We will lock onto one track_id that overlaps seed_bbox early on
-    target_track_id: Optional[int] = None
+    clicks_sorted = sorted((clicks or []), key=lambda c: float(c.get("t", 0.0)))
+    debug_clicks = [{"t": c.get("t"), "x": c.get("x"), "y": c.get("y")} for c in clicks_sorted]
 
-    present_flags = []
-    debug_samples = []
+    chosen_track_id: Optional[int] = None
+    chosen_votes: Dict[int, int] = {}
+    last_box: Optional[Tuple[int, int, int, int]] = None
+    last_seen_t: Optional[float] = None
+    present_samples: List[Tuple[float, bool]] = []
+    ocr_cache: Dict[int, Tuple[float, Optional[str], float]] = {}
 
-    # rewind
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    frame_idx = 0
-
-    # distance gate in pixels
-    dist_gate_px = dist_gate_norm * math.sqrt(W * W + H * H)
-
-    last_good_bbox = seed_bbox[:]  # keep last bbox to help gating
-
-    next_ocr_t = 0.0
-    num_bad_streak = 0
-    num_ok_streak = 0
-
-    def _read_number(frame_bgr: np.ndarray, bb: List[int]) -> Optional[str]:
+    def maybe_ocr(frame_bgr: np.ndarray, box: Tuple[int, int, int, int]) -> Tuple[Optional[str], float]:
         if ocr is None:
-            return None
-        x1, y1, x2, y2 = bb
-        w = max(1, x2 - x1)
-        h = max(1, y2 - y1)
-        # torso crop
-        cx1 = x1 + int(0.20 * w)
-        cx2 = x1 + int(0.80 * w)
-        cy1 = y1 + int(0.15 * h)
-        cy2 = y1 + int(0.65 * h)
-        cx1 = max(0, cx1); cy1 = max(0, cy1)
-        cx2 = min(frame_bgr.shape[1], cx2); cy2 = min(frame_bgr.shape[0], cy2)
-        crop = frame_bgr[cy1:cy2, cx1:cx2]
+            return None, 0.0
+        x1, y1, x2, y2 = box
+        y_top = y1 + int(0.20 * (y2 - y1))
+        y_bot = y1 + int(0.75 * (y2 - y1))
+        crop = frame_bgr[y_top:y_bot, x1:x2]
         if crop.size == 0:
-            return None
+            return None, 0.0
         try:
-            out = ocr.readtext(crop, detail=1, paragraph=False, allowlist='0123456789')
+            results = ocr.readtext(crop, detail=1, paragraph=False)
         except Exception:
-            return None
-        if not out:
-            return None
-        best = sorted(out, key=lambda x: float(x[2]), reverse=True)[0]
-        txt = re.sub(r"\D+", "", str(best[1]))
-        return txt or None
+            return None, 0.0
+        best_digits = None
+        best_conf = 0.0
+        for _bbox, text, conf in results:
+            d = _parse_digits(str(text))
+            if not d:
+                continue
+            if float(conf) > best_conf:
+                best_conf = float(conf)
+                best_digits = d
+        if best_conf < params.ocr_min_conf:
+            return None, float(best_conf)
+        return best_digits, float(best_conf)
 
+    next_click_idx = 0
+    next_click_t = float(clicks_sorted[0]["t"]) if clicks_sorted else math.inf
+    next_ocr_t = 0.0
+
+    frame_idx = 0
     while True:
         ok, frame = cap.read()
-        if not ok or frame is None:
+        if not ok:
             break
-
-        t = frame_idx / fps if fps > 0 else 0.0
-
-        if frame_idx % detect_stride != 0:
-            # just carry presence as unknown; we’ll fill with sticky later
-            present_flags.append((t, None, None, None, None, None))
+        if (frame_idx % params.detect_stride) != 0:
             frame_idx += 1
             continue
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = yolo.predict(
-            rgb,
-            verbose=False,
-            conf=yolo_conf,
-            classes=[0],
-            device=device if device is not None else None,
-        )
+        t_s = frame_idx / fps
 
-        dets = []
-        boxes = []
-        if res and len(res) > 0 and res[0].boxes is not None:
-            for b, conf in zip(res[0].boxes.xyxy.cpu().numpy(), res[0].boxes.conf.cpu().numpy()):
-                x1, y1, x2, y2 = map(int, b[:4].tolist())
-                boxes.append([x1, y1, x2, y2])
-                # DeepSORT wants: [x, y, w, h], confidence, class
-                dets.append(([x1, y1, x2 - x1, y2 - y1], float(conf), "person"))
+        pred = yolo.predict(source=frame, conf=params.yolo_conf, verbose=False, imgsz=640,
+                            device=0 if _device().startswith("cuda") else "cpu")
+        yres = pred[0] if isinstance(pred, (list, tuple)) and pred else pred
+        dets = _extract_person_dets(yres)
 
-        tracks = tracker.update_tracks(dets, frame=frame)
+        ds_in = []
+        for (x1, y1, x2, y2), conf in dets:
+            x1, y1, x2, y2 = _clip_box(x1, y1, x2, y2, W, H)
+            ds_in.append(([x1, y1, x2 - x1, y2 - y1], conf, "person"))
 
-        # Convert tracks to xyxy (with optional jersey-color gating)
-        track_boxes = []
-        for trk in tracks:
-            if not trk.is_confirmed():
+        tracks = tracker.update_tracks(ds_in, frame=frame)
+
+        while t_s + (0.5 / fps) >= next_click_t and next_click_idx < len(clicks_sorted):
+            c = clicks_sorted[next_click_idx]
+            tid = _best_track_for_click(tracks, (float(c["x"]), float(c["y"])), W, H)
+            if tid is not None:
+                chosen_votes[tid] = chosen_votes.get(tid, 0) + 1
+                chosen_track_id = max(chosen_votes.items(), key=lambda kv: kv[1])[0]
+            next_click_idx += 1
+            next_click_t = float(clicks_sorted[next_click_idx]["t"]) if next_click_idx < len(clicks_sorted) else math.inf
+
+        present = False
+        best_box = None
+        best_score = None
+        best_id = None
+
+        candidates: List[Tuple[float, int, Tuple[int, int, int, int]]] = []
+        for tr in tracks:
+            if not tr.is_confirmed():
                 continue
-            ltrb = trk.to_ltrb()
-            x1, y1, x2, y2 = map(int, ltrb)
-            bb = [max(0, x1), max(0, y1), min(W - 1, x2), min(H - 1, y2)]
+            l, t, r, b = tr.to_ltrb()
+            box = _clip_box(int(l), int(t), int(r), int(b), W, H)
+            x1, y1, x2, y2 = box
+            crop = frame[y1:y2, x1:x2]
+            cmean = _mean_color_bgr(crop)
+            sim_player = _color_sim(cmean, player_bgr)
+            sim_opp = _color_sim(cmean, opp_bgr) if opp_bgr else 0.0
+            color_term = sim_player - 0.6 * sim_opp
 
-            if target_rgb is not None:
-                m = _mean_rgb_in_bbox(frame, bb)
-                sim = _color_sim(m, target_rgb)
-                if sim < float(color_sim_min):
-                    continue
-                if opp_rgb is not None:
-                    sim_opp = _color_sim(m, opp_rgb)
-                    if sim_opp > sim:
-                        continue
+            dist_term = 0.0
+            if last_box is not None:
+                lx1, ly1, lx2, ly2 = last_box
+                cx0 = (lx1 + lx2) / 2.0
+                cy0 = (ly1 + ly2) / 2.0
+                cx1 = (x1 + x2) / 2.0
+                cy1 = (y1 + y2) / 2.0
+                d = math.sqrt((cx1 - cx0) ** 2 + (cy1 - cy0) ** 2)
+                dist_term = 1.0 - min(1.0, d / (0.35 * math.sqrt(W * W + H * H)))
 
-            track_boxes.append((trk.track_id, bb))
+            ocr_digits = None
+            ocr_conf = 0.0
+            if ocr is not None:
+                cached = ocr_cache.get(tr.track_id)
+                if cached and (t_s - cached[0]) < params.ocr_stride_s:
+                    ocr_digits, ocr_conf = cached[1], cached[2]
+                elif t_s >= next_ocr_t and (chosen_track_id is None or tr.track_id == chosen_track_id):
+                    ocr_digits, ocr_conf = maybe_ocr(frame, box)
+                    ocr_cache[tr.track_id] = (t_s, ocr_digits, ocr_conf)
+                    next_ocr_t = t_s + params.ocr_stride_s
 
-        chosen = None
-        chosen_id = None
-        score = None
-        dist = None
+            num_term = 0.0
+            if ocr_digits and target_digits:
+                if ocr_digits == target_digits or ocr_digits.lstrip("0") == target_digits.lstrip("0"):
+                    num_term = 1.0
+                elif target_digits in ocr_digits or ocr_digits in target_digits:
+                    num_term = 0.6
 
-        # Acquire target id if not set (use IoU with seed_bbox)
-        if target_track_id is None:
-            best_iou = 0.0
-            best = None
-            for tid, bb in track_boxes:
-                i = _iou(bb, seed_bbox)
-                if i > best_iou:
-                    best_iou = i
-                    best = (tid, bb)
-            if best is not None and best_iou >= 0.10:
-                target_track_id, chosen = best[0], best[1]
-                chosen_id = target_track_id
-                last_good_bbox = chosen[:]
+            id_term = 0.0
+            if chosen_track_id is not None:
+                id_term = 1.0 if tr.track_id == chosen_track_id else -0.25
 
-        # If we have a target id, find it
-        if target_track_id is not None:
-            found = None
-            for tid, bb in track_boxes:
-                if tid == target_track_id:
-                    found = bb
-                    break
+            score = 0.55 * id_term + 0.25 * color_term + 0.15 * dist_term + 0.35 * num_term
+            candidates.append((score, tr.track_id, box))
 
-            if found is not None:
-                # gate by distance from last bbox center (helps avoid ID switches)
-                lx1, ly1, lx2, ly2 = last_good_bbox
-                lcx, lcy = (lx1 + lx2) * 0.5, (ly1 + ly2) * 0.5
-                fx1, fy1, fx2, fy2 = found
-                fcx, fcy = (fx1 + fx2) * 0.5, (fy1 + fy2) * 0.5
-                d = math.sqrt((fcx - lcx) ** 2 + (fcy - lcy) ** 2)
-                dist = d
-
-                if d <= dist_gate_px:
-                    chosen = found
-                    chosen_id = target_track_id
-                    last_good_bbox = chosen[:]
-
-        present = chosen is not None
-        chosen_num = None
-
-        # Sparse jersey-number validation (prevents ID swaps when tracking gets confused)
-        if present and chosen is not None and player_number and (t >= next_ocr_t):
-            next_ocr_t = t + max(0.25, float(ocr_stride_s))
-            chosen_num = _read_number(frame, chosen)
-            if chosen_num is None:
-                pass
-            elif str(chosen_num) == str(player_number):
-                num_ok_streak += 1
-                num_bad_streak = 0
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_id, best_box = candidates[0]
+            if chosen_track_id is not None:
+                present = best_id == chosen_track_id
             else:
-                num_bad_streak += 1
-                num_ok_streak = 0
+                present = (best_score or 0.0) > 0.15
+                if present and best_id is not None and chosen_votes.get(best_id, 0) >= 1:
+                    chosen_track_id = best_id
 
-        if player_number and num_bad_streak >= 2:
-            present = False
+        if present and best_box is not None:
+            last_box = best_box
+            last_seen_t = t_s
+        else:
+            if last_seen_t is not None and (t_s - last_seen_t) <= 0.4:
+                pass
 
-        # score: use IoU with last_good_bbox (higher is better)
-        if chosen is not None:
-            score = _iou(chosen, last_good_bbox)
+        present_samples.append((t_s, bool(present)))
 
-        present_flags.append((t, present, chosen, score, chosen_num, dist))
-
-        # keep a small debug sample
-        if len(debug_samples) < 400:
-            debug_samples.append({
-                "t": t,
-                "present": bool(present),
-                "chosen": chosen,
-                "score": score,
-                "dist": dist,
-                "ocr": chosen_num,
-                "boxes": len(boxes),
-                "tracks": len(track_boxes),
-                "target_id": target_track_id
-            })
+        cur = get_current_job()
+        if cur is not None and total_frames:
+            if frame_idx % (params.detect_stride * 90) == 0:
+                pct = int(min(99, (frame_idx / max(1, total_frames)) * 100))
+                meta = cur.meta or {}
+                meta["progress"] = pct
+                meta["stage"] = "tracking"
+                cur.meta = meta
+                cur.save_meta()
 
         frame_idx += 1
 
     cap.release()
 
-    # ---- Convert sparse present_flags into spans with sticky/gap merge ----
-    times = [x[0] for x in present_flags]
-    pres = [x[1] for x in present_flags]
-
-    # Treat None as False initially; sticky below will recover short misses
-    pres_bool = [bool(p) for p in pres]
-
-    # Sticky fill (if present within +/- sticky_seconds, keep present)
-    if sticky_seconds > 0 and fps > 0:
-        sticky_frames = int(round(sticky_seconds * fps))
-        pres2 = pres_bool[:]
-        for i in range(len(pres_bool)):
-            if pres_bool[i]:
-                lo = max(0, i - sticky_frames)
-                hi = min(len(pres_bool) - 1, i + sticky_frames)
-                for k in range(lo, hi + 1):
-                    pres2[k] = True
-        pres_bool = pres2
-
     spans: List[Tuple[float, float]] = []
-    in_span = False
-    s0 = 0.0
+    if present_samples:
+        in_span = False
+        start_t = 0.0
+        for t_s, pr in present_samples:
+            if pr and not in_span:
+                in_span = True
+                start_t = t_s
+            if not pr and in_span:
+                in_span = False
+                spans.append((start_t, t_s))
+        if in_span:
+            spans.append((start_t, present_samples[-1][0]))
 
-    for i, p in enumerate(pres_bool):
-        t = times[i]
-        if p and not in_span:
-            in_span = True
-            s0 = t
-        elif (not p) and in_span:
-            in_span = False
-            spans.append((s0, t))
-
-    if in_span:
-        spans.append((s0, duration_s))
-
-    # Merge gaps smaller than gap_merge
-    if gap_merge > 0 and spans:
-        merged = [spans[0]]
-        for a, b in spans[1:]:
-            pa, pb = merged[-1]
-            if a - pb <= gap_merge:
-                merged[-1] = (pa, b)
-            else:
-                merged.append((a, b))
-        spans = merged
-
-    # Apply pre/post roll and min clip length
-    final_spans = []
+    rolled: List[Tuple[float, float]] = []
     for a, b in spans:
-        a2 = max(0.0, a - pre_roll)
-        b2 = min(duration_s, b + post_roll)
-        if (b2 - a2) >= min_clip_len:
-            final_spans.append((a2, b2))
+        aa = max(0.0, a - params.pre_roll)
+        bb = min(duration_s if duration_s else b + params.post_roll, b + params.post_roll)
+        rolled.append((aa, bb))
+    rolled.sort(key=lambda x: x[0])
+
+    merged: List[Tuple[float, float]] = []
+    for a, b in rolled:
+        if not merged:
+            merged.append((a, b))
+            continue
+        pa, pb = merged[-1]
+        if a <= pb + params.gap_merge:
+            merged[-1] = (pa, max(pb, b))
+        else:
+            merged.append((a, b))
+
+    final_spans = [(a, b) for a, b in merged if (b - a) >= params.min_clip_len]
 
     debug = {
-        "seed": {
-            "seed_bbox": seed_bbox,
-            "seed_frames": seed_frames_debug,
-            "seed_count": len(clicks),
-        },
         "fps": fps,
         "W": W,
         "H": H,
         "total_frames": total_frames,
         "duration_s": duration_s,
-        "min_clip_len": min_clip_len,
-        "gap_merge": gap_merge,
-        "sticky_seconds": sticky_seconds,
-        "pre_roll": pre_roll,
-        "post_roll": post_roll,
-        "detect_stride": detect_stride,
-        "yolo_conf": yolo_conf,
-        "device": device,
-        "jersey_hex": jersey_hex,
-        "opponent_hex": opponent_hex,
-        "player_number": str(player_number) if player_number is not None else None,
-        "color_sim_min": color_sim_min,
-        "ocr_stride_s": ocr_stride_s,
-        "dist_gate_norm": dist_gate_norm,
-        "dist_gate_px": dist_gate_px,
-        "debug_samples": debug_samples,
+        "detect_stride": params.detect_stride,
+        "yolo_conf": params.yolo_conf,
+        "ocr_enabled": bool(ocr is not None),
+        "clicks": debug_clicks,
+        "chosen_track_id": chosen_track_id,
+        "votes": chosen_votes,
         "spans": final_spans,
-        "target_track_id": target_track_id,
     }
 
     return final_spans, debug
 
 
+def _ffmpeg_exists() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
 def _run(cmd: List[str]) -> None:
-    subprocess.check_call(cmd)
+    import subprocess
+
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(cmd)}\n{p.stdout}")
 
 
-def _cut_clip(in_path: Path, out_path: Path, start: float, end: float) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss", f"{start:.3f}",
-        "-to", f"{end:.3f}",
-        "-i", str(in_path),
-        "-c", "copy",
-        str(out_path),
-    ]
-    _run(cmd)
+def make_proxy(in_path: str, out_path: str) -> None:
+    if os.path.exists(out_path):
+        return
+    if not _ffmpeg_exists():
+        raise RuntimeError("ffmpeg not found")
+    _run([
+        "ffmpeg", "-y", "-i", in_path,
+        "-vf", "scale=-2:720",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "96k",
+        out_path,
+    ])
 
 
-def _concat_clips(clip_paths: List[Path], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    list_file = out_path.parent / "concat_list.txt"
-    list_file.write_text("\n".join([f"file '{p.as_posix()}'" for p in clip_paths]), encoding="utf-8")
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", str(list_file),
-        "-c", "copy",
-        str(out_path),
-    ]
-    _run(cmd)
+def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
+    if os.path.exists(out_path):
+        return
+    if not _ffmpeg_exists():
+        raise RuntimeError("ffmpeg not found")
+    dur = max(0.01, end - start)
+    _run([
+        "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", in_path,
+        "-t", f"{dur:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        out_path,
+    ])
+
+
+def concat_clips(clip_paths: List[str], out_path: str) -> None:
+    if os.path.exists(out_path):
+        return
+    if not clip_paths:
+        return
+    if not _ffmpeg_exists():
+        raise RuntimeError("ffmpeg not found")
+    lst = out_path + ".txt"
+    with open(lst, "w", encoding="utf-8") as f:
+        for pth in clip_paths:
+            f.write(f"file '{pth}'\n")
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path])
+    try:
+        os.remove(lst)
+    except Exception:
+        pass
 
 
 def process_job(job_id: str) -> Dict[str, Any]:
-    job_dir = _job_dir(job_id)
-    in_path = job_dir / "in.mp4"
-    setup_path = job_dir / "setup.json"
-    status_path = job_dir / "status.json"
+    _ensure_dirs()
+    cur = get_current_job()
 
-    setup = _read_json(setup_path, {})
-    clicks = setup.get("clicks", []) or []
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    meta_path = os.path.join(job_dir, "job.json")
+    if not os.path.exists(meta_path):
+        raise RuntimeError(f"Missing job meta: {meta_path}")
 
-    # Recommend 2-3 clicks; but allow 1+
-    if len(clicks) < 1:
-        raise RuntimeError("No clicks provided. Provide at least 1 click to seed tracking.")
+    with open(meta_path, "r", encoding="utf-8") as f:
+        jobmeta = json.load(f)
 
-    # Parameters (safe defaults)
-    detect_stride = int(setup.get("detect_stride", 3))
-    yolo_conf = float(setup.get("yolo_conf", 0.25))
-    dist_gate_norm = float(setup.get("dist_gate_norm", 0.18))
+    in_path = jobmeta.get("video_path") or os.path.join(job_dir, "in.mp4")
+    if not os.path.exists(in_path):
+        raise RuntimeError(f"Missing input video: {in_path}")
 
-    sticky_seconds = float(setup.get("sticky_seconds", 1.5))
-    gap_merge = float(setup.get("gap_merge", 2.0))
-    pre_roll = float(setup.get("pre_roll", 4.0))
-    post_roll = float(setup.get("post_roll", 1.5))
-    min_clip_len = float(setup.get("min_clip_len", 20.0))
+    proxy_path = os.path.join(job_dir, "input_proxy.mp4")
+    if cur:
+        cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
+        cur.save_meta()
+    make_proxy(in_path, proxy_path)
 
-    # Update job status
-    status = _read_json(status_path, {})
-    status.update({
-        "job_id": job_id,
-        "status": "running",
-        "stage": "tracking",
-        "progress": 5,
-        "message": "Tracking player…",
-        "updated_at": time.time(),
-        "setup": setup,
-    })
-    _write_json(status_path, status)
+    jobmeta["proxy_path"] = proxy_path
+    jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
+    jobmeta["proxy_ready"] = True
 
-    spans, debug = track_presence_spans(
-        in_path,
-        clicks=clicks,
-        detect_stride=detect_stride,
-        yolo_conf=yolo_conf,
-        dist_gate_norm=dist_gate_norm,
-        sticky_seconds=sticky_seconds,
-        gap_merge=gap_merge,
-        pre_roll=pre_roll,
-        post_roll=post_roll,
-        min_clip_len=min_clip_len,
-        device="0" if os.environ.get("CUDA_VISIBLE_DEVICES") not in (None, "", "-1") else None,
+    setup = jobmeta.get("setup") or {}
+    clicks = setup.get("clicks") or []
+    jersey_color = setup.get("jersey_color") or "#203524"
+    opponent_color = setup.get("opponent_color") or None
+    player_number = str(setup.get("player_number") or "")
+
+    params = TrackingParams(
+        detect_stride=int(setup.get("detect_stride") or 2),
+        yolo_conf=float(setup.get("yolo_conf") or 0.25),
+        pre_roll=float(setup.get("pre_roll") or 2.0),
+        post_roll=float(setup.get("post_roll") or 2.0),
+        gap_merge=float(setup.get("gap_merge") or 1.0),
+        min_clip_len=float(setup.get("min_clip_len") or 6.0),
     )
 
-    # Cut clips
-    clips_dir = job_dir / "clips"
-    clip_infos = []
-    clip_paths = []
+    if cur:
+        cur.meta = {**(cur.meta or {}), "stage": "tracking", "progress": 5}
+        cur.save_meta()
 
-    status.update({"stage": "clipping", "progress": 60, "message": "Cutting clips…", "updated_at": time.time()})
-    _write_json(status_path, status)
+    spans, debug = track_presence_spans_pro(
+        video_path=in_path,
+        clicks=clicks,
+        player_number=player_number,
+        jersey_color_hex=jersey_color,
+        opponent_color_hex=opponent_color,
+        params=params,
+    )
 
+    clips_dir = os.path.join(job_dir, "clips")
+    os.makedirs(clips_dir, exist_ok=True)
+
+    clips: List[Dict[str, Any]] = []
+    clip_paths: List[str] = []
     for i, (a, b) in enumerate(spans, start=1):
-        outp = clips_dir / f"clip_{i:03d}.mp4"
-        _cut_clip(in_path, outp, a, b)
+        outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
+        cut_clip(in_path, a, b, outp)
         clip_paths.append(outp)
-        clip_infos.append({
-            "start": a,
-            "end": b,
-            "path": str(outp),
-            "url": f"/data/jobs/{job_id}/clips/{outp.name}",
-        })
+        clips.append({"start": float(a), "end": float(b), "path": outp, "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4"})
 
-    combined_path = job_dir / "combined.mp4"
-    if clip_paths:
-        status.update({"stage": "combining", "progress": 85, "message": "Combining clips…", "updated_at": time.time()})
-        _write_json(status_path, status)
-        _concat_clips(clip_paths, combined_path)
+    combined_path = os.path.join(job_dir, "combined.mp4")
+    concat_clips(clip_paths, combined_path)
 
-    status.update({
-        "status": "done",
-        "stage": "done",
-        "progress": 100,
-        "message": "Done.",
-        "updated_at": time.time(),
-        "clips": clip_infos,
-        "combined_path": str(combined_path),
-        "combined_url": f"/data/jobs/{job_id}/combined.mp4",
-        "debug": debug,
-    })
-    _write_json(status_path, status)
-    return status
+    jobmeta["clips"] = clips
+    jobmeta["combined_path"] = combined_path if os.path.exists(combined_path) else None
+    jobmeta["combined_url"] = f"/data/jobs/{job_id}/combined.mp4" if os.path.exists(combined_path) else None
+    jobmeta["debug"] = debug
+    jobmeta["status"] = "done"
+    jobmeta["progress"] = 100
+    jobmeta["stage"] = "done"
+    jobmeta["updated_at"] = time.time()
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(jobmeta, f, indent=2)
+
+    if cur:
+        cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
+        cur.save_meta()
+
+    return jobmeta
