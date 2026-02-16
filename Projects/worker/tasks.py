@@ -40,6 +40,8 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger("worker")
 log.setLevel(logging.INFO)
+FFMPEG_TIMEOUT_S = int(os.getenv("FFMPEG_TIMEOUT_S", "1800"))
+FFMPEG_RETRIES = int(os.getenv("FFMPEG_RETRIES", "2"))
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -436,15 +438,55 @@ def _ffmpeg_exists() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _run(cmd: List[str]) -> None:
+def _run(cmd: List[str], *, job_id: Optional[str] = None) -> None:
     import subprocess
 
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if p.returncode != 0:
-        raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(cmd)}\n{p.stdout}")
+    last_out = ""
+    for attempt in range(1, FFMPEG_RETRIES + 1):
+        p = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=FFMPEG_TIMEOUT_S,
+        )
+        if p.returncode == 0:
+            return
+        last_out = p.stdout
+        log.warning(f"ffmpeg_retry job_id={job_id or 'na'} attempt={attempt} rc={p.returncode}")
+    raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{last_out}")
 
 
-def make_proxy(in_path: str, out_path: str) -> None:
+def _write_manifest(job_dir: str, job_id: str, status: str = "in_progress") -> Dict[str, Any]:
+    files = []
+    for root, _, names in os.walk(job_dir):
+        for name in sorted(names):
+            if name.endswith('.tmp'):
+                continue
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, job_dir)
+            try:
+                st = os.stat(full)
+                files.append({
+                    "path": rel.replace('\\', '/'),
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                })
+            except FileNotFoundError:
+                continue
+    manifest = {
+        "job_id": job_id,
+        "status": status,
+        "generated_at": time.time(),
+        "file_count": len(files),
+        "files": files,
+    }
+    with open(os.path.join(job_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
+
+
+def make_proxy(in_path: str, out_path: str, *, job_id: Optional[str] = None) -> None:
     if os.path.exists(out_path):
         return
     if not _ffmpeg_exists():
@@ -455,10 +497,10 @@ def make_proxy(in_path: str, out_path: str) -> None:
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
         "-c:a", "aac", "-b:a", "96k",
         out_path,
-    ])
+    ], job_id=job_id)
 
 
-def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
+def cut_clip(in_path: str, start: float, end: float, out_path: str, *, job_id: Optional[str] = None) -> None:
     if os.path.exists(out_path):
         return
     if not _ffmpeg_exists():
@@ -470,10 +512,10 @@ def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
-    ])
+    ], job_id=job_id)
 
 
-def concat_clips(clip_paths: List[str], out_path: str) -> None:
+def concat_clips(clip_paths: List[str], out_path: str, *, job_id: Optional[str] = None) -> None:
     if os.path.exists(out_path):
         return
     if not clip_paths:
@@ -484,7 +526,7 @@ def concat_clips(clip_paths: List[str], out_path: str) -> None:
     with open(lst, "w", encoding="utf-8") as f:
         for pth in clip_paths:
             f.write(f"file '{pth}'\n")
-    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path])
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path], job_id=job_id)
     try:
         os.remove(lst)
     except Exception:
@@ -507,6 +549,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
   try:
       _ensure_dirs()
       cur = get_current_job()
+      log.info(f"job_started job_id={job_id}")
 
       job_dir = os.path.join(JOBS_DIR, job_id)
       meta_path = os.path.join(job_dir, "job.json")
@@ -540,7 +583,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
       if cur:
           cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
           cur.save_meta()
-      make_proxy(in_path, proxy_path)
+      make_proxy(in_path, proxy_path, job_id=job_id)
+      _write_manifest(job_dir, job_id, status="in_progress")
 
       jobmeta["proxy_path"] = proxy_path
       jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
@@ -574,6 +618,12 @@ def process_job(job_id: str) -> Dict[str, Any]:
           results_path = os.path.join(job_dir, "results.json")
           with open(results_path, "w", encoding="utf-8") as f:
               json.dump(jobmeta, f, indent=2)
+          jobmeta["manifest"] = _write_manifest(job_dir, job_id, status="done")
+          with open(meta_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+          with open(results_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+          log.info(f"job_done job_id={job_id} verify_only=1")
           if cur:
               cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
               cur.save_meta()
@@ -618,12 +668,12 @@ def process_job(job_id: str) -> Dict[str, Any]:
           if is_cancel_requested(meta_path):
               raise JobCancelled("Job cancelled while building clips.")
           outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
-          cut_clip(in_path, a, b, outp)
+          cut_clip(in_path, a, b, outp, job_id=job_id)
           clip_paths.append(outp)
           clips.append({"start": float(a), "end": float(b), "path": outp, "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4"})
 
       combined_path = os.path.join(job_dir, "combined.mp4")
-      concat_clips(clip_paths, combined_path)
+      concat_clips(clip_paths, combined_path, job_id=job_id)
 
       jobmeta["clips"] = clips
       jobmeta["combined_path"] = combined_path if os.path.exists(combined_path) else None
@@ -641,12 +691,20 @@ def process_job(job_id: str) -> Dict[str, Any]:
       with open(results_path, "w", encoding="utf-8") as f:
           json.dump(jobmeta, f, indent=2)
 
+      jobmeta["manifest"] = _write_manifest(job_dir, job_id, status="done")
+      with open(meta_path, "w", encoding="utf-8") as f:
+          json.dump(jobmeta, f, indent=2)
+      with open(results_path, "w", encoding="utf-8") as f:
+          json.dump(jobmeta, f, indent=2)
+      log.info(f"job_done job_id={job_id} clips={len(clips)}")
+
       if cur:
           cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
           cur.save_meta()
 
       return jobmeta
   except JobCancelled as e:
+    log.info(f"job_cancelled job_id={job_id}")
     fail_meta = {
       "job_id": job_id,
       "status": "cancelled",
@@ -661,9 +719,11 @@ def process_job(job_id: str) -> Dict[str, Any]:
     fail_meta_path = os.path.join(failed_job_dir, "job.json")
     with open(fail_meta_path, "w", encoding="utf-8") as f:
       json.dump(fail_meta, f, indent=2)
+    _write_manifest(failed_job_dir, job_id, status="cancelled")
     return fail_meta
   except Exception as e:
     tb = traceback.format_exc()
+    log.exception(f"job_failed job_id={job_id} error={e}")
     try:
       os.makedirs(JOBS_DIR, exist_ok=True)
       failed_job_dir = os.path.join(JOBS_DIR, job_id)
@@ -680,6 +740,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
       }
       with open(fail_meta_path, "w", encoding="utf-8") as f:
         json.dump(fail_meta, f, indent=2)
+      _write_manifest(failed_job_dir, job_id, status="failed")
     except Exception:
       pass
     raise

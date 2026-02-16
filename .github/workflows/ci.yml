@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r Projects/requirements.runpod.txt
+          pip install pytest
+
+      - name: Run ruff/flake8 (if configured)
+        run: |
+          if command -v ruff >/dev/null 2>&1 && ( [ -f pyproject.toml ] || [ -f ruff.toml ] || [ -f .ruff.toml ] ); then
+            ruff check .
+          elif command -v flake8 >/dev/null 2>&1 && ( [ -f .flake8 ] || [ -f setup.cfg ] || [ -f tox.ini ] ); then
+            flake8 .
+          else
+            echo "No ruff/flake8 config detected; skipping lint"
+          fi
+
+      - name: Run mypy (optional)
+        run: |
+          if command -v mypy >/dev/null 2>&1; then
+            mypy Projects || true
+          else
+            echo "mypy not installed; skipping"
+          fi
+
+      - name: Run pytest (if tests exist)
+        run: |
+          if rg -n --glob 'test_*.py' --glob '*_test.py' '^' Projects >/dev/null 2>&1; then
+            pytest -q
+          else
+            echo "No pytest tests found; skipping"
+          fi
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Start stack
+        run: docker compose up -d --build redis api worker
+
+      - name: Wait for API readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become ready in time" >&2
+          docker compose logs api worker redis || true
+          exit 1
+
+      - name: Run smoke test
+        run: python Projects/scripts/smoke_test.py
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs api worker redis || true
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v

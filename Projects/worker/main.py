@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+import logging
 
 import redis
 from rq import Connection, Queue, Worker
@@ -10,6 +11,30 @@ from rq.job import Job
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
 JOBS_DIR = os.getenv("JOBS_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "jobs")))
+REDIS_MAX_RETRIES = int(os.getenv("REDIS_MAX_RETRIES", "3"))
+REDIS_RETRY_DELAY_S = float(os.getenv("REDIS_RETRY_DELAY_S", "0.5"))
+
+log = logging.getLogger("worker.main")
+log.setLevel(logging.INFO)
+
+
+def redis_conn_with_retry() -> redis.Redis:
+    last_exc = None
+    for attempt in range(1, REDIS_MAX_RETRIES + 1):
+        try:
+            conn = redis.from_url(
+                REDIS_URL,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+                retry_on_timeout=True,
+            )
+            conn.ping()
+            return conn
+        except Exception as exc:
+            last_exc = exc
+            log.warning(f"worker_redis_connect_retry attempt={attempt} error={exc}")
+            time.sleep(REDIS_RETRY_DELAY_S)
+    raise RuntimeError(f"Could not connect to Redis at {REDIS_URL}: {last_exc}")
 
 
 def run_self_test(conn: redis.Redis) -> int:
@@ -37,7 +62,9 @@ def main() -> None:
         f.write("ok\n")
     os.remove(probe_path)
 
-    conn = redis.from_url(REDIS_URL)
+    conn = redis_conn_with_retry()
+    assert QUEUE_NAMES, "RQ_QUEUES must define at least one queue"
+    log.info(f"worker_ready redis={REDIS_URL} queues={QUEUE_NAMES} jobs_dir={JOBS_DIR}")
     print(f"Worker starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
 
     if args.self_test:
