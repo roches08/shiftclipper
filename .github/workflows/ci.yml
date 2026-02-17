@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify no tracked macOS junk files
+        run: |
+          if git ls-files | grep -E '(^|/)\.DS_Store$'; then
+            echo "Tracked .DS_Store files found"
+            exit 1
+          fi
+
+      - name: Start stack
+        run: docker compose up -d --build redis api worker
+
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8000/api/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become healthy"
+          docker compose logs api
+          exit 1
+
+      - name: Run smoke test
+        run: python Projects/scripts/smoke_test.py
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
