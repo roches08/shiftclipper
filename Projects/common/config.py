@@ -107,6 +107,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "extend_sec": extend_sec,
         "post_roll": _as_float(src, "post_roll", extend_sec),
         "verify_mode": verify_mode,
+        "skip_seeding": bool(src.get("skip_seeding", False)),
         "clicks": clicks,
         "clicks_count": len(clicks),
         "detect_stride": _as_int(src, "detect_stride", preset["detect_stride"]),
