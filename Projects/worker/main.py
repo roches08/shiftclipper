@@ -6,6 +6,7 @@ import logging
 import redis
 from rq import Queue, Worker
 from rq.job import Job
+from common.config import resolve_device
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -41,6 +42,19 @@ def configure_logging() -> None:
     root.addHandler(fh)
 
 
+
+
+def gpu_info() -> str:
+    try:
+        import torch
+        dev = resolve_device()
+        cuda_ok = bool(torch.cuda.is_available())
+        name = torch.cuda.get_device_name(0) if cuda_ok else "-"
+        return f"device={dev} torch={torch.__version__} cuda_available={cuda_ok} gpu={name}"
+    except Exception as e:
+        return f"device={resolve_device()} torch=unavailable cuda_available=False gpu=- err={e}"
+
+
 def run_self_test(conn: redis.Redis) -> int:
     from worker.tasks import self_test_task
 
@@ -68,7 +82,7 @@ def main() -> None:
 
     configure_logging()
     conn = redis.from_url(REDIS_URL)
-    logging.getLogger("worker").info("Worker starting | redis=%s | queues=%s | jobs_dir=%s", REDIS_URL, QUEUE_NAMES, JOBS_DIR, extra={"job_id":"-"})
+    logging.getLogger("worker").info("Worker starting | redis=%s | queues=%s | jobs_dir=%s | %s", REDIS_URL, QUEUE_NAMES, JOBS_DIR, gpu_info(), extra={"job_id":"-"})
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))
