@@ -17,7 +17,7 @@ def main() -> int:
         return 0
 
     cmd = [
-        "python3",
+        sys.executable,
         "Projects/scripts/eval_tracker.py",
         SAMPLE,
         "--base",
