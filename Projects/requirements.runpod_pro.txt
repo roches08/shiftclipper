@@ -25,4 +25,4 @@ Pillow==10.4.0
 pydantic==2.9.2
 
 # pkg_resources is provided by setuptools and required by deep-sort-realtime
-setuptools>=65
+setuptools==75.1.0

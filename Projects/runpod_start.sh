@@ -37,10 +37,7 @@ REQUIREMENTS_FILE="requirements.runpod_pro.txt"
 echo "Installing ShiftClipper requirements from $REQUIREMENTS_FILE"
 "$PIP_BIN" install -r "$REQUIREMENTS_FILE"
 
-"$PYTHON_BIN" -c "import pkg_resources; print('pkg_resources ok')" || "$PIP_BIN" install -U setuptools
-"$PYTHON_BIN" -c "import pkg_resources; print('pkg_resources ok')"
-
-if ! "$PYTHON_BIN" -c "import pkg_resources, ultralytics, torch; print('ok', torch.__version__, torch.cuda.is_available())"; then
+if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2; print('deps ok')"; then
   echo "ERROR: dependency import check failed."
   tail -n 120 "$API_LOG" || true
   tail -n 120 "$WORKER_LOG" || true
