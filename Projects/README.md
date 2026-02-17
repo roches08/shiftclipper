@@ -112,3 +112,13 @@ python Projects/scripts/smoke_test.py
 ### Debug interpretation
 - Enable `debug_overlay` to inspect bbox, OCR conf, color score, and SEARCHING/CONFIRMED/LOCKED state.
 - Enable `debug_timeline` to inspect state transitions, OCR hits, merges, shift boundaries, and end reasons.
+- Timeline is written to both `debug_timeline.json` and `debug.json` for per-job debugging.
+
+
+### CUDA torch install path (RunPod)
+
+`runpod_start.sh` installs PyTorch explicitly before app deps:
+- `SHIFTCLIPPER_DEVICE=cuda:0` (default) -> `pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio`
+- CPU override (`SHIFTCLIPPER_DEVICE=cpu`) -> CPU wheels from `https://download.pytorch.org/whl/cpu`
+
+This ensures `torch.cuda.is_available()` can resolve true on GPU pods and Tracker v2 defaults to `cuda:0` unless overridden.

@@ -23,6 +23,11 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
+if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
+  pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+else
+  pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+fi
 pip install -r requirements.txt
 
 if ! redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
@@ -46,7 +51,7 @@ curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null
 curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8000/" | grep -q "200"
 curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8000/static/app.js" | grep -q "200"
 
-nohup "$VENV_DIR/bin/rq" worker -u "$REDIS_URL" jobs > "$WORKER_LOG" 2>&1 &
+nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
 
 sleep 2

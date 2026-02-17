@@ -17,12 +17,14 @@ JOBS_DIR = os.getenv("JOBS_DIR", os.path.abspath(os.path.join(os.path.dirname(__
 def configure_logging() -> None:
     log_path = os.getenv("WORKER_LOG_PATH", "/workspace/worker.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s job_id=%(job_id)s %(name)s %(message)s")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s job_id=%(job_id)s stage=%(stage)s %(name)s %(message)s")
 
     class JobContextFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             if not hasattr(record, "job_id"):
                 record.job_id = "-"
+            if not hasattr(record, "stage"):
+                record.stage = "-"
             return True
 
     root = logging.getLogger()
