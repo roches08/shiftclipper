@@ -90,3 +90,41 @@ curl -s -X POST "http://127.0.0.1:8000/jobs/cleanup?days=7&max_count=100"
 ```bash
 python Projects/scripts/smoke_test.py
 ```
+
+## Tracker v2 tuning guide
+
+### Broadcast vs Tactical
+- **broadcast**: use when player is smaller/farther away and camera moves often. Defaults prioritize recall: `detect_stride=1`, lower `ocr_min_conf`, longer lock window.
+- **tactical**: use when player is larger and spacing is stable. Defaults prioritize precision/perf: `detect_stride=3`, higher `ocr_min_conf`, tighter color tolerance.
+
+### Recommended starting defaults
+- `detect_stride`: broadcast `1`, tactical `3`
+- `ocr_min_conf`: broadcast `0.28`, tactical `0.42`
+- `min_track_seconds`: `1.0-1.2`
+- `gap_merge_seconds`: `0.8-1.0`
+- `lock_seconds_after_confirm`: `1.0-1.5`
+- `jersey_color_tolerance`: `70-95`
+
+### Advanced tracker behavior
+1. OCR confirms identity when target number appears enough times in the recent window.
+2. Confirmed identity remains **locked** for `lock_seconds_after_confirm` even if OCR drops.
+3. During lock, tracker uses motion continuity + color gating to avoid drift.
+4. Track loss beyond `lost_timeout_seconds` closes the segment.
+5. Segments are merged with `gap_merge_seconds`, then filtered by `min_track_seconds`.
+
+### Debug overlay + timeline
+- Enable `debug_overlay` to save `debug_overlay.mp4` with:
+  - bbox + track id
+  - OCR text/confidence
+  - jersey color score
+  - state (`searching`, `confirmed`, `locked`)
+- `debug.json` provides timeline/state transitions, merge events, raw/merged segments.
+- If no output clips are created in run mode, the job fails with a clear message pointing to debug artifacts.
+
+### GPU device selection
+- Resolver order:
+  1. `SHIFTCLIPPER_DEVICE` env override
+  2. `cuda:0` if `torch.cuda.is_available()`
+  3. fallback `cpu`
+- Worker startup logs include chosen device, torch version, CUDA availability, and GPU name.
+- `runpod_start.sh` defaults `SHIFTCLIPPER_DEVICE=cuda:0` and installs CUDA torch wheels when running on GPU pods.

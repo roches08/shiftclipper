@@ -13,6 +13,11 @@ const must = (id) => {
   return el;
 };
 
+const modePresets = {
+  broadcast: { detect_stride: 1, ocr_min_conf: 0.28, min_track_seconds: 1.2, gap_merge_seconds: 1.0, lock_seconds_after_confirm: 1.5, jersey_color_tolerance: 95 },
+  tactical: { detect_stride: 3, ocr_min_conf: 0.42, min_track_seconds: 1.0, gap_merge_seconds: 0.8, lock_seconds_after_confirm: 1.0, jersey_color_tolerance: 70 },
+};
+
 const state = {
   jobId: null,
   polling: false,
@@ -58,7 +63,7 @@ function updateButtons(meta){
   $('btnSave').disabled = !haveJob || clickCount < 3;
   const status = meta?.status || meta?.stage;
   const isReady = meta && (meta.status === 'ready' || meta.stage === 'ready');
-  const isBlocked = ['queued','processing','running','done','error','failed','cancelled'].includes(String(status));
+  const isBlocked = ['queued','processing','running','done','verified','error','failed','cancelled'].includes(String(status));
   $('btnRun').disabled = !haveJob || !isReady || isBlocked;
   $('btnCancel').disabled = !haveJob;
   $('btnRetry').disabled = !haveJob || !['failed','cancelled'].includes(String(meta?.status || ''));
@@ -157,7 +162,7 @@ async function pollStatus(loop=false){
       updateButtons(meta);
 
       if(!loop) break;
-      if(['done','error','failed','cancelled'].includes(meta.status)) break;
+      if(['done','verified','error','failed','cancelled'].includes(meta.status)) break;
       await new Promise(res=>setTimeout(res, 1200));
     }
   }catch(e){
@@ -175,6 +180,7 @@ async function createJob(){
   state.clicks = [];
   state.selectMode = false;
   $('btnSelect').textContent = 'Select Player (clicks OFF)';
+  applyModePreset();
   renderClicks();
   drawOverlay();
   setPill('created');
@@ -224,6 +230,18 @@ function uploadVideo(){
   xhr.send(form);
 }
 
+
+function applyModePreset(){
+  const mode = $('cameraMode').value || 'broadcast';
+  const p = modePresets[mode] || modePresets.broadcast;
+  $('detectStride').value = p.detect_stride;
+  $('ocrMinConf').value = p.ocr_min_conf;
+  $('minTrackSeconds').value = p.min_track_seconds;
+  $('gapMergeSeconds').value = p.gap_merge_seconds;
+  $('lockSeconds').value = p.lock_seconds_after_confirm;
+  $('jerseyTolerance').value = p.jersey_color_tolerance;
+}
+
 async function saveSetup(){
   if(!state.jobId) return;
 
@@ -234,6 +252,14 @@ async function saveSetup(){
     opponent_color: $('opponentColor').value,
     extend_sec: Number($('extendSec').value || 20),
     verify_mode: $('verifyMode').value === 'on',
+    detect_stride: Number($('detectStride').value || 1),
+    ocr_min_conf: Number($('ocrMinConf').value || 0.28),
+    min_track_seconds: Number($('minTrackSeconds').value || 1.2),
+    gap_merge_seconds: Number($('gapMergeSeconds').value || 1.0),
+    lock_seconds_after_confirm: Number($('lockSeconds').value || 1.5),
+    jersey_color_tolerance: Number($('jerseyTolerance').value || 95),
+    debug_overlay: $('debugOverlay').value === 'on',
+    enable_combined: true,
     clicks: state.clicks,
     clicks_count: state.clicks.length,
   };
@@ -378,6 +404,7 @@ function wire(){
   btnClearClicks.addEventListener('click', clearClicks);
 
   fileEl.addEventListener('change', ()=> updateButtons(state.lastStatus));
+  must('cameraMode').addEventListener('change', applyModePreset);
   vidEl.addEventListener('click', handleVideoClick);
 
   window.addEventListener('resize', ()=>{ resizeOverlay(); drawOverlay(); });

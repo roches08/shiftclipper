@@ -134,7 +134,30 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
 
     verify_mode = bool(src.get("verify_mode", False))
     extend_sec = max(0.0, min(60.0, float(src.get("extend_sec") or 20.0)))
-    detect_stride = 1 if camera_mode == "tactical" else 2
+
+    presets = {
+        "broadcast": {
+            "detect_stride": 1,
+            "ocr_min_conf": 0.28,
+            "min_track_seconds": 1.2,
+            "gap_merge_seconds": 1.0,
+            "lock_seconds_after_confirm": 1.5,
+            "jersey_color_tolerance": 95,
+        },
+        "tactical": {
+            "detect_stride": 3,
+            "ocr_min_conf": 0.42,
+            "min_track_seconds": 1.0,
+            "gap_merge_seconds": 0.8,
+            "lock_seconds_after_confirm": 1.0,
+            "jersey_color_tolerance": 70,
+        },
+    }
+    selected = presets[camera_mode]
+
+    def cfg_num(name: str, default: float) -> float:
+        v = src.get(name)
+        return float(v) if v is not None else float(default)
 
     clicks = []
     for raw in (src.get("clicks") or []):
@@ -151,14 +174,22 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "player_number": str(src.get("player_number") or "").strip(),
         "jersey_color": str(src.get("jersey_color") or "#203524"),
         "opponent_color": str(src.get("opponent_color") or "#ffffff"),
+        "jersey_color_rgb": src.get("jersey_color_rgb") or None,
+        "jersey_color_tolerance": max(1.0, min(255.0, cfg_num("jersey_color_tolerance", selected["jersey_color_tolerance"]))),
         "extend_sec": extend_sec,
         "verify_mode": verify_mode,
         "clicks": clicks,
         "clicks_count": len(clicks),
-        # Derived worker params so dropdown choices have direct backend effect.
-        "detect_stride": detect_stride,
+        "detect_stride": int(max(1, min(8, cfg_num("detect_stride", selected["detect_stride"]))),),
         "post_roll": extend_sec,
-        "ocr_min_conf": 0.35 if verify_mode else 1.01,
+        "ocr_min_conf": max(0.0, min(1.0, cfg_num("ocr_min_conf", selected["ocr_min_conf"]))),
+        "min_track_seconds": max(0.1, min(30.0, cfg_num("min_track_seconds", selected["min_track_seconds"]))),
+        "gap_merge_seconds": max(0.0, min(20.0, cfg_num("gap_merge_seconds", selected["gap_merge_seconds"]))),
+        "lock_seconds_after_confirm": max(0.1, min(20.0, cfg_num("lock_seconds_after_confirm", selected["lock_seconds_after_confirm"]))),
+        "lost_timeout_seconds": max(0.1, min(20.0, cfg_num("lost_timeout_seconds", 1.0))),
+        "enable_combined": bool(src.get("enable_combined", True)),
+        "debug_overlay": bool(src.get("debug_overlay", False)),
+        "mode_presets": presets,
     }
 
 
