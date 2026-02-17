@@ -41,7 +41,7 @@ try:
 except Exception:  # pragma: no cover
     DeepSort = None
 
-from common.config import resolve_device
+from common.config import normalize_setup, resolve_device
 
 log = logging.getLogger("worker")
 DEBUG_MODE = os.getenv("WORKER_DEBUG", "0") == "1"
@@ -378,7 +378,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
         raise RuntimeError("missing job json")
 
     meta = json.loads(meta_path.read_text())
-    setup = json.loads(setup_path.read_text()) if setup_path.exists() else meta.get("setup", {})
+    raw_setup = json.loads(setup_path.read_text()) if setup_path.exists() else meta.get("setup", {})
+    setup = normalize_setup(raw_setup)
 
     def write_status(status, stage_name, progress, message, **extra):
         stage.update({"name": stage_name, "updated": time.time()})
@@ -395,12 +396,13 @@ def process_job(job_id: str) -> Dict[str, Any]:
             raise RuntimeError("missing input")
 
         verify_mode = bool(setup.get("verify_mode", False))
+        tracking_mode = str(setup.get("tracking_mode") or "clip").lower()
         write_status("processing", "queued", 10, "Queued for processing.")
 
         if verify_mode:
             meta.update({
                 "status": "verified",
-                "stage": "done",
+                "stage": "verified",
                 "progress": 100,
                 "message": "Verify mode: no clips/combined generated.",
                 "clips": [],
@@ -460,9 +462,18 @@ def process_job(job_id: str) -> Dict[str, Any]:
         shifts_json = []
         total_toi = 0.0
         for s, e in data["shifts"]:
+            if not (math.isfinite(s) and math.isfinite(e)):
+                continue
+            if e <= s:
+                continue
             dur = max(0.0, e - s)
             total_toi += dur
             shifts_json.append({"start": s, "end": e, "duration": dur, "confidence": 0.7})
+
+        shifts_json_path = job_dir / "shifts.json"
+        shifts_json_path.write_text(json.dumps(shifts_json, indent=2))
+        if not shifts_json_path.exists():
+            raise RuntimeError("Missing shifts.json output")
 
         artifacts = {
             "clips": clips,
@@ -482,10 +493,13 @@ def process_job(job_id: str) -> Dict[str, Any]:
             artifacts["list"].append({"type": "combined", "path": combined_path, "url": combined_url})
         if artifacts.get("debug_overlay_path"):
             artifacts["list"].append({"type": "debug_overlay", "path": artifacts["debug_overlay_path"], "url": artifacts["debug_overlay_url"]})
-        if artifacts.get("debug_json_path"):
-            artifacts["list"].append({"type": "debug_timeline", "path": artifacts["debug_json_path"], "url": artifacts["debug_json_url"]})
+        if artifacts.get("debug_timeline_path"):
+            artifacts["list"].append({"type": "debug_timeline", "path": artifacts["debug_timeline_path"], "url": artifacts["debug_timeline_url"]})
 
-        if not clips and not combined_path:
+        if tracking_mode == "shift":
+            if not shifts_json:
+                raise RuntimeError("No shifts detected; see debug overlay/timeline")
+        elif not clips and not combined_path:
             raise RuntimeError("No clips created; see debug overlay/timeline (checked clips and combined outputs)")
 
         if stage["stalled"]:

@@ -229,7 +229,7 @@ def job_status(job_id: str):
                     meta["stage"] = "queued"
             elif rq_state == "finished":
                 meta["rq_state"] = "finished"
-                if meta.get("status") not in {"done", "cancelled", "failed"}:
+                if meta.get("status") not in {"done", "verified", "done_no_clips", "cancelled", "failed"}:
                     meta["status"] = "done"
                     meta["stage"] = "done"
                     meta["progress"] = 100
@@ -253,6 +253,10 @@ def job_status(job_id: str):
         "proxy_ready": meta.get("proxy_ready"),
         "proxy_url": meta.get("proxy_url"),
     }
+    if meta.get("bytes_received") is not None:
+        status_payload["bytes_received"] = meta.get("bytes_received")
+    if meta.get("bytes_total") is not None:
+        status_payload["bytes_total"] = meta.get("bytes_total")
     return status_payload
 @app.get("/data/jobs/{job_id}/{path:path}")
 def serve_job_file(job_id: str, path: str):

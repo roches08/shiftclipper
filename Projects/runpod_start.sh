@@ -47,9 +47,23 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
-curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null
-curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8000/" | grep -q "200"
-curl -fsS -o /dev/null -w "%{http_code}" "http://127.0.0.1:8000/static/app.js" | grep -q "200"
+
+check_api() {
+  local url="$1"
+  local expect="${2:-200}"
+  local code
+  code="$(curl -sS -o /dev/null -w "%{http_code}" "$url" || true)"
+  if [[ "$code" != "$expect" ]]; then
+    echo "ERROR: API check failed for $url (expected $expect, got ${code:-n/a})"
+    echo "--- API log tail ---"
+    tail -n 200 "$API_LOG" || true
+    exit 1
+  fi
+}
+
+check_api "http://127.0.0.1:8000/api/health"
+check_api "http://127.0.0.1:8000/"
+check_api "http://127.0.0.1:8000/static/app.js"
 
 nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
