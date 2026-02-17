@@ -237,7 +237,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                                 break
                 except Exception:
                     pass
-            score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match
+            identity_bonus = params.identity_weight if (locked_track is not None and tr.track_id == locked_track) else 0.0
+            score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match + identity_bonus
             if best is None or score > best["score"]:
                 best = {"track_id": tr.track_id, "box": box, "score": score, "color": cscore, "ocr_txt": ocr_txt, "ocr_conf": ocr_conf, "ocr_match": ocr_match}
 
@@ -281,15 +282,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             if seg_start is None:
                 seg_start = t
             if shift_state == "OFF_ICE":
-                shift_state = "ENTERING"
-                timeline.append({"t": t, "event": "shift_state", "to": shift_state})
-            elif shift_state == "ENTERING":
                 shift_state = "ON_ICE"
+                timeline.append({"t": t, "event": "shift_state", "to": shift_state})
         else:
             if seg_start is not None:
                 segments.append((seg_start, t, reason or "unlock"))
                 seg_start = None
-            if shift_state in {"ON_ICE", "ENTERING"}:
+            if shift_state == "ON_ICE":
                 bench = False
                 if last_box is not None:
                     _, _, _, y2 = last_box
@@ -302,7 +301,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     shift_state = "OFF_ICE"
                     shift_start = None
 
-        if shift_state in {"ENTERING", "ON_ICE"} and shift_start is None:
+        if shift_state == "ON_ICE" and shift_start is None:
             shift_start = t
 
         if prev_state != state:
@@ -338,8 +337,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         if (b - a) < params.min_track_seconds:
             continue
         if merged and a - merged[-1][1] <= params.gap_merge_seconds:
+            prev_end = merged[-1][1]
             merged[-1] = (merged[-1][0], b, "merged")
-            timeline.append({"t": a, "event": "merge", "gap": a - merged[-1][1]})
+            timeline.append({"t": a, "event": "merge", "gap": a - prev_end})
         else:
             merged.append((a, b, reason))
 

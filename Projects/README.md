@@ -100,7 +100,7 @@ python Projects/scripts/smoke_test.py
 
 ### Tracking mode
 - **clip**: creates highlight clips from LOCKED windows.
-- **shift**: runs OFF_ICE -> ENTERING -> ON_ICE -> EXITING state machine and reports shifts + total TOI.
+- **shift**: runs OFF_ICE -> ON_ICE -> EXITING -> OFF_ICE state machine and reports shifts + total TOI.
 
 ### OCR/persistence tuning
 - Lower `ocr_min_conf` to catch angled/small numbers.
