@@ -10,6 +10,7 @@ import redis
 from rq import Queue, SimpleWorker
 from rq.job import Job
 from common.config import resolve_device
+from worker.tasks import warm_easyocr_models
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -105,6 +106,8 @@ def main() -> None:
         worker_cls.__name__,
         extra={"job_id": "-"},
     )
+
+    warm_easyocr_models(resolve_device()[0])
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))

@@ -90,6 +90,23 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     if tracking_mode not in {"clip", "shift"}:
         tracking_mode = "clip"
 
+    mode_defaults = {
+        "clip": {
+            "score_lock_threshold": 0.55,
+            "score_unlock_threshold": 0.35,
+            "lost_timeout": 1.5,
+            "reacquire_window_seconds": 4.0,
+            "reacquire_score_lock_threshold": 0.40,
+        },
+        "shift": {
+            "score_lock_threshold": 0.45,
+            "score_unlock_threshold": 0.30,
+            "lost_timeout": 2.5,
+            "reacquire_window_seconds": 8.0,
+            "reacquire_score_lock_threshold": 0.33,
+        },
+    }[tracking_mode]
+
     tracker_type = str(src.get("tracker_type") or "bytetrack").lower()
     if tracker_type not in {"bytetrack", "iou", "deepsort"}:
         tracker_type = "bytetrack"
@@ -138,12 +155,13 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "ocr_min_conf": _as_float(src, "ocr_min_conf", preset["ocr_min_conf"]),
         "lock_seconds_after_confirm": _as_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"]),
         "gap_merge_seconds": _as_float(src, "gap_merge_seconds", preset["gap_merge_seconds"]),
-        "lost_timeout": _as_float(src, "lost_timeout", preset["lost_timeout"]),
-        "reacquire_window_seconds": _as_float(src, "reacquire_window_seconds", 4.0),
-        "reacquire_score_lock_threshold": _as_float(src, "reacquire_score_lock_threshold", 0.40),
+        "lost_timeout": _as_float(src, "lost_timeout", mode_defaults["lost_timeout"]),
+        "reacquire_window_seconds": _as_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"]),
+        "reacquire_score_lock_threshold": _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"]),
         "min_track_seconds": _as_float(src, "min_track_seconds", preset["min_track_seconds"]),
         "min_clip_seconds": _as_float(src, "min_clip_seconds", 1.0),
-        "score_lock_threshold": _as_float(src, "score_lock_threshold", 0.55),
+        "score_lock_threshold": _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]),
+        "score_unlock_threshold": _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"]),
         "seed_lock_seconds": _as_float(src, "seed_lock_seconds", 8.0),
         "seed_iou_min": _as_float(src, "seed_iou_min", _as_float(src, "seed_min_iou", 0.15)),
         "seed_dist_max": _as_float(src, "seed_dist_max", 0.12),

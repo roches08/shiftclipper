@@ -2,7 +2,6 @@
 import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 
@@ -35,10 +34,27 @@ def main() -> int:
     if data.get("status") not in {"done", "done_no_shifts"}:
         raise RuntimeError(f"tracking failed: {data.get('status')}")
 
+    job_id = data.get("job_id")
+    if not job_id:
+        raise AssertionError("missing job id")
+
+    job_dir = Path("Projects/data/jobs") / job_id
+    results_file = job_dir / "results.json"
+    if not results_file.exists():
+        raise AssertionError(f"missing results file: {results_file}")
+
+    results = json.loads(results_file.read_text())
+    print("perf_summary", json.dumps(results.get("perf") or {}, indent=2))
+
+    timeline_file = job_dir / "debug_timeline.json"
+    if not timeline_file.exists():
+        raise AssertionError(f"missing timeline file: {timeline_file}")
+    timeline = json.loads(timeline_file.read_text())
+    first_lock = next((ev.get("t") for ev in timeline if ev.get("event") == "lock"), None)
+    print("first_lock_timestamp", first_lock)
+
     perf = data.get("perf") or {}
     print("perf_summary", json.dumps(perf, indent=2))
-    print("first_lock_or_confirmed", data.get("first_lock_time"))
-
     clips = data.get("timestamps") or []
     print("clips_count", len(clips))
     print("clips_ranges", clips)
@@ -55,12 +71,8 @@ def main() -> int:
         if not Path(p).exists():
             raise AssertionError(f"artifact missing: {p}")
 
-    job_id = data.get("job_id")
-    if job_id:
-        job_dir = Path("Projects/data/jobs") / job_id
-        timeline_file = job_dir / "debug_timeline.json"
-        if not timeline_file.exists():
-            raise AssertionError(f"missing timeline file: {timeline_file}")
+    if len(clips) == 0:
+        raise AssertionError("expected at least one clip in smoke test")
 
     return 0
 
