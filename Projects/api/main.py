@@ -503,13 +503,26 @@ def cleanup_jobs(days: int = 7, max_count: int = 200):
 def results(job_id: str):
     jd = job_dir(job_id)
     results_path = jd / "results.json"
+    manifest_path = jd / "manifest.json"
     meta = read_json(meta_path(job_id), {})
+    manifest = read_json(manifest_path, None) if manifest_path.exists() else None
+
+    payload = None
 
     if results_path.exists():
-        return JSONResponse(read_json(results_path, {}))
+        payload = read_json(results_path, {})
 
     # Fallback for workers that persist final data in job.json only.
-    if meta.get("status") == "done":
-        return JSONResponse(meta)
+    if payload is None and meta.get("status") == "done":
+        payload = meta
 
-    raise HTTPException(status_code=404, detail="No results yet")
+    if payload is None:
+        raise HTTPException(status_code=404, detail="No results yet")
+
+    if manifest is not None:
+        if isinstance(payload, dict):
+            payload["manifest"] = manifest
+        else:
+            payload = {"results": payload, "manifest": manifest}
+
+    return JSONResponse(payload)
