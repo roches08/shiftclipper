@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { jobId: null, clicks: [], lastStatus: null };
+const state = { jobId: null, clicks: [], lastStatus: null, pollTimer: null };
 
 const PRESET_HELP = {
   broadcast: "Broadcast: Standard TV side angle. OCR works intermittently.",
@@ -15,6 +15,15 @@ const CAMERA_DEFAULTS = {
   broadcast_wide: { detect_stride: 1, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 1.9, min_track_seconds: 0.75 },
   tactical: { detect_stride: 3, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 1.8, min_track_seconds: 0.75 },
 };
+const STAGE_META = [
+  { key: 'uploading', label: 'Uploading', icon: '⬆️' },
+  { key: 'queued', label: 'Queued', icon: '🕒' },
+  { key: 'tracking', label: 'Tracking', icon: '🎯' },
+  { key: 'clips', label: 'Creating clips', icon: '✂️' },
+  { key: 'combined', label: 'Combining video', icon: '🎬' },
+  { key: 'done', label: 'Done', icon: '✅' },
+  { key: 'failed', label: 'Failed', icon: '❌' },
+];
 
 async function j(method, path, body){
   const opt = { method, headers: {} };
@@ -23,6 +32,18 @@ async function j(method, path, body){
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+function mb(n){ return (n / (1024 * 1024)).toFixed(1); }
+
+function setJobId(jobId){
+  state.jobId = jobId;
+  if(jobId) localStorage.setItem('shiftclipper.jobId', jobId);
+  $('jobId').textContent = jobId || '—';
+  $('btnUpload').disabled = !jobId;
+  $('btnSave').disabled = !jobId;
+  $('btnRun').disabled = !jobId;
+}
+
 function refreshHelp(){
   const cm = $('cameraMode').value; const tm = $('trackingMode').value;
   $('cameraHelp').textContent = PRESET_HELP[cm];
@@ -30,6 +51,7 @@ function refreshHelp(){
   $('shiftOnly').style.display = tm === 'shift' ? 'inline-flex' : 'none';
   $('verifyBanner').style.display = $('verifyMode').value === 'on' ? 'block' : 'none';
 }
+
 function applyPreset(){
   const p = CAMERA_DEFAULTS[$('cameraMode').value];
   $('detectStride').value = p.detect_stride;
@@ -41,21 +63,64 @@ function applyPreset(){
   refreshHelp();
 }
 
+function renderStepper(stage){
+  const idx = Math.max(0, STAGE_META.findIndex(s => s.key === stage));
+  const isFailed = stage === 'failed';
+  const nodes = STAGE_META.filter(s => s.key !== 'failed' || isFailed).map((s, i) => {
+    let cls = 'todo';
+    if (s.key === stage) cls = isFailed ? 'failed' : 'active';
+    else if (i < idx && !isFailed) cls = 'done';
+    return `<div class="step ${cls}"><span>${s.icon}</span><span>${s.label}</span></div>`;
+  });
+  $('stepper').innerHTML = nodes.join('');
+}
+
+function updateProgressUi(status){
+  const progress = Number(status.progress || 0);
+  $('overallProgress').value = Math.max(0, Math.min(100, progress));
+  $('overallProgressText').textContent = `${progress}%`;
+  const stage = status.stage || status.status || 'queued';
+  renderStepper(stage);
+  const message = status.error || status.message || '—';
+  $('progressMessage').textContent = message;
+}
+
 async function createJob(){
   const r = await j('POST', '/jobs', { name: 'ui-job' });
-  state.jobId = r.job_id;
-  $('jobId').textContent = state.jobId;
-  $('btnUpload').disabled = false;
-  $('btnSave').disabled = false;
-  $('btnRun').disabled = false;
+  setJobId(r.job_id);
+  await pollOnce();
 }
 
 async function upload(){
   const f = $('file').files[0]; if(!f || !state.jobId) return;
   const fd = new FormData(); fd.append('file', f);
-  const r = await fetch(`/jobs/${state.jobId}/upload`, { method: 'POST', body: fd });
-  if(!r.ok) throw new Error(await r.text());
-  await poll();
+  $('progressMessage').textContent = 'Uploading...';
+
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/jobs/${state.jobId}/upload`, true);
+    xhr.upload.onprogress = (evt) => {
+      if (!evt.lengthComputable) return;
+      const percent = Math.round((evt.loaded / evt.total) * 100);
+      $('overallProgress').value = percent;
+      $('overallProgressText').textContent = `${percent}%`;
+      $('progressMessage').textContent = `Uploading: ${mb(evt.loaded)}/${mb(evt.total)} MB (${percent}%)`;
+      renderStepper('uploading');
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        $('progressMessage').textContent = 'Processing…';
+        renderStepper('queued');
+        resolve();
+      } else {
+        reject(new Error(xhr.responseText || `Upload failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Upload failed'));
+    xhr.send(fd);
+  });
+
+  startPolling();
 }
 
 function payload(){
@@ -82,7 +147,7 @@ function payload(){
   };
 }
 
-async function save(){ await j('PUT', `/jobs/${state.jobId}/setup`, payload()); await poll(); }
+async function save(){ await j('PUT', `/jobs/${state.jobId}/setup`, payload()); await pollOnce(); }
 
 async function run(){
   if($('verifyMode').value === 'on'){
@@ -91,15 +156,7 @@ async function run(){
   }
   await save();
   await j('POST', `/jobs/${state.jobId}/run`);
-  for(let i=0;i<200;i++){
-    const s = await j('GET', `/jobs/${state.jobId}/status`);
-    $('out').textContent = JSON.stringify(s, null, 2);
-    if(['done','failed','cancelled','verified','done_no_clips'].includes(s.status)) break;
-    await new Promise(r => setTimeout(r, 1200));
-  }
-  const res = await j('GET', `/jobs/${state.jobId}/results`);
-  $('clips').textContent = JSON.stringify(res, null, 2);
-  renderResults(res);
+  startPolling();
 }
 
 function renderResults(res){
@@ -116,14 +173,33 @@ function renderResults(res){
   add('debug timeline', art.debug_timeline_url);
 }
 
-async function poll(){
-  if(!state.jobId) return;
+async function pollOnce(){
+  if(!state.jobId) return null;
   const s = await j('GET', `/jobs/${state.jobId}/status`);
+  state.lastStatus = s;
   $('out').textContent = JSON.stringify(s, null, 2);
   if(s.proxy_url) $('vid').src = s.proxy_url;
+  updateProgressUi(s);
+
+  if(['done','failed','cancelled','verified','done_no_clips'].includes(s.status)){
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+    try {
+      const res = await j('GET', `/jobs/${state.jobId}/results`);
+      $('clips').textContent = JSON.stringify(res, null, 2);
+      renderResults(res);
+    } catch (_) {}
+  }
+  return s;
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+function startPolling(){
+  if(state.pollTimer) clearInterval(state.pollTimer);
+  pollOnce();
+  state.pollTimer = setInterval(pollOnce, 1200);
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
   $('btnCreate').onclick = createJob;
   $('btnUpload').onclick = upload;
   $('btnSave').onclick = save;
@@ -132,4 +208,16 @@ window.addEventListener('DOMContentLoaded', () => {
   $('trackingMode').onchange = refreshHelp;
   $('verifyMode').onchange = refreshHelp;
   applyPreset();
+
+  const existingJobId = localStorage.getItem('shiftclipper.jobId');
+  if(existingJobId){
+    setJobId(existingJobId);
+    try {
+      const s = await pollOnce();
+      if (s && !['done','failed','cancelled','verified','done_no_clips'].includes(s.status)) startPolling();
+    } catch (_) {
+      localStorage.removeItem('shiftclipper.jobId');
+      setJobId(null);
+    }
+  }
 });
