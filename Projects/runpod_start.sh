@@ -22,29 +22,40 @@ if [ ! -d "$VENV_DIR" ]; then
   python3 -m venv "$VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
-python -m pip install --upgrade pip setuptools wheel
+# Non-negotiable: use only venv python/pip for every install/check in this script.
+PYTHON_BIN="$VENV_DIR/bin/python"
+PIP_BIN="$VENV_DIR/bin/pip"
+"$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel
 
 if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
-  pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+  "$PIP_BIN" install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
 else
-  pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+  "$PIP_BIN" install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
 fi
 
-echo "Installing ShiftClipper requirements from requirements.txt"
-pip install -r requirements.txt
+REQUIREMENTS_FILE="requirements.runpod_pro.txt"
+echo "Installing ShiftClipper requirements from $REQUIREMENTS_FILE"
+"$PIP_BIN" install -r "$REQUIREMENTS_FILE"
 
-python -c "import pkg_resources; print('pkg_resources ok')" || pip install -U setuptools
-python -c "import pkg_resources; print('pkg_resources ok')"
+"$PYTHON_BIN" -c "import pkg_resources; print('pkg_resources ok')" || "$PIP_BIN" install -U setuptools
+"$PYTHON_BIN" -c "import pkg_resources; print('pkg_resources ok')"
 
-if ! python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
+if ! "$PYTHON_BIN" -c "import pkg_resources, ultralytics, torch; print('ok', torch.__version__, torch.cuda.is_available())"; then
+  echo "ERROR: dependency import check failed."
+  tail -n 120 "$API_LOG" || true
+  tail -n 120 "$WORKER_LOG" || true
+  exit 1
+fi
+
+if ! "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
   echo "ERROR: Torch import check failed."
   tail -n 120 "$API_LOG" || true
   tail -n 120 "$WORKER_LOG" || true
   exit 1
 fi
-python -c "import pkg_resources; print('pkg_resources', pkg_resources.__name__)"
+"$PYTHON_BIN" -c "import pkg_resources; print('pkg_resources', pkg_resources.__name__)"
 if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
-  python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
+  "$PYTHON_BIN" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
     echo "ERROR: SHIFTCLIPPER_DEVICE=$SHIFTCLIPPER_DEVICE but torch.cuda.is_available() is False."
     exit 1
   }

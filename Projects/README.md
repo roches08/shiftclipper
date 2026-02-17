@@ -48,10 +48,11 @@ REDIS_URL=redis://localhost:6379/0 JOBS_DIR=/workspace/shiftclipper/Projects/dat
 ```
 
 The script will:
+- use `/workspace/shiftclipper/Projects/.venv/bin/python` for every install/check command
 - enforce `set -euo pipefail`
 - default `REDIS_URL` to `redis://localhost:6379/0`
 - start Redis only when needed
-- create/use `.venv` and install pinned deps from `requirements.txt`
+- create/use `.venv` and install pinned deps from `requirements.runpod_pro.txt`
 - start API on `0.0.0.0:8000` and wait for readiness
 - start worker with `rq worker -u "$REDIS_URL" jobs`
 - print RQ version, Redis ping, queue length, and API/worker PIDs
@@ -61,7 +62,7 @@ The script will:
 Run this single command after startup. It creates a job, uploads a tiny generated video, queues the run, then asserts queue activity + terminal status:
 
 ```bash
-python -c 'import os,subprocess,tempfile,time,requests,redis; b="http://127.0.0.1:8000"; r=redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0")); jid=requests.post(f"{b}/jobs",json={"name":"verify"},timeout=10).json()["job_id"]; tmp=tempfile.NamedTemporaryFile(suffix=".mp4",delete=False).name; subprocess.run(["ffmpeg","-y","-f","lavfi","-i","color=c=black:s=320x240:d=1","-c:v","libx264","-pix_fmt","yuv420p",tmp],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); requests.post(f"{b}/jobs/{jid}/upload",files={"file":("verify.mp4",open(tmp,"rb"),"video/mp4")},timeout=60).raise_for_status(); requests.put(f"{b}/jobs/{jid}/setup",json={"camera_mode":"broadcast"},timeout=10).raise_for_status(); requests.post(f"{b}/jobs/{jid}/run",timeout=10).raise_for_status(); saw_queued=False; saw_started=False; status=None; t0=time.time();
+/workspace/shiftclipper/Projects/.venv/bin/python -c 'import os,subprocess,tempfile,time,requests,redis; b="http://127.0.0.1:8000"; r=redis.from_url(os.getenv("REDIS_URL","redis://localhost:6379/0")); jid=requests.post(f"{b}/jobs",json={"name":"verify"},timeout=10).json()["job_id"]; tmp=tempfile.NamedTemporaryFile(suffix=".mp4",delete=False).name; subprocess.run(["ffmpeg","-y","-f","lavfi","-i","color=c=black:s=320x240:d=1","-c:v","libx264","-pix_fmt","yuv420p",tmp],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); requests.post(f"{b}/jobs/{jid}/upload",files={"file":("verify.mp4",open(tmp,"rb"),"video/mp4")},timeout=60).raise_for_status(); requests.put(f"{b}/jobs/{jid}/setup",json={"camera_mode":"broadcast"},timeout=10).raise_for_status(); requests.post(f"{b}/jobs/{jid}/run",timeout=10).raise_for_status(); saw_queued=False; saw_started=False; status=None; t0=time.time();
 while time.time()-t0<180:
  qlen=r.llen("rq:queue:jobs"); s=requests.get(f"{b}/jobs/{jid}/status",timeout=10).json(); st=(s.get("status") or "").lower(); saw_queued=saw_queued or qlen>0 or st=="queued"; saw_started=saw_started or s.get("rq_state")=="started" or st in {"processing","running"};
  if st in {"done","failed","cancelled","error"}: status=st; break; time.sleep(1)
@@ -89,7 +90,7 @@ curl -s -X POST "http://127.0.0.1:8000/jobs/cleanup?days=7&max_count=100"
 - Run smoke test:
 
 ```bash
-python Projects/scripts/smoke_test.py
+/workspace/shiftclipper/Projects/.venv/bin/python Projects/scripts/smoke_test.py
 ```
 
 ## Tracker v2 tuning guide
