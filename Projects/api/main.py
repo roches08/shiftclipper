@@ -488,17 +488,19 @@ def clear_job(job_id: str):
 
     meta = read_json(mp, {})
     rq_id = meta.get("rq_id")
-    rq_state = str(meta.get("rq_state") or "").lower()
 
-    if rq_id and rq_state in {"queued", "started"}:
-        try:
-            cancel_job(job_id)
-        except Exception:
-            pass
+    # Always request cancellation first so running jobs terminate before deletion.
+    try:
+        cancel_job(job_id)
+    except Exception:
+        pass
 
     if rq_id:
         try:
-            Job.fetch(rq_id, connection=rconn).delete()
+            rq_job = Job.fetch(rq_id, connection=rconn)
+            if rq_job.get_status(refresh=True) in {"queued", "started"} and send_stop_job_command is not None:
+                send_stop_job_command(rconn, rq_id)
+            rq_job.delete()
         except Exception:
             pass
 

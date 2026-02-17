@@ -58,7 +58,7 @@ fi
 "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
 "$PYTHON_BIN" -c "from ultralytics import YOLO; import torch; m=YOLO('yolov8s.pt'); m.predict(source='https://ultralytics.com/images/bus.jpg', device=0, imgsz=640, verbose=False); print('ultralytics gpu ok', torch.cuda.is_available())"
 
-if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2; print('deps ok')"; then
+if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq; print('deps ok')"; then
   echo "ERROR: dependency import check failed."
   tail -n 120 "$API_LOG" || true
   tail -n 120 "$WORKER_LOG" || true
@@ -85,7 +85,8 @@ fi
 redis-cli -u "$REDIS_URL" ping >/dev/null
 
 pkill -f "uvicorn api.main:app" || true
-pkill -f "rq worker -u" || true
+pkill -f "python -m worker.main" || true
+sleep 1
 
 nohup "$VENV_DIR/bin/uvicorn" api.main:app --host 0.0.0.0 --port 8000 --log-level info > "$API_LOG" 2>&1 &
 API_PID=$!
