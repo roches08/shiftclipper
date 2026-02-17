@@ -178,5 +178,9 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "debug_timeline": bool(src.get("debug_timeline", True)),
         "ocr_confirm_m": _as_int(src, "ocr_confirm_m", 2),
         "ocr_confirm_k": _as_int(src, "ocr_confirm_k", 5),
+        "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", False)),
+        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.72),
+        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 2.0),
+        "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
     }
     return setup
