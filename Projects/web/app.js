@@ -67,7 +67,13 @@ function updateRunButtonState(){
   const hasSeed = state.clicks.length > 0;
   $('btnRun').disabled = !state.jobId || (!hasSeed && !verifyMode && !skipSeeding);
   $('seedStatus').textContent = `Seed clicks: ${state.clicks.length}`;
+  const clickList = state.clicks
+    .slice(-5)
+    .map((c, idx) => `#${state.clicks.length - (state.clicks.slice(-5).length - 1 - idx)} t=${Number(c.t).toFixed(2)} x=${Number(c.x).toFixed(3)} y=${Number(c.y).toFixed(3)}`)
+    .join(' | ');
+  $('seedClicksList').textContent = clickList || '—';
 }
+
 
 function refreshHelp(){
   const cm = $('cameraMode').value; const tm = $('trackingMode').value;
@@ -200,7 +206,14 @@ async function run(){
 async function cancel(){
   if(!state.jobId) return;
   await j('POST', `/jobs/${state.jobId}/cancel`);
-  startPolling();
+  if(state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
+  state.uploading = false;
+  if (state.uploadXhr) {
+    state.uploadXhr.abort();
+    state.uploadXhr = null;
+  }
+  await pollOnce();
 }
 
 function resetUiAfterClear(){
@@ -296,6 +309,7 @@ function renderResults(res){
   const msg = $('resultsMessage');
   if(res.status === 'verified') msg.textContent = 'Verify completed. No clips/combined generated.';
   else if(res.status === 'done_no_clips') msg.textContent = 'Run completed but no clips were found. See debug overlay/timeline.';
+  else if(res.status === 'done_no_shifts') msg.textContent = 'Run completed but no shifts were found. See debug overlay/timeline.';
   else msg.textContent = res.message || 'Done';
   const a = $('artifacts'); a.innerHTML='';
   const art = res.artifacts || {};
@@ -312,14 +326,25 @@ async function pollOnce(){
   state.lastStatus = s;
   $('out').textContent = JSON.stringify(s, null, 2);
   if(!state.uploading && s.proxy_ready && s.proxy_url && state.proxySrc !== s.proxy_url){
+    const vid = $('vid');
+    const previousTime = Number(vid.currentTime || 0);
+    const wasPaused = vid.paused;
     state.proxySrc = s.proxy_url;
-    $('vid').src = state.proxySrc;
+    vid.src = state.proxySrc;
+    vid.addEventListener('loadedmetadata', () => {
+      if (Number.isFinite(previousTime) && previousTime > 0) {
+        try { vid.currentTime = Math.min(previousTime, Math.max(0, (vid.duration || previousTime) - 0.1)); } catch (_) {}
+      }
+      if (!wasPaused) {
+        vid.play().catch(() => {});
+      }
+    }, { once: true });
   }
   if(!state.uploading){
     updateProgressUi(s);
   }
 
-  if(['done','failed','cancelled','verified','done_no_clips'].includes(s.status)){
+  if(['done','failed','cancelled','verified','done_no_clips','done_no_shifts'].includes(s.status)){
     clearInterval(state.pollTimer);
     state.pollTimer = null;
     try {
@@ -361,7 +386,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     await loadSetup();
     try {
       const s = await pollOnce();
-      if (s && !['done','failed','cancelled','verified','done_no_clips'].includes(s.status)) startPolling();
+      if (s && !['done','failed','cancelled','verified','done_no_clips','done_no_shifts'].includes(s.status)) startPolling();
     } catch (_) {
       localStorage.removeItem('shiftclipper.jobId');
       setJobId(null);

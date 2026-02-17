@@ -12,7 +12,6 @@ export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 export RQ_QUEUES="${RQ_QUEUES:-jobs}"
 export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
-export SHIFTCLIPPER_REQS="${SHIFTCLIPPER_REQS:-auto}"
 
 mkdir -p "$JOBS_DIR"
 
@@ -31,37 +30,22 @@ else
   pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
 fi
 
-REQ_PROFILE=""
-case "$SHIFTCLIPPER_REQS" in
-  pro)
-    REQ_PROFILE="pro"
-    ;;
-  base)
-    REQ_PROFILE="base"
-    ;;
-  auto)
-    if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
-      REQ_PROFILE="pro"
-    else
-      REQ_PROFILE="base"
-    fi
-    ;;
-  *)
-    echo "ERROR: Invalid SHIFTCLIPPER_REQS value '$SHIFTCLIPPER_REQS'. Expected pro|base|auto."
-    exit 1
-    ;;
-esac
+echo "Installing ShiftClipper requirements from requirements.txt"
+pip install -r requirements.txt
 
-if [[ "$REQ_PROFILE" == "pro" ]]; then
-  REQ_FILE="requirements.runpod_pro.txt"
-else
-  REQ_FILE="requirements.runpod.txt"
+if ! python -c "import pkg_resources; print('pkg_resources ok')"; then
+  echo "pkg_resources missing; installing/upgrading setuptools"
+  pip install --upgrade setuptools
+  python -c "import pkg_resources; print('pkg_resources ok')"
 fi
 
-echo "Installing RunPod requirements profile '$REQ_PROFILE' from $REQ_FILE"
-pip install -r "$REQ_FILE"
-
-python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'cuda_ver', torch.version.cuda)"
+if ! python -c "import torch; print('torch', torch.__version__, 'cuda_available', torch.cuda.is_available(), 'cuda_ver', torch.version.cuda)"; then
+  echo "ERROR: Torch import check failed."
+  tail -n 120 "$API_LOG" || true
+  tail -n 120 "$WORKER_LOG" || true
+  exit 1
+fi
+python -c "import pkg_resources; print('pkg_resources', pkg_resources.__name__)"
 if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
   python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
     echo "ERROR: SHIFTCLIPPER_DEVICE=$SHIFTCLIPPER_DEVICE but torch.cuda.is_available() is False."
