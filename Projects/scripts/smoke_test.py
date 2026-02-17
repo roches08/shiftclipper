@@ -20,6 +20,8 @@ def req(method, path, data=None):
 
 
 def main() -> int:
+    print("healthz:", req("GET", "/healthz"))
+    print("readyz:", req("GET", "/readyz"))
     job = req("POST", "/jobs", {"name": "smoke"})
     job_id = job["job_id"]
     job_dir = f"Projects/data/jobs/{job_id}"
@@ -52,6 +54,10 @@ def main() -> int:
 
     results = req("GET", f"/jobs/{job_id}/results")
     print("results:", results)
+    manifest = results.get("manifest") or {}
+    if manifest.get("status") != "done":
+      print("Manifest not finalized:", manifest)
+      return 1
     return 0
 
 

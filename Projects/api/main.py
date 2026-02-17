@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 import subprocess
@@ -35,7 +36,37 @@ WEB_DIR = BASE_DIR / "web"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
-rconn = redis.from_url(REDIS_URL, decode_responses=True)
+REDIS_MAX_RETRIES = int(os.getenv("REDIS_MAX_RETRIES", "3"))
+REDIS_RETRY_DELAY_S = float(os.getenv("REDIS_RETRY_DELAY_S", "0.5"))
+
+log = logging.getLogger("api")
+log.setLevel(logging.INFO)
+
+
+def redis_conn_with_retry() -> redis.Redis:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, REDIS_MAX_RETRIES + 1):
+        try:
+            conn = redis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+                retry_on_timeout=True,
+            )
+            conn.ping()
+            return conn
+        except Exception as exc:  # pragma: no cover
+            last_exc = exc
+            log.warning(
+                "redis_connect_retry",
+                extra={"attempt": attempt, "redis_url": REDIS_URL, "error": str(exc)},
+            )
+            time.sleep(REDIS_RETRY_DELAY_S)
+    raise RuntimeError(f"Could not connect to Redis at {REDIS_URL}: {last_exc}")
+
+
+rconn = redis_conn_with_retry()
 q = Queue(QUEUE_NAMES[0], connection=rconn)
 print(f"API starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
 
@@ -55,6 +86,10 @@ def job_dir(job_id: str) -> Path:
 
 def meta_path(job_id: str) -> Path:
     return job_dir(job_id) / "job.json"
+
+
+def manifest_path(job_id: str) -> Path:
+    return job_dir(job_id) / "manifest.json"
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -183,6 +218,22 @@ def health():
     return {"status": "ok", "root": str(BASE_DIR)}
 
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        rconn.ping()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"redis_not_ready: {exc}")
+    if not JOBS_DIR.exists():
+        raise HTTPException(status_code=503, detail="jobs_dir_missing")
+    return {"ok": True, "redis": REDIS_URL, "queues": QUEUE_NAMES, "jobs_dir": str(JOBS_DIR)}
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     index_path = WEB_DIR / "index.html"
@@ -198,6 +249,7 @@ def create_job(payload: Dict[str, Any] | None = None):
     jd.mkdir(parents=True, exist_ok=True)
     name = (payload or {}).get("name", "job")
     set_status(job_id, "created", {"name": name, "created_at": time.time(), "progress": 0, "stage": "created"})
+    log.info(f"job_created job_id={job_id}")
     return {"job_id": job_id}
 
 
@@ -265,6 +317,7 @@ def job_status(job_id: str):
     meta["proxy_ready"] = bool(meta.get("proxy_path") and Path(meta["proxy_path"]).exists())
     if meta.get("proxy_path"):
         meta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
+    manifest = read_json(manifest_path(job_id), {})
     status_payload = {
         "job_id": job_id,
         "rq_state": rq_state or meta.get("rq_state"),
@@ -276,6 +329,8 @@ def job_status(job_id: str):
         "updated_at": meta.get("updated_at"),
         "proxy_ready": meta.get("proxy_ready"),
         "proxy_url": meta.get("proxy_url"),
+        "manifest_status": manifest.get("status"),
+        "manifest_file_count": manifest.get("file_count", 0),
     }
     return status_payload
 @app.get("/data/jobs/{job_id}/{path:path}")
@@ -297,6 +352,7 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
     proxy_path = str(jd / "input_proxy.mp4")
 
     set_status(job_id, "uploading", extra={"progress": 5, "message": "Uploading…", "proxy_ready": False})
+    log.info(f"job_uploading job_id={job_id}")
 
     with open(in_path, "wb") as f:
         while True:
@@ -339,6 +395,7 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
         "message": "Proxy ready.",
         "stage": "ready",
     })
+    log.info(f"job_upload_ready job_id={job_id}")
 
     return {"ok": True, "video_path": in_path, "proxy_path": proxy_path}
 
@@ -359,6 +416,7 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
         message="Setup saved.",
         setup=setup,
     )
+    log.info(f"job_setup_saved job_id={job_id}")
     return {"ok": True, "status": "ready", "job_id": job_id, "setup": setup}
 
 
@@ -406,6 +464,7 @@ def run_job(job_id: str):
         message="Queued for processing.",
         rq_id=rq_job.get_id(),
     )
+    log.info(f"job_queued job_id={job_id} rq_id={rq_job.get_id()}")
     return {"rq_id": rq_job.get_id(), "job_id": job_id}
 
 
@@ -442,6 +501,7 @@ def cancel_job(job_id: str):
         progress=100,
         message="Job cancelled.",
     )
+    log.info(f"job_cancelled job_id={job_id}")
     return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
 
@@ -466,6 +526,7 @@ def retry_job(job_id: str):
         cancel_requested=False,
         rq_id=rq_job.get_id(),
     )
+    log.info(f"job_retried job_id={job_id} rq_id={rq_job.get_id()}")
     return {"ok": True, "job_id": job_id, "rq_id": rq_job.get_id(), "status": "queued"}
 
 
@@ -495,11 +556,15 @@ def results(job_id: str):
     results_path = jd / "results.json"
     meta = read_json(meta_path(job_id), {})
 
-    if results_path.exists():
-        return JSONResponse(read_json(results_path, {}))
+    manifest = read_json(manifest_path(job_id), {})
+    if results_path.exists() and manifest.get("status") in {"done", "failed", "cancelled"}:
+        payload = read_json(results_path, {})
+        payload["manifest"] = manifest
+        return JSONResponse(payload)
 
     # Fallback for workers that persist final data in job.json only.
-    if meta.get("status") == "done":
+    if meta.get("status") == "done" and manifest.get("status") == "done":
+        meta["manifest"] = manifest
         return JSONResponse(meta)
 
     raise HTTPException(status_code=404, detail="No results yet")
