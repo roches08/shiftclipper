@@ -11,6 +11,7 @@ WORKER_LOG="/workspace/worker.log"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 export RQ_QUEUES="${RQ_QUEUES:-jobs}"
+export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 
 mkdir -p "$JOBS_DIR"
 
@@ -66,6 +67,7 @@ sleep 1
 echo
 echo "===== ShiftClipper RunPod status ====="
 echo "REDIS_URL=$REDIS_URL"
+echo "SHIFTCLIPPER_DEVICE=$SHIFTCLIPPER_DEVICE"
 echo "RQ version: $("$VENV_DIR/bin/python" -c 'import rq; print(rq.__version__)')"
 echo "Redis ping: $(redis-cli -u "$REDIS_URL" ping)"
 echo "jobs queue length: $(redis-cli -u "$REDIS_URL" llen rq:queue:jobs)"

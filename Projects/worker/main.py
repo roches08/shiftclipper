@@ -5,6 +5,7 @@ import argparse
 import redis
 from rq import Queue, Worker
 from rq.job import Job
+from worker.device import get_runtime_device_info
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -38,7 +39,17 @@ def main() -> None:
     os.remove(probe_path)
 
     conn = redis.from_url(REDIS_URL)
-    print(f"Worker starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
+    dev = get_runtime_device_info()
+    print(
+        "Worker starting"
+        f" | redis={REDIS_URL}"
+        f" | queues={QUEUE_NAMES}"
+        f" | jobs_dir={JOBS_DIR}"
+        f" | selected_device={dev['selected_device']}"
+        f" | torch={dev['torch_version']}"
+        f" | cuda_available={dev['cuda_available']}"
+        f" | gpu_name={dev['gpu_name']}"
+    )
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))

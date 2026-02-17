@@ -8,6 +8,7 @@ import shutil
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+import subprocess
 
 try:
     import cv2
@@ -16,6 +17,7 @@ except Exception:  # pragma: no cover
 import numpy as np
 
 from rq import get_current_job
+from worker.device import resolve_device
 
 # --- Optional heavy deps (installed in requirements.runpod_pro.txt) ---
 try:
@@ -108,15 +110,6 @@ class TrackingParams:
     verify_mode: bool = True
 
 
-def _device() -> str:
-    if torch is None:
-        return "cpu"
-    try:
-        return "cuda:0" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-
 def _load_yolo(model_path: str) -> Any:
     if YOLO is None:
         raise RuntimeError("ultralytics is not installed")
@@ -129,7 +122,7 @@ def _load_ocr(enabled: bool = True) -> Optional[Any]:
     if easyocr is None:
         return None
     try:
-        return easyocr.Reader(["en"], gpu=_device().startswith("cuda"))
+        return easyocr.Reader(["en"], gpu=resolve_device().startswith("cuda"))
     except Exception:
         return easyocr.Reader(["en"], gpu=False)
 
@@ -217,7 +210,7 @@ def track_presence_spans_pro(
         embedder="mobilenet",
         half=True,
         bgr=True,
-        embedder_gpu=_device().startswith("cuda"),
+        embedder_gpu=resolve_device().startswith("cuda"),
     )
 
     clicks_sorted = sorted((clicks or []), key=lambda c: float(c.get("t", 0.0)))
@@ -273,8 +266,7 @@ def track_presence_spans_pro(
 
         t_s = frame_idx / fps
 
-        pred = yolo.predict(source=frame, conf=params.yolo_conf, verbose=False, imgsz=640,
-                            device=0 if _device().startswith("cuda") else "cpu")
+        pred = yolo.predict(source=frame, conf=params.yolo_conf, verbose=False, imgsz=640, device=resolve_device())
         yres = pred[0] if isinstance(pred, (list, tuple)) and pred else pred
         dets = _extract_person_dets(yres)
 
@@ -437,11 +429,12 @@ def _ffmpeg_exists() -> bool:
 
 
 def _run(cmd: List[str]) -> None:
-    import subprocess
-
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
-        raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(cmd)}\n{p.stdout}")
+        stdout = (p.stdout or "").strip()
+        stderr = (p.stderr or "").strip()
+        detail = "\n".join([part for part in [stdout, stderr] if part])
+        raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(cmd)}\n{detail}")
 
 
 def make_proxy(in_path: str, out_path: str) -> None:
@@ -529,6 +522,17 @@ def process_job(job_id: str) -> Dict[str, Any]:
       if not isinstance(jobmeta, dict):
           raise RuntimeError("Could not read job meta JSON")
 
+      def persist_meta(**updates: Any) -> None:
+          jobmeta.update(updates)
+          jobmeta["updated_at"] = time.time()
+          with open(meta_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+
+      def finalize_results() -> None:
+          results_path = os.path.join(job_dir, "results.json")
+          with open(results_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+
       in_path = jobmeta.get("video_path") or os.path.join(job_dir, "in.mp4")
       if not os.path.exists(in_path):
           raise RuntimeError(f"Missing input video: {in_path}")
@@ -541,6 +545,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
           cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
           cur.save_meta()
       make_proxy(in_path, proxy_path)
+
+      log.info("[%s] proxy generated at %s", job_id, proxy_path)
 
       jobmeta["proxy_path"] = proxy_path
       jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
@@ -559,23 +565,24 @@ def process_job(job_id: str) -> Dict[str, Any]:
           jobmeta["clips"] = []
           jobmeta["combined_path"] = None
           jobmeta["combined_url"] = None
+          jobmeta["artifacts"] = {
+              "combined": None,
+              "clips": [],
+              "manifest": {"verify_mode": True, "expect_artifacts": False},
+          }
           jobmeta["debug"] = {
               "verify_only": True,
               "reason": "verify_mode enabled" if bool(setup.get("verify_mode", False)) else "WORKER_VERIFY_ONLY=1",
               "cv2_available": bool(cv2 is not None),
           }
-          jobmeta["status"] = "done"
+          jobmeta["status"] = "verified"
           jobmeta["progress"] = 100
-          jobmeta["stage"] = "done"
-          jobmeta["message"] = "Verify-only mode completed (queue + status wiring)."
-          jobmeta["updated_at"] = time.time()
-          with open(meta_path, "w", encoding="utf-8") as f:
-              json.dump(jobmeta, f, indent=2)
-          results_path = os.path.join(job_dir, "results.json")
-          with open(results_path, "w", encoding="utf-8") as f:
-              json.dump(jobmeta, f, indent=2)
+          jobmeta["stage"] = "verify_done"
+          jobmeta["message"] = "Verify mode: no clips/combined video are generated."
+          persist_meta()
+          finalize_results()
           if cur:
-              cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
+              cur.meta = {**(cur.meta or {}), "stage": "verify_done", "progress": 100}
               cur.save_meta()
           return jobmeta
 
@@ -619,27 +626,59 @@ def process_job(job_id: str) -> Dict[str, Any]:
               raise JobCancelled("Job cancelled while building clips.")
           outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
           cut_clip(in_path, a, b, outp)
+          log.info("[%s] clip_%03d written at %s (%.3f -> %.3f)", job_id, i, outp, a, b)
           clip_paths.append(outp)
           clips.append({"start": float(a), "end": float(b), "path": outp, "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4"})
 
       combined_path = os.path.join(job_dir, "combined.mp4")
       concat_clips(clip_paths, combined_path)
+      if os.path.exists(combined_path):
+          log.info("[%s] combined clip written at %s", job_id, combined_path)
 
-      jobmeta["clips"] = clips
-      jobmeta["combined_path"] = combined_path if os.path.exists(combined_path) else None
-      jobmeta["combined_url"] = f"/data/jobs/{job_id}/combined.mp4" if os.path.exists(combined_path) else None
+      combined_exists = os.path.exists(combined_path) and os.path.getsize(combined_path) > 0
+      clips_exist = [c for c in clips if os.path.exists(c["path"]) and os.path.getsize(c["path"]) > 0]
+      expect_artifacts = True
+
+      jobmeta["clips"] = clips_exist
+      jobmeta["combined_path"] = combined_path if combined_exists else None
+      jobmeta["combined_url"] = f"/data/jobs/{job_id}/combined.mp4" if combined_exists else None
+      jobmeta["artifacts"] = {
+          "combined": {
+              "path": jobmeta["combined_path"],
+              "url": jobmeta["combined_url"],
+          } if combined_exists else None,
+          "clips": [{"path": c["path"], "url": c["url"], "start": c["start"], "end": c["end"]} for c in clips_exist],
+          "manifest": {
+              "verify_mode": False,
+              "expect_artifacts": expect_artifacts,
+              "combined_exists": combined_exists,
+              "clips_count": len(clips_exist),
+          },
+      }
       jobmeta["debug"] = debug
-      jobmeta["status"] = "done"
       jobmeta["progress"] = 100
-      jobmeta["stage"] = "done"
-      jobmeta["updated_at"] = time.time()
+      if not combined_exists and not clips_exist:
+          expected_paths = [combined_path, clips_dir]
+          if len(spans) == 0:
+              jobmeta["status"] = "no_clips_found"
+              jobmeta["stage"] = "no_clips_found"
+              jobmeta["message"] = "No clips found for selected player in this run."
+          else:
+              jobmeta["status"] = "failed"
+              jobmeta["stage"] = "artifact_validation_failed"
+              jobmeta["message"] = "Expected generated artifacts (combined mp4 or clips) but none were found."
+          jobmeta["error"] = {
+              "type": "ArtifactValidationError",
+              "detail": "Expected combined.mp4 and/or clips/*.mp4 for non-verify run.",
+              "expected_paths": expected_paths,
+          }
+      else:
+          jobmeta["status"] = "done"
+          jobmeta["stage"] = "done"
+          jobmeta["message"] = "Processing complete."
 
-      with open(meta_path, "w", encoding="utf-8") as f:
-          json.dump(jobmeta, f, indent=2)
-
-      results_path = os.path.join(job_dir, "results.json")
-      with open(results_path, "w", encoding="utf-8") as f:
-          json.dump(jobmeta, f, indent=2)
+      persist_meta()
+      finalize_results()
 
       if cur:
           cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
