@@ -417,7 +417,8 @@ def run_job(job_id: str):
         )
         raise HTTPException(status_code=400, detail="Missing input video")
 
-    setup = read_json(jd / "setup.json", {})
+    setup = normalize_setup(read_json(jd / "setup.json", {}))
+    write_json(jd / "setup.json", setup)
     has_clicks = bool((setup.get("clicks") or []))
     verify_mode = bool(setup.get("verify_mode", False))
     skip_seeding = bool(setup.get("skip_seeding", False))

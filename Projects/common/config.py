@@ -73,6 +73,11 @@ def _as_int(src: Dict[str, Any], key: str, default: int) -> int:
         return default
 
 
+def _bounded_float(src: Dict[str, Any], key: str, default: float, low: float, high: float) -> float:
+    val = _as_float(src, key, default)
+    return max(low, min(high, val))
+
+
 def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
     c = (hex_color or "").strip().lstrip("#")
     if len(c) != 6:
@@ -93,23 +98,21 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     mode_defaults = {
         "clip": {
             "score_lock_threshold": 0.55,
-            "score_unlock_threshold": 0.35,
-            "lost_timeout": 1.5,
-            "reacquire_window_seconds": 4.0,
+            "score_unlock_threshold": 0.33,
+            "lost_timeout": 4.0,
+            "reacquire_window_seconds": 8.0,
             "reacquire_score_lock_threshold": 0.40,
         },
         "shift": {
             "score_lock_threshold": 0.45,
-            "score_unlock_threshold": 0.30,
-            "lost_timeout": 2.5,
+            "score_unlock_threshold": 0.33,
+            "lost_timeout": 4.0,
             "reacquire_window_seconds": 8.0,
             "reacquire_score_lock_threshold": 0.33,
         },
     }[tracking_mode]
 
-    tracker_type = str(src.get("tracker_type") or "bytetrack").lower()
-    if tracker_type not in {"bytetrack", "iou", "deepsort"}:
-        tracker_type = "bytetrack"
+    tracker_type = "bytetrack"
 
     preset = CAMERA_PRESETS[camera_mode]
     verify_mode = bool(src.get("verify_mode", False))
@@ -155,13 +158,13 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "ocr_min_conf": _as_float(src, "ocr_min_conf", preset["ocr_min_conf"]),
         "lock_seconds_after_confirm": _as_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"]),
         "gap_merge_seconds": _as_float(src, "gap_merge_seconds", preset["gap_merge_seconds"]),
-        "lost_timeout": _as_float(src, "lost_timeout", mode_defaults["lost_timeout"]),
-        "reacquire_window_seconds": _as_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"]),
+        "lost_timeout": _bounded_float(src, "lost_timeout", mode_defaults["lost_timeout"], 0.25, 30.0),
+        "reacquire_window_seconds": _bounded_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"], 0.5, 60.0),
         "reacquire_score_lock_threshold": _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"]),
         "min_track_seconds": _as_float(src, "min_track_seconds", preset["min_track_seconds"]),
         "min_clip_seconds": _as_float(src, "min_clip_seconds", 1.0),
         "score_lock_threshold": _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]),
-        "score_unlock_threshold": _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"]),
+        "score_unlock_threshold": _bounded_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"], 0.0, 1.0),
         "seed_lock_seconds": _as_float(src, "seed_lock_seconds", 8.0),
         "seed_iou_min": _as_float(src, "seed_iou_min", _as_float(src, "seed_min_iou", 0.12)),
         "seed_dist_max": _as_float(src, "seed_dist_max", 0.16),
@@ -180,8 +183,8 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "ocr_confirm_k": _as_int(src, "ocr_confirm_k", 5),
         "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", False)),
         "allow_seed_clips": bool(src.get("allow_seed_clips", True)),
-        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.85),
-        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 2.0),
+        "ocr_veto_conf": _bounded_float(src, "ocr_veto_conf", 0.92, 0.0, 1.0),
+        "ocr_veto_seconds": _bounded_float(src, "ocr_veto_seconds", 1.0, 0.1, 10.0),
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
     }
     return setup
