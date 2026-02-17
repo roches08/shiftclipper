@@ -128,9 +128,10 @@ def _iou(a, b):
 
 
 def _run(cmd: List[str]) -> None:
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
-        raise RuntimeError(f"command failed ({p.returncode}): {' '.join(cmd)}\n{p.stdout}")
+        err = (p.stderr or p.stdout or "").strip()
+        raise RuntimeError(f"command failed ({p.returncode}): {' '.join(cmd)}\n{err}")
 
 
 def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
@@ -386,7 +387,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
         if cur:
             cur.meta = {**(cur.meta or {}), "stage": stage_name, "progress": int(progress), "message": message}
             cur.save_meta()
-        log.info("job_id=%s stage=%s progress=%s message=%s", job_id, stage_name, progress, message)
+        log.info("job_id=%s stage=%s progress=%s message=%s", job_id, stage_name, progress, message, extra={"job_id": job_id, "stage": stage_name})
 
     try:
         in_path = meta.get("video_path") or str(job_dir / "in.mp4")
@@ -439,8 +440,16 @@ def process_job(job_id: str) -> Dict[str, Any]:
             if Path(combined_path).exists():
                 combined_url = f"/data/jobs/{job_id}/combined.mp4"
 
+        checked_paths = [str(Path(c["path"])) for c in clips]
+        if combined_path:
+            checked_paths.append(str(Path(combined_path)))
+        missing_outputs = [p for p in checked_paths if not Path(p).exists()]
+        if missing_outputs:
+            raise RuntimeError(f"Missing expected outputs: {missing_outputs}")
+
         if bool(setup.get("debug_timeline", True)):
             (job_dir / "debug_timeline.json").write_text(json.dumps(data["timeline"], indent=2))
+            (job_dir / "debug.json").write_text(json.dumps(data["timeline"], indent=2))
 
         shifts_json = []
         total_toi = 0.0
@@ -457,13 +466,23 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "debug_overlay_url": f"/data/jobs/{job_id}/debug_overlay.mp4" if data.get("debug_overlay_path") else None,
             "debug_timeline_path": str(job_dir / "debug_timeline.json") if (job_dir / "debug_timeline.json").exists() else None,
             "debug_timeline_url": f"/data/jobs/{job_id}/debug_timeline.json" if (job_dir / "debug_timeline.json").exists() else None,
+            "debug_json_path": str(job_dir / "debug.json") if (job_dir / "debug.json").exists() else None,
+            "debug_json_url": f"/data/jobs/{job_id}/debug.json" if (job_dir / "debug.json").exists() else None,
         }
+        artifacts["list"] = [
+            {"type": "clip", "path": c["path"], "url": c["url"]} for c in clips
+        ]
+        if combined_path:
+            artifacts["list"].append({"type": "combined", "path": combined_path, "url": combined_url})
+        if artifacts.get("debug_overlay_path"):
+            artifacts["list"].append({"type": "debug_overlay", "path": artifacts["debug_overlay_path"], "url": artifacts["debug_overlay_url"]})
+        if artifacts.get("debug_json_path"):
+            artifacts["list"].append({"type": "debug_timeline", "path": artifacts["debug_json_path"], "url": artifacts["debug_json_url"]})
 
         status = "done"
         message = "Processing complete"
         if not clips and not combined_path:
-            status = "done_no_clips"
-            message = "Run completed but no clips were found. See debug overlay/timeline."
+            raise RuntimeError("No clips created; see debug overlay/timeline (checked clips and combined outputs)")
 
         if stage["stalled"]:
             raise RuntimeError("stalled")

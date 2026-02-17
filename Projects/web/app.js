@@ -11,9 +11,9 @@ const TRACK_HELP = {
   shift: "Shifts: Tracks full shifts on ice; outputs shift start/end + total TOI.",
 };
 const CAMERA_DEFAULTS = {
-  broadcast: { detect_stride: 1, ocr_min_conf: 0.22, lock_seconds_after_confirm: 4.0, gap_merge_seconds: 2.5, lost_timeout: 1.5, min_track_seconds: 0.75 },
-  broadcast_wide: { detect_stride: 1, ocr_min_conf: 0.20, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 1.9, min_track_seconds: 0.75 },
-  tactical: { detect_stride: 2, ocr_min_conf: 0.25, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 1.8, min_track_seconds: 0.75 },
+  broadcast: { detect_stride: 1, ocr_min_conf: 0.20, lock_seconds_after_confirm: 4.0, gap_merge_seconds: 2.5, lost_timeout: 1.5, min_track_seconds: 0.75 },
+  broadcast_wide: { detect_stride: 1, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 1.9, min_track_seconds: 0.75 },
+  tactical: { detect_stride: 3, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 1.8, min_track_seconds: 0.75 },
 };
 
 async function j(method, path, body){
@@ -65,6 +65,8 @@ function payload(){
     verify_mode: $('verifyMode').value === 'on',
     player_number: $('playerNumber').value,
     jersey_color: $('jerseyColor').value,
+    jersey_color_hex: $('jerseyColor').value,
+    jersey_color_rgb: (() => { const v=$('jerseyColor').value.replace("#",""); return { r: parseInt(v.slice(0,2),16), g: parseInt(v.slice(2,4),16), b: parseInt(v.slice(4,6),16) }; })(),
     color_tolerance: Number($('colorTolerance').value),
     extend_sec: Number($('extendSec').value),
     detect_stride: Number($('detectStride').value),
