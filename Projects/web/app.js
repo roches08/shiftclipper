@@ -4,7 +4,6 @@ const state = {
   clicks: [],
   lastStatus: null,
   pollTimer: null,
-  proxySrcSet: false,
   proxySrc: null,
   uploadInFlight: false,
   uploadXhr: null,
@@ -48,8 +47,8 @@ function setJobId(jobId){
   const changed = state.jobId !== jobId;
   state.jobId = jobId;
   if(jobId) localStorage.setItem('shiftclipper.jobId', jobId);
+  else localStorage.removeItem('shiftclipper.jobId');
   if(changed){
-    state.proxySrcSet = false;
     state.proxySrc = null;
     state.clicks = [];
     drawClickMarkers();
@@ -57,6 +56,8 @@ function setJobId(jobId){
   $('jobId').textContent = jobId || '—';
   $('btnUpload').disabled = !jobId;
   $('btnSave').disabled = !jobId;
+  $('btnCancel').disabled = !jobId;
+  $('btnClear').disabled = !jobId;
   updateRunButtonState();
 }
 
@@ -196,6 +197,41 @@ async function run(){
   startPolling();
 }
 
+async function cancel(){
+  if(!state.jobId) return;
+  await j('POST', `/jobs/${state.jobId}/cancel`);
+  startPolling();
+}
+
+function resetUiAfterClear(){
+  const video = $('vid');
+  video.removeAttribute('src');
+  video.load();
+  $('resultsMessage').textContent = '—';
+  $('artifacts').innerHTML = '';
+  $('clips').textContent = '—';
+  $('out').textContent = '{}';
+  $('overallProgress').value = 0;
+  $('overallProgressText').textContent = '0%';
+  $('progressMessage').textContent = '—';
+  $('stepper').innerHTML = '';
+}
+
+async function clearJob(){
+  if(!state.jobId) return;
+  await j('DELETE', `/jobs/${state.jobId}`);
+  if(state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
+  setJobId(null);
+  resetUiAfterClear();
+  updateRunButtonState();
+}
+
+function clearSeedClicks(){
+  state.clicks = [];
+  drawClickMarkers();
+}
+
 function drawClickMarkers(){
   const video = $('vid');
   const canvas = $('overlay');
@@ -275,10 +311,9 @@ async function pollOnce(){
   const s = await j('GET', `/jobs/${state.jobId}/status`);
   state.lastStatus = s;
   $('out').textContent = JSON.stringify(s, null, 2);
-  if(!state.uploadInFlight && s.proxy_ready && s.proxy_url && !state.proxySrcSet){
-    state.proxySrc = `${s.proxy_url}?ts=${Date.now()}`;
+  if(!state.uploadInFlight && s.proxy_ready && s.proxy_url && state.proxySrc !== s.proxy_url){
+    state.proxySrc = s.proxy_url;
     $('vid').src = state.proxySrc;
-    state.proxySrcSet = true;
   }
   updateProgressUi(s);
 
@@ -305,6 +340,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('btnUpload').onclick = upload;
   $('btnSave').onclick = save;
   $('btnRun').onclick = run;
+  $('btnCancel').onclick = cancel;
+  $('btnClear').onclick = clearJob;
+  $('btnClearClicks').onclick = clearSeedClicks;
   $('cameraMode').onchange = applyPreset;
   $('trackingMode').onchange = refreshHelp;
   $('verifyMode').onchange = refreshHelp;

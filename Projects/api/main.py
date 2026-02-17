@@ -475,6 +475,30 @@ def cancel_job(job_id: str):
     return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
 
+@app.delete("/jobs/{job_id}")
+def clear_job(job_id: str):
+    jd = job_dir(job_id)
+    mp = meta_path(job_id)
+    if not jd.exists() and not mp.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    meta = read_json(mp, {})
+    status = meta.get("status")
+    rq_state = meta.get("rq_state")
+    if status in {"processing", "queued"} and rq_state not in {"finished", "failed"}:
+        raise HTTPException(status_code=409, detail="Cancel first")
+
+    rq_id = meta.get("rq_id")
+    if rq_id:
+        try:
+            Job.fetch(rq_id, connection=rconn).delete()
+        except Exception:
+            pass
+
+    shutil.rmtree(jd, ignore_errors=True)
+    return {"ok": True, "job_id": job_id, "deleted": True}
+
+
 @app.post("/jobs/{job_id}/retry")
 def retry_job(job_id: str):
     jd = job_dir(job_id)
