@@ -50,6 +50,7 @@ STALL_TIMEOUT_S = float(os.getenv("WORKER_STALL_TIMEOUT_SECONDS", "120"))
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 JOBS_DIR = Path(os.getenv("JOBS_DIR", str(BASE_DIR / "data" / "jobs"))).resolve()
+_EASYOCR_WARMED = False
 
 
 def _is_cuda_fork_error(exc: Exception) -> bool:
@@ -68,6 +69,15 @@ def _build_ocr_reader(device: str):
             log.warning("Falling back to CPU OCR due to CUDA fork constraint")
             return easyocr.Reader(["en"], gpu=False), False
         raise
+
+
+def warm_easyocr_models(device: str = "cpu") -> None:
+    global _EASYOCR_WARMED
+    if _EASYOCR_WARMED or easyocr is None:
+        return
+    _, warm_gpu = _build_ocr_reader(device)
+    _EASYOCR_WARMED = True
+    log.info("EasyOCR models ready (gpu=%s)", warm_gpu)
 
 
 @dataclass
@@ -89,6 +99,7 @@ class TrackingParams:
     min_clip_seconds: float = 1.0
     post_roll: float = 2.0
     score_lock_threshold: float = 0.55
+    score_unlock_threshold: float = 0.35
     seed_lock_seconds: float = 8.0
     seed_iou_min: float = 0.15
     seed_dist_max: float = 0.12
@@ -284,6 +295,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     model = YOLO("yolov8s.pt")
     device, yolo_device = resolve_device()
     is_cuda = device.startswith("cuda")
+    warm_easyocr_models(device)
     ocr, ocr_gpu = _build_ocr_reader(device)
 
     tracker_type = str(setup.get("tracker_type", "bytetrack")).lower()
@@ -411,9 +423,25 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             active_seed, click_dist = None, float("inf")
             for seed in seed_clicks:
-                if abs(t - seed["t"]) <= float(setup.get("seed_window_s", params.seed_window_s)):
+                dt = abs(t - seed["t"])
+                if dt <= float(setup.get("seed_window_s", params.seed_window_s)) and dt < click_dist:
                     active_seed = seed
-                    break
+                    click_dist = dt
+
+            nearest_seed_track_id = None
+            nearest_seed_dist = float("inf")
+            if active_seed is not None:
+                px, py = active_seed["seed_px"]
+                for tr in tracks:
+                    if not tr.is_confirmed():
+                        continue
+                    box = _clip(tr.to_ltrb(), w, h)
+                    cx = (box[0] + box[2]) / 2.0
+                    cy = (box[1] + box[3]) / 2.0
+                    dist = (((cx - px) / max(1.0, w)) ** 2 + ((cy - py) / max(1.0, h)) ** 2) ** 0.5
+                    if dist < nearest_seed_dist:
+                        nearest_seed_dist = dist
+                        nearest_seed_track_id = tr.track_id
 
             best, ocr_used = None, 0
             for tr in tracks:
@@ -456,15 +484,15 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
                 seed_bonus, seed_match = 0.0, False
-                if active_seed is not None:
-                    px, py = active_seed["seed_px"]
-                    cx = (box[0] + box[2]) / 2.0
-                    cy = (box[1] + box[3]) / 2.0
-                    dist = (((cx - px) / max(1.0, w)) ** 2 + ((cy - py) / max(1.0, h)) ** 2) ** 0.5
-                    click_dist = min(click_dist, dist)
-                    if dist <= float(setup.get("seed_dist_max", params.seed_dist_max)):
-                        seed_bonus = float(setup.get("seed_bonus", params.seed_bonus))
-                        seed_match = True
+                if (
+                    active_seed is not None
+                    and nearest_seed_track_id is not None
+                    and tr.track_id == nearest_seed_track_id
+                    and nearest_seed_dist <= float(setup.get("seed_dist_max", params.seed_dist_max))
+                ):
+                    seed_bonus = float(setup.get("seed_bonus", params.seed_bonus))
+                    seed_match = True
+                    click_dist = nearest_seed_dist
 
                 score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match + identity_bonus + seed_bonus
                 if best is None or score > best["score"]:
@@ -482,7 +510,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     }
 
             prev_state = state
-            lock_threshold = float(setup.get("reacquire_score_lock_threshold", 0.40)) if t <= reacquire_until else params.score_lock_threshold
+            reacquire_threshold = float(setup.get("reacquire_score_lock_threshold", 0.40))
+            lock_threshold = reacquire_threshold if t <= reacquire_until else params.score_lock_threshold
+            unlock_threshold = float(setup.get("score_unlock_threshold", params.score_unlock_threshold))
+            allow_seed_relaxed_lock = bool(best and best.get("seed_match"))
+            if allow_seed_relaxed_lock:
+                lock_threshold = min(lock_threshold, unlock_threshold)
             if best:
                 last_box = best["box"]
 
@@ -497,14 +530,16 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     timeline.append({"t": t, "event": "reacquire", "reason": "score_recovered", "score": best["score"]})
                     reacquire_until = 0.0
             elif state == "LOCKED":
-                if lost_since is None:
+                if best and best["score"] >= unlock_threshold:
+                    lost_since = None
+                elif lost_since is None:
                     lost_since = t
-                    timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold", "score": best["score"] if best else None, "threshold": lock_threshold})
+                    timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold", "score": best["score"] if best else None, "threshold": unlock_threshold})
                 elif (t - lost_since) > params.lost_timeout:
                     state = "SEARCHING"
                     locked_track_id = None
                     reacquire_until = t + float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds))
-                    timeline.append({"t": t, "event": "unlock", "reason": "lost_timeout", "lost_for": t - lost_since, "score": best["score"] if best else None})
+                    timeline.append({"t": t, "event": "unlock", "reason": "lost_timeout", "lost_for": t - lost_since, "score": best["score"] if best else None, "threshold": unlock_threshold})
                     timeline.append({"t": t, "event": "reacquire", "reason": "window_open", "until": reacquire_until})
             else:
                 if t > reacquire_until:
