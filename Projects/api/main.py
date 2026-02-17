@@ -190,25 +190,28 @@ def job_status(job_id: str):
                 if exc:
                     # show last line of stacktrace for quick debugging
                     msg = exc.splitlines()[-1][:500]
+                cancelled = meta.get("status") == "cancelled" or "cancelled" in msg.lower()
                 meta.update({
                     "rq_state": "failed",
-                    "status": "failed",
-                    "stage": "failed",
+                    "status": "cancelled" if cancelled else "failed",
+                    "stage": "cancelled" if cancelled else "failed",
                     "progress": 100,
-                    "message": msg,
-                    "error": msg,
+                    "message": "Job cancelled." if cancelled else msg,
+                    "error": None if cancelled else msg,
                     "updated_at": time.time(),
                 })
                 write_json(mp, meta)
             elif rq_state == "started":
                 meta["rq_state"] = "started"
-                meta["status"] = "processing"
-                if rq_meta.get("stage"):
-                    meta["stage"] = rq_meta.get("stage")
-                else:
-                    meta["stage"] = meta.get("stage") or "processing"
-                if rq_meta.get("progress") is not None:
-                    meta["progress"] = int(rq_meta.get("progress"))
+                if meta.get("status") != "cancelled":
+                    meta["status"] = "processing"
+                if meta.get("status") != "cancelled":
+                    if rq_meta.get("stage"):
+                        meta["stage"] = rq_meta.get("stage")
+                    else:
+                        meta["stage"] = meta.get("stage") or "processing"
+                    if rq_meta.get("progress") is not None:
+                        meta["progress"] = int(rq_meta.get("progress"))
                 stage_message = {
                     "uploading": "Uploading...",
                     "queued": "Queued for processing.",
@@ -217,11 +220,12 @@ def job_status(job_id: str):
                     "combined": "Combining video",
                     "done": "Processing complete",
                 }
-                if rq_meta.get("message"):
-                    meta["message"] = str(rq_meta.get("message"))
-                current_message = str(meta.get("message") or "").strip()
-                if not current_message or "queued" in current_message.lower():
-                    meta["message"] = stage_message.get(meta.get("stage"), "Processing…")
+                if meta.get("status") != "cancelled":
+                    if rq_meta.get("message"):
+                        meta["message"] = str(rq_meta.get("message"))
+                    current_message = str(meta.get("message") or "").strip()
+                    if not current_message or "queued" in current_message.lower():
+                        meta["message"] = stage_message.get(meta.get("stage"), "Processing…")
             elif rq_state == "queued":
                 meta["rq_state"] = "queued"
                 if meta.get("status") not in {"cancelled", "failed", "done"}:
@@ -483,9 +487,8 @@ def clear_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     meta = read_json(mp, {})
-    status = meta.get("status")
-    rq_state = meta.get("rq_state")
-    if status in {"processing", "queued"} and rq_state not in {"finished", "failed"}:
+    rq_state = str(meta.get("rq_state") or "").lower()
+    if rq_state in {"queued", "started"}:
         raise HTTPException(status_code=409, detail="Cancel first")
 
     rq_id = meta.get("rq_id")

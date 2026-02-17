@@ -81,6 +81,7 @@ curl -s -X POST "http://127.0.0.1:8000/jobs/cleanup?days=7&max_count=100"
 
 ## Troubleshooting: “queued forever”
 
+- If proxy video flickers/reloads in the UI, ensure the frontend only assigns `video.src` when `proxy_url` changes (fixed in current app by tracking `state.proxySrc`).
 - Confirm worker is running and listening on the same `RQ_QUEUES` queue as API enqueue target.
 - Confirm API and worker share the same `JOBS_DIR` mount.
 - Use `/jobs/<id>/status` and check `rq_state`; status now derives from RQ (`queued/started/finished/failed`) and merges file status.
