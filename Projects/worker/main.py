@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+import logging
 
 import redis
 from rq import Queue, Worker
@@ -10,6 +11,34 @@ from rq.job import Job
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
 JOBS_DIR = os.getenv("JOBS_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "jobs")))
+
+
+def configure_logging() -> None:
+    log_path = os.getenv("WORKER_LOG_PATH", "/workspace/worker.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s job_id=%(job_id)s %(name)s %(message)s")
+
+    class JobContextFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if not hasattr(record, "job_id"):
+                record.job_id = "-"
+            return True
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers = []
+    f = JobContextFilter()
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    sh.addFilter(f)
+
+    fh = logging.FileHandler(log_path)
+    fh.setFormatter(formatter)
+    fh.addFilter(f)
+
+    root.addHandler(sh)
+    root.addHandler(fh)
 
 
 def run_self_test(conn: redis.Redis) -> int:
@@ -37,8 +66,9 @@ def main() -> None:
         f.write("ok\n")
     os.remove(probe_path)
 
+    configure_logging()
     conn = redis.from_url(REDIS_URL)
-    print(f"Worker starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
+    logging.getLogger("worker").info("Worker starting | redis=%s | queues=%s | jobs_dir=%s", REDIS_URL, QUEUE_NAMES, JOBS_DIR, extra={"job_id":"-"})
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))

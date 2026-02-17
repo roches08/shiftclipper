@@ -4,6 +4,7 @@ import json
 import traceback
 import math
 import time
+import threading
 import shutil
 import logging
 from dataclasses import dataclass
@@ -40,6 +41,10 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger("worker")
 log.setLevel(logging.INFO)
+
+DEBUG_MODE = os.getenv("WORKER_DEBUG", "0") == "1"
+HEARTBEAT_SECONDS = float(os.getenv("WORKER_HEARTBEAT_SECONDS", "5"))
+STALL_TIMEOUT_MINUTES = float(os.getenv("WORKER_STALL_TIMEOUT_MINUTES", "5"))
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -179,6 +184,7 @@ def track_presence_spans_pro(
     opponent_color_hex: Optional[str],
     params: TrackingParams,
     cancel_check: Optional[Any] = None,
+    progress_cb: Optional[Any] = None,
 ) -> Tuple[List[Tuple[float, float]], Dict[str, Any]]:
 
     if DeepSort is None:
@@ -261,6 +267,7 @@ def track_presence_spans_pro(
     next_ocr_t = 0.0
 
     frame_idx = 0
+    last_heartbeat = 0.0
     while True:
         if cancel_check and cancel_check():
             raise RuntimeError("Job cancelled by user.")
@@ -366,15 +373,11 @@ def track_presence_spans_pro(
 
         present_samples.append((t_s, bool(present)))
 
-        cur = get_current_job()
-        if cur is not None and total_frames:
-            if frame_idx % (params.detect_stride * 90) == 0:
-                pct = int(min(99, (frame_idx / max(1, total_frames)) * 100))
-                meta = cur.meta or {}
-                meta["progress"] = pct
-                meta["stage"] = "tracking"
-                cur.meta = meta
-                cur.save_meta()
+        if progress_cb is not None and total_frames:
+            now = time.time()
+            if (now - last_heartbeat) >= HEARTBEAT_SECONDS:
+                progress_cb(frame_idx=frame_idx, total_frames=total_frames, t_s=t_s)
+                last_heartbeat = now
 
         frame_idx += 1
 
@@ -436,15 +439,17 @@ def _ffmpeg_exists() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _run(cmd: List[str]) -> None:
+def _run(cmd: List[str], *, job_id: Optional[str] = None, debug: bool = False) -> None:
     import subprocess
 
+    if debug:
+        log.info("job_id=%s ffmpeg_cmd=%s", job_id or "-", " ".join(cmd))
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if p.returncode != 0:
         raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(cmd)}\n{p.stdout}")
 
 
-def make_proxy(in_path: str, out_path: str) -> None:
+def make_proxy(in_path: str, out_path: str, *, job_id: Optional[str] = None, debug: bool = False) -> None:
     if os.path.exists(out_path):
         return
     if not _ffmpeg_exists():
@@ -455,10 +460,10 @@ def make_proxy(in_path: str, out_path: str) -> None:
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
         "-c:a", "aac", "-b:a", "96k",
         out_path,
-    ])
+    ], job_id=job_id, debug=debug)
 
 
-def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
+def cut_clip(in_path: str, start: float, end: float, out_path: str, *, job_id: Optional[str] = None, debug: bool = False) -> None:
     if os.path.exists(out_path):
         return
     if not _ffmpeg_exists():
@@ -470,10 +475,10 @@ def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
-    ])
+    ], job_id=job_id, debug=debug)
 
 
-def concat_clips(clip_paths: List[str], out_path: str) -> None:
+def concat_clips(clip_paths: List[str], out_path: str, *, job_id: Optional[str] = None, debug: bool = False) -> None:
     if os.path.exists(out_path):
         return
     if not clip_paths:
@@ -484,7 +489,7 @@ def concat_clips(clip_paths: List[str], out_path: str) -> None:
     with open(lst, "w", encoding="utf-8") as f:
         for pth in clip_paths:
             f.write(f"file '{pth}'\n")
-    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path])
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path], job_id=job_id, debug=debug)
     try:
         os.remove(lst)
     except Exception:
@@ -504,9 +509,36 @@ def process_job(job_id: str) -> Dict[str, Any]:
       except Exception:
           return False
 
+  watchdog_stop = None
   try:
       _ensure_dirs()
       cur = get_current_job()
+      debug_mode = DEBUG_MODE
+      stage_state = {"stage": "starting", "last_update": time.time(), "stalled": False}
+      stall_timeout_s = max(60.0, STALL_TIMEOUT_MINUTES * 60.0)
+
+      def check_stalled() -> None:
+          if stage_state.get("stalled"):
+              raise RuntimeError(f"stalled during {stage_state['stage']}")
+          if (time.time() - stage_state["last_update"]) > stall_timeout_s:
+              raise RuntimeError(f"stalled during {stage_state['stage']}")
+
+      def update_status(stage: str, progress: int, message: str, status: str = "processing") -> None:
+          stage_state["stage"] = stage
+          stage_state["last_update"] = time.time()
+          jobmeta.update({
+              "status": status,
+              "stage": stage,
+              "progress": int(progress),
+              "message": message,
+              "updated_at": time.time(),
+          })
+          with open(meta_path, "w", encoding="utf-8") as f:
+              json.dump(jobmeta, f, indent=2)
+          if cur:
+              cur.meta = {**(cur.meta or {}), "stage": stage, "progress": int(progress), "message": message}
+              cur.save_meta()
+          log.info("job_id=%s stage=%s progress=%s message=%s", job_id, stage, progress, message)
 
       job_dir = os.path.join(JOBS_DIR, job_id)
       meta_path = os.path.join(job_dir, "job.json")
@@ -528,6 +560,18 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
       if not isinstance(jobmeta, dict):
           raise RuntimeError("Could not read job meta JSON")
+      debug_mode = debug_mode or bool(jobmeta.get("debug_mode"))
+
+      watchdog_stop = False
+      def _watchdog() -> None:
+          while not watchdog_stop:
+              time.sleep(2.0)
+              if (time.time() - stage_state["last_update"]) > stall_timeout_s:
+                  stage_state["stalled"] = True
+                  log.error("job_id=%s stage=%s stalled watchdog timeout reached", job_id, stage_state["stage"])
+                  break
+
+      threading.Thread(target=_watchdog, daemon=True).start()
 
       in_path = jobmeta.get("video_path") or os.path.join(job_dir, "in.mp4")
       if not os.path.exists(in_path):
@@ -537,10 +581,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
           raise JobCancelled("Job cancelled before processing started.")
 
       proxy_path = os.path.join(job_dir, "input_proxy.mp4")
-      if cur:
-          cur.meta = {**(cur.meta or {}), "stage": "proxy", "progress": 1}
-          cur.save_meta()
-      make_proxy(in_path, proxy_path)
+      update_status("proxy", 2, "Preparing proxy")
+      make_proxy(in_path, proxy_path, job_id=job_id, debug=debug_mode)
 
       jobmeta["proxy_path"] = proxy_path
       jobmeta["proxy_url"] = f"/data/jobs/{job_id}/input_proxy.mp4"
@@ -595,9 +637,14 @@ def process_job(job_id: str) -> Dict[str, Any]:
           verify_mode=bool(setup.get("verify_mode", True)),
       )
 
-      if cur:
-          cur.meta = {**(cur.meta or {}), "stage": "tracking", "progress": 5}
-          cur.save_meta()
+      log.info("job_id=%s debug_mode=%s model_device=%s", job_id, debug_mode, _device())
+
+      update_status("tracking", 10, "Starting tracking")
+
+      def tracking_heartbeat(frame_idx: int, total_frames: int, t_s: float) -> None:
+          pct = int(min(80, 10 + (frame_idx / max(1, total_frames)) * 65))
+          update_status("tracking", pct, f"Tracking in progress ({t_s:.1f}s)")
+          check_stalled()
 
       spans, debug = track_presence_spans_pro(
           video_path=in_path,
@@ -606,24 +653,31 @@ def process_job(job_id: str) -> Dict[str, Any]:
           jersey_color_hex=jersey_color,
           opponent_color_hex=opponent_color,
           params=params,
-          cancel_check=lambda: is_cancel_requested(meta_path),
+          cancel_check=lambda: is_cancel_requested(meta_path) or stage_state.get("stalled", False),
+          progress_cb=tracking_heartbeat,
       )
 
       clips_dir = os.path.join(job_dir, "clips")
       os.makedirs(clips_dir, exist_ok=True)
+      update_status("exporting", 82, "Exporting clips")
 
       clips: List[Dict[str, Any]] = []
       clip_paths: List[str] = []
       for i, (a, b) in enumerate(spans, start=1):
+          check_stalled()
           if is_cancel_requested(meta_path):
               raise JobCancelled("Job cancelled while building clips.")
           outp = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
-          cut_clip(in_path, a, b, outp)
+          cut_clip(in_path, a, b, outp, job_id=job_id, debug=debug_mode)
           clip_paths.append(outp)
           clips.append({"start": float(a), "end": float(b), "path": outp, "url": f"/data/jobs/{job_id}/clips/clip_{i:03d}.mp4"})
+          step_pct = 82 + int((i / max(1, len(spans))) * 12)
+          update_status("exporting", min(94, step_pct), f"Exporting clips ({i}/{len(spans)})")
 
       combined_path = os.path.join(job_dir, "combined.mp4")
-      concat_clips(clip_paths, combined_path)
+      update_status("exporting", 95, "Combining clips")
+      concat_clips(clip_paths, combined_path, job_id=job_id, debug=debug_mode)
+      update_status("exporting", 98, "Finished exporting clips")
 
       jobmeta["clips"] = clips
       jobmeta["combined_path"] = combined_path if os.path.exists(combined_path) else None
@@ -633,6 +687,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
       jobmeta["progress"] = 100
       jobmeta["stage"] = "done"
       jobmeta["updated_at"] = time.time()
+      jobmeta["message"] = "Processing complete"
 
       with open(meta_path, "w", encoding="utf-8") as f:
           json.dump(jobmeta, f, indent=2)
@@ -644,6 +699,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
       if cur:
           cur.meta = {**(cur.meta or {}), "stage": "done", "progress": 100}
           cur.save_meta()
+      log.info("job_id=%s stage=done progress=100 message=Processing complete", job_id)
 
       return jobmeta
   except JobCancelled as e:
@@ -683,6 +739,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
     except Exception:
       pass
     raise
+  finally:
+    watchdog_stop = True
 
 
 def self_test_task(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

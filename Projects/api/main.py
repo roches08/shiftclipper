@@ -245,7 +245,17 @@ def job_status(job_id: str):
                     meta["stage"] = meta.get("stage") or "processing"
                 if rq_meta.get("progress") is not None:
                     meta["progress"] = int(rq_meta.get("progress"))
-                meta["message"] = meta.get("message") or "Processing…"
+                stage_message = {
+                    "proxy": "Preparing proxy",
+                    "tracking": "Tracking in progress",
+                    "exporting": "Exporting clips",
+                    "done": "Processing complete",
+                }
+                if rq_meta.get("message"):
+                    meta["message"] = str(rq_meta.get("message"))
+                current_message = str(meta.get("message") or "").strip()
+                if not current_message or "queued" in current_message.lower():
+                    meta["message"] = stage_message.get(meta.get("stage"), "Processing…")
             elif rq_state == "queued":
                 meta["rq_state"] = "queued"
                 if meta.get("status") not in {"cancelled", "failed", "done"}:
