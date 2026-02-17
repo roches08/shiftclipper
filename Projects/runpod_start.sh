@@ -16,7 +16,7 @@ export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 mkdir -p "$JOBS_DIR"
 
 apt-get update -y
-apt-get install -y ffmpeg redis-server python3-venv python3-pip curl
+apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git
 
 if [ ! -d "$VENV_DIR" ]; then
   python3 -m venv "$VENV_DIR"
@@ -33,13 +33,10 @@ fi
 echo "Installing ShiftClipper requirements from requirements.txt"
 pip install -r requirements.txt
 
-if ! python -c "import pkg_resources; print('pkg_resources ok')"; then
-  echo "pkg_resources missing; installing/upgrading setuptools"
-  pip install --upgrade setuptools
-  python -c "import pkg_resources; print('pkg_resources ok')"
-fi
+python -c "import pkg_resources; print('pkg_resources ok')" || pip install -U setuptools
+python -c "import pkg_resources; print('pkg_resources ok')"
 
-if ! python -c "import torch; print('torch', torch.__version__, 'cuda_available', torch.cuda.is_available(), 'cuda_ver', torch.version.cuda)"; then
+if ! python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
   echo "ERROR: Torch import check failed."
   tail -n 120 "$API_LOG" || true
   tail -n 120 "$WORKER_LOG" || true

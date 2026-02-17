@@ -7,7 +7,7 @@ import multiprocessing as mp
 mp.set_start_method("spawn", force=True)
 
 import redis
-from rq import Queue, SimpleWorker, Worker
+from rq import Queue, SimpleWorker
 from rq.job import Job
 from common.config import resolve_device
 
@@ -87,8 +87,7 @@ def main() -> None:
 
     configure_logging()
     conn = redis.from_url(REDIS_URL)
-    use_simple_worker = resolve_device().startswith("cuda")
-    worker_cls = SimpleWorker if use_simple_worker else Worker
+    worker_cls = SimpleWorker
 
     logging.getLogger("worker").info(
         "Worker starting | redis=%s | queues=%s | jobs_dir=%s | mp_start=%s | selected_device=%s | %s",

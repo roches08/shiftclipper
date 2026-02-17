@@ -36,6 +36,7 @@ def main() -> int:
         raise RuntimeError(f"eval failed: {data}")
 
     clips = data.get("timestamps") or []
+    perf = data.get("perf") or {}
     total_duration = sum(max(0.0, float(c.get("end") or 0) - float(c.get("start") or 0)) for c in clips)
     if not (len(clips) >= 2 or (len(clips) == 1 and total_duration >= MIN_TOTAL_DURATION)):
         raise AssertionError(f"expected at least 2 clips or 1 merged clip >= {MIN_TOTAL_DURATION}s, got {clips}")
@@ -46,6 +47,9 @@ def main() -> int:
     if data.get("combined_path") and not Path(data["combined_path"]).exists():
         raise AssertionError(f"missing combined artifact: {data['combined_path']}")
 
+    print("first_lock_time", data.get("first_lock_time"))
+    print("segments", data.get("segments_count"), "clips", len(clips))
+    print("perf_summary", json.dumps(perf, indent=2))
     print("smoke ok", json.dumps(data, indent=2))
     return 0
 
