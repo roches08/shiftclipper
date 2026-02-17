@@ -39,6 +39,10 @@ def main() -> int:
     print("perf_summary", json.dumps(perf, indent=2))
     print("first_lock_or_confirmed", data.get("first_lock_time"))
 
+    clips = data.get("timestamps") or []
+    print("clips_count", len(clips))
+    print("clips_ranges", clips)
+
     if not perf:
         raise AssertionError("missing perf block in results")
 
