@@ -233,7 +233,7 @@ def job_status(job_id: str):
                     meta["stage"] = "queued"
             elif rq_state == "finished":
                 meta["rq_state"] = "finished"
-                if meta.get("status") not in {"done", "verified", "done_no_clips", "cancelled", "failed"}:
+                if meta.get("status") not in {"done", "verified", "done_no_clips", "done_no_shifts", "cancelled", "failed"}:
                     meta["status"] = "done"
                     meta["stage"] = "done"
                     meta["progress"] = 100
@@ -487,11 +487,15 @@ def clear_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     meta = read_json(mp, {})
-    rq_state = str(meta.get("rq_state") or "").lower()
-    if rq_state in {"queued", "started"}:
-        raise HTTPException(status_code=409, detail="Cancel first")
-
     rq_id = meta.get("rq_id")
+    rq_state = str(meta.get("rq_state") or "").lower()
+
+    if rq_id and rq_state in {"queued", "started"}:
+        try:
+            cancel_job(job_id)
+        except Exception:
+            pass
+
     if rq_id:
         try:
             Job.fetch(rq_id, connection=rconn).delete()

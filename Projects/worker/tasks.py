@@ -145,11 +145,19 @@ def _iou(a, b):
     return inter / max(1, ua)
 
 
+class FFmpegError(RuntimeError):
+    def __init__(self, cmd: List[str], returncode: int, stderr: str):
+        self.cmd = cmd
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(f"ffmpeg command failed ({returncode}): {' '.join(cmd)}\n{stderr}")
+
+
 def _run(cmd: List[str]) -> None:
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "").strip()
-        raise RuntimeError(f"command failed ({p.returncode}): {' '.join(cmd)}\n{err}")
+        raise FFmpegError(cmd, p.returncode, err)
 
 
 def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
@@ -485,6 +493,14 @@ def process_job(job_id: str) -> Dict[str, Any]:
         missing_outputs = [p for p in checked_paths if not Path(p).exists()]
         if missing_outputs:
             raise RuntimeError(f"Missing expected outputs: {missing_outputs}")
+        log.info(
+            "job_id=%s outputs clips_dir=%s combined=%s clip_count=%s",
+            job_id,
+            str(clips_dir),
+            combined_path,
+            len(clips),
+            extra={"job_id": job_id, "stage": "clips"},
+        )
 
         if bool(setup.get("debug_timeline", True)):
             (job_dir / "debug_timeline.json").write_text(json.dumps(data["timeline"], indent=2))
@@ -527,16 +543,20 @@ def process_job(job_id: str) -> Dict[str, Any]:
         if artifacts.get("debug_timeline_path"):
             artifacts["list"].append({"type": "debug_timeline", "path": artifacts["debug_timeline_path"], "url": artifacts["debug_timeline_url"]})
 
-        if tracking_mode == "shift":
-            if not shifts_json:
-                raise RuntimeError("No shifts detected; see debug overlay/timeline")
-        elif not clips and not combined_path:
+        terminal_status = "done"
+        terminal_stage = "done"
+        terminal_message = "Processing complete"
+        if tracking_mode == "shift" and not shifts_json:
+            terminal_status = "done_no_shifts"
+            terminal_stage = "done"
+            terminal_message = "Run completed with no shifts detected."
+        elif tracking_mode == "clip" and not clips and not combined_path:
             raise RuntimeError("No clips created; see debug overlay/timeline (checked clips and combined outputs)")
 
         if stage["stalled"]:
             raise RuntimeError(f"Stalled in {stage['name']}")
 
-        write_status("done", "done", 100, "Processing complete")
+        write_status(terminal_status, terminal_stage, 100, terminal_message)
         meta.update({
             "clips": clips,
             "combined_path": combined_path,
@@ -545,10 +565,10 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "shifts": shifts_json,
             "total_toi": total_toi,
             "shift_count": len(shifts_json),
-            "status": "done",
-            "stage": "done",
+            "status": terminal_status,
+            "stage": terminal_stage,
             "progress": 100,
-            "message": "Processing complete",
+            "message": terminal_message,
             "updated_at": time.time(),
         })
         meta_path.write_text(json.dumps(meta, indent=2))
@@ -556,6 +576,9 @@ def process_job(job_id: str) -> Dict[str, Any]:
         return meta
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
+        ffmpeg_stderr = None
+        if isinstance(e, FFmpegError):
+            ffmpeg_stderr = e.stderr
         if str(e).lower() == "cancelled":
             meta.update({"status": "cancelled", "stage": "cancelled", "progress": 100, "message": "Job cancelled.", "error": None, "updated_at": time.time()})
             meta_path.write_text(json.dumps(meta, indent=2))
@@ -567,7 +590,14 @@ def process_job(job_id: str) -> Dict[str, Any]:
             raise
         if stage["stalled"] or "stalled" in str(e).lower():
             err = f"Stalled in {stage['name']}"
-        meta.update({"status": "failed", "stage": "failed", "progress": 100, "message": err, "error": traceback.format_exc(), "updated_at": time.time()})
+        meta.update({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 100,
+            "message": err,
+            "error": ffmpeg_stderr or traceback.format_exc(),
+            "updated_at": time.time(),
+        })
         meta_path.write_text(json.dumps(meta, indent=2))
         (job_dir / "results.json").write_text(json.dumps(meta, indent=2))
         if cur:
