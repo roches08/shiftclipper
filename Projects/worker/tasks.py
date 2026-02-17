@@ -101,9 +101,9 @@ class TrackingParams:
     score_lock_threshold: float = 0.55
     score_unlock_threshold: float = 0.35
     seed_lock_seconds: float = 8.0
-    seed_iou_min: float = 0.15
-    seed_dist_max: float = 0.12
-    seed_bonus: float = 0.60
+    seed_iou_min: float = 0.12
+    seed_dist_max: float = 0.16
+    seed_bonus: float = 0.80
     seed_window_s: float = 3.0
     color_weight: float = 0.35
     motion_weight: float = 0.30
@@ -112,11 +112,12 @@ class TrackingParams:
     color_tolerance: int = 26
     ocr_confirm_m: int = 2
     ocr_confirm_k: int = 5
-    ocr_veto_conf: float = 0.72
+    ocr_veto_conf: float = 0.85
     ocr_veto_seconds: float = 2.0
     bench_zone_ratio: float = 0.8
     closeup_bbox_area_ratio: float = 0.18
     allow_unconfirmed_clips: bool = False
+    allow_seed_clips: bool = True
     tracking_mode: str = "clip"
     verify_mode: bool = False
     debug_overlay: bool = False
@@ -173,6 +174,15 @@ def _iou(a, b):
         return 0.0
     ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / max(1, ua)
+
+
+def _expand_box(box: Tuple[int, int, int, int], scale: float, w: int, h: int) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = box
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    bw = max(1.0, (x2 - x1) * scale)
+    bh = max(1.0, (y2 - y1) * scale)
+    return _clip((cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0), w, h)
 
 
 class FFmpegError(RuntimeError):
@@ -348,7 +358,18 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             "seed_frame": int(seed_t * fps),
             "seed_px": (int(float(click.get("x", 0.0)) * w), int(float(click.get("y", 0.0)) * h)),
             "acquired": False,
+            "matched_track_id": None,
+            "matched_dist": None,
+            "matched_iou": None,
+            "seed_clip_emitted": False,
         })
+
+    seed_window_s = float(setup.get("seed_window_s", params.seed_window_s))
+    seed_dist_max = float(setup.get("seed_dist_max", params.seed_dist_max))
+    seed_iou_min = float(setup.get("seed_iou_min", params.seed_iou_min))
+    seed_bonus_val = float(setup.get("seed_bonus", params.seed_bonus))
+    ocr_veto_conf = float(setup.get("ocr_veto_conf", params.ocr_veto_conf))
+    ocr_veto_conf_seed_hard = 0.95
 
     segments, shifts = [], []
     shift_start = None
@@ -429,25 +450,66 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             active_seed, click_dist = None, float("inf")
             for seed in seed_clicks:
-                dt = abs(t - seed["t"])
-                if dt <= float(setup.get("seed_window_s", params.seed_window_s)) and dt < click_dist:
+                dt = t - seed["t"]
+                if 0.0 <= dt <= seed_window_s and dt < click_dist:
                     active_seed = seed
                     click_dist = dt
 
             nearest_seed_track_id = None
             nearest_seed_dist = float("inf")
+            nearest_seed_iou = 0.0
+            in_seed_window = active_seed is not None
             if active_seed is not None:
                 px, py = active_seed["seed_px"]
+                click_box_half = max(8, int(0.04 * math.hypot(w, h)))
+                click_box = _clip((px - click_box_half, py - click_box_half, px + click_box_half, py + click_box_half), w, h)
                 for tr in tracks:
                     if not tr.is_confirmed():
                         continue
                     box = _clip(tr.to_ltrb(), w, h)
                     cx = (box[0] + box[2]) / 2.0
                     cy = (box[1] + box[3]) / 2.0
-                    dist = (((cx - px) / max(1.0, w)) ** 2 + ((cy - py) / max(1.0, h)) ** 2) ** 0.5
-                    if dist < nearest_seed_dist:
+                    dist = math.hypot(cx - px, cy - py) / max(1.0, math.hypot(w, h))
+                    iou = _iou(_expand_box(box, 1.15, w, h), click_box)
+                    match_score = min(1.0, dist / max(1e-6, seed_dist_max)) - iou
+                    if match_score < (min(1.0, nearest_seed_dist / max(1e-6, seed_dist_max)) - nearest_seed_iou):
                         nearest_seed_dist = dist
+                        nearest_seed_iou = iou
                         nearest_seed_track_id = tr.track_id
+
+            seed_bonus_track_id = None
+            seed_match_active = (
+                active_seed is not None
+                and nearest_seed_track_id is not None
+                and (nearest_seed_dist <= seed_dist_max or nearest_seed_iou >= seed_iou_min)
+            )
+            if seed_match_active:
+                seed_bonus_track_id = nearest_seed_track_id
+                active_seed["acquired"] = True
+                active_seed["matched_track_id"] = nearest_seed_track_id
+                active_seed["matched_dist"] = nearest_seed_dist
+                active_seed["matched_iou"] = nearest_seed_iou
+                timeline.append({
+                    "t": t,
+                    "event": "seed_match",
+                    "click_t": active_seed["t"],
+                    "chosen_track_id": nearest_seed_track_id,
+                    "dist": nearest_seed_dist,
+                    "iou": nearest_seed_iou,
+                    "bonus_applied": True,
+                    "in_seed_window": in_seed_window,
+                })
+            elif active_seed is not None:
+                timeline.append({
+                    "t": t,
+                    "event": "seed_match",
+                    "click_t": active_seed["t"],
+                    "chosen_track_id": nearest_seed_track_id,
+                    "dist": nearest_seed_dist if nearest_seed_track_id is not None else None,
+                    "iou": nearest_seed_iou if nearest_seed_track_id is not None else None,
+                    "bonus_applied": False,
+                    "in_seed_window": in_seed_window,
+                })
 
             best, ocr_used = None, 0
             candidates = []
@@ -460,16 +522,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 cscore = _color_score(frame, box, jersey_hsv, params.color_tolerance)
                 motion = _iou(box, last_box) if last_box else 0.0
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
-                seed_bonus, seed_match = 0.0, False
-                if (
-                    active_seed is not None
-                    and nearest_seed_track_id is not None
-                    and tr.track_id == nearest_seed_track_id
-                    and nearest_seed_dist <= float(setup.get("seed_dist_max", params.seed_dist_max))
-                ):
-                    seed_bonus = float(setup.get("seed_bonus", params.seed_bonus))
-                    seed_match = True
-                    click_dist = nearest_seed_dist
+                seed_bonus = seed_bonus_val if (seed_bonus_track_id is not None and tr.track_id == seed_bonus_track_id) else 0.0
                 score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus + seed_bonus
                 candidates.append({
                     "track_id": tr.track_id,
@@ -481,8 +534,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "ocr_conf": 0.0,
                     "ocr_match": 0.0,
                     "ocr_veto": False,
-                    "seed_match": seed_match,
-                    "seed_dist": click_dist,
+                    "seed_match": seed_bonus > 0.0,
+                    "seed_dist": nearest_seed_dist if tr.track_id == seed_bonus_track_id else None,
+                    "seed_iou": nearest_seed_iou if tr.track_id == seed_bonus_track_id else None,
                 })
 
             max_ocr_crops = max(1, int(setup.get("ocr_max_crops_per_frame", params.ocr_max_crops_per_frame)))
@@ -520,7 +574,20 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             if player_num and d == player_num and cand["ocr_conf"] >= params.ocr_min_conf:
                                 cand["ocr_match"] = 1.0
                                 break
-                            if player_num and d != player_num and cand["ocr_conf"] >= params.ocr_veto_conf:
+                            mismatch_veto = player_num and d != player_num and cand["ocr_conf"] >= ocr_veto_conf
+                            if mismatch_veto:
+                                in_seed_window_for_cand = bool(active_seed is not None and cand.get("seed_match"))
+                                hard_seed_veto = bool(cand["ocr_conf"] >= ocr_veto_conf_seed_hard)
+                                if in_seed_window_for_cand and not hard_seed_veto:
+                                    timeline.append({
+                                        "t": t,
+                                        "event": "seed_veto_suppressed",
+                                        "click_t": active_seed["t"],
+                                        "track_id": cand["track_id"],
+                                        "ocr_txt": d,
+                                        "ocr_conf": cand["ocr_conf"],
+                                    })
+                                    continue
                                 cand["ocr_veto"] = True
                                 vetoed_tracks[cand["track_id"]] = t + max(0.5, float(setup.get("ocr_veto_seconds", params.ocr_veto_seconds)))
                                 timeline.append({"t": t, "event": "ocr_veto", "track_id": cand["track_id"], "ocr_txt": d, "ocr_conf": cand["ocr_conf"]})
@@ -535,10 +602,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             for cand in candidates:
                 box = cand["box"]
                 area_ratio = ((box[2] - box[0]) * (box[3] - box[1])) / max(1.0, float(w * h))
-                requires_ocr_confirm = bool(player_num) and area_ratio >= float(setup.get("closeup_bbox_area_ratio", params.closeup_bbox_area_ratio))
+                is_closeup = area_ratio >= float(setup.get("closeup_bbox_area_ratio", params.closeup_bbox_area_ratio))
+                strong_ocr_match = bool(player_num and cand.get("ocr_txt") == player_num and cand.get("ocr_conf", 0.0) >= ocr_veto_conf)
+                cand["closeup_blocked"] = bool(player_num) and is_closeup and not cand.get("seed_match") and not strong_ocr_match
                 if cand["ocr_veto"]:
                     cand["score"] -= 1.0
-                elif requires_ocr_confirm and cand["ocr_match"] < 1.0:
+                elif cand["closeup_blocked"]:
                     cand["score"] -= 0.75
                 cand["score"] += params.ocr_weight * cand["ocr_match"]
                 if best is None or cand["score"] > best["score"]:
@@ -555,14 +624,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             if best:
                 last_box = best["box"]
 
-            if best and best["score"] >= lock_threshold:
+            if best and best["score"] >= lock_threshold and not best.get("closeup_blocked", False):
                 if state != "LOCKED":
                     timeline.append({"t": t, "event": "lock", "reason": "score", "score": best["score"], "threshold": lock_threshold})
                 state = "LOCKED"
                 locked_track_id = best["track_id"]
                 last_seen = t
                 lost_since = None
-                if player_num and best.get("ocr_match", 0.0) >= 1.0:
+                if player_num and (best.get("ocr_match", 0.0) >= 1.0 or best.get("seed_match")):
                     lock_state = "CONFIRMED"
                 elif player_num:
                     lock_state = "PROVISIONAL"
@@ -651,12 +720,30 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         if shift_state == "ON_ICE" and shift_start is not None:
             shifts.append((shift_start, eof_t))
 
+    if bool(setup.get("allow_seed_clips", params.allow_seed_clips)):
+        clip_center_lead = float(setup.get("extend_sec", 20.0))
+        for seed in seed_clicks:
+            if not seed.get("acquired") or seed.get("seed_clip_emitted"):
+                continue
+            clip_start = max(0.0, seed["t"] - clip_center_lead)
+            clip_end = max(clip_start + params.min_clip_seconds, seed["t"])
+            seed["seed_clip_emitted"] = True
+            segments.append((clip_start, clip_end, "seed_clip"))
+            timeline.append({
+                "t": seed["t"],
+                "event": "seed_clip_emitted",
+                "click_t": seed["t"],
+                "clip_start": clip_start,
+                "clip_end": clip_end,
+            })
+
     merged = []
-    for a, b, reason in segments:
+    for a, b, reason in sorted(segments, key=lambda x: x[0]):
         if (b - a) < params.min_clip_seconds:
             continue
         if merged and a - merged[-1][1] <= params.gap_merge_seconds:
-            merged[-1] = (merged[-1][0], b, "merged")
+            merged_reason = "seed_clip" if (reason == "seed_clip" or merged[-1][2] == "seed_clip") else "merged"
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b), merged_reason)
         else:
             merged.append((a, b, reason))
 
