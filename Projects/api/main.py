@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover
     send_stop_job_command = None
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from common.config import normalize_setup
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
@@ -123,43 +124,6 @@ def set_status(
 
     meta["updated_at"] = time.time()
     write_json(mp, meta)
-
-
-def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
-    src = payload or {}
-
-    camera_mode = str(src.get("camera_mode") or "broadcast").lower()
-    if camera_mode not in {"broadcast", "tactical"}:
-        camera_mode = "broadcast"
-
-    verify_mode = bool(src.get("verify_mode", False))
-    extend_sec = max(0.0, min(60.0, float(src.get("extend_sec") or 20.0)))
-    detect_stride = 1 if camera_mode == "tactical" else 2
-
-    clicks = []
-    for raw in (src.get("clicks") or []):
-        try:
-            x = max(0.0, min(1.0, float(raw.get("x", 0.0))))
-            y = max(0.0, min(1.0, float(raw.get("y", 0.0))))
-            t = max(0.0, float(raw.get("t", 0.0)))
-            clicks.append({"t": t, "x": x, "y": y})
-        except Exception:
-            continue
-
-    return {
-        "camera_mode": camera_mode,
-        "player_number": str(src.get("player_number") or "").strip(),
-        "jersey_color": str(src.get("jersey_color") or "#203524"),
-        "opponent_color": str(src.get("opponent_color") or "#ffffff"),
-        "extend_sec": extend_sec,
-        "verify_mode": verify_mode,
-        "clicks": clicks,
-        "clicks_count": len(clicks),
-        # Derived worker params so dropdown choices have direct backend effect.
-        "detect_stride": detect_stride,
-        "post_roll": extend_sec,
-        "ocr_min_conf": 0.35 if verify_mode else 1.01,
-    }
 
 
 def make_proxy(in_path: str, out_path: str, max_h: int = 360, fps: int = 30) -> bool:
@@ -509,7 +473,7 @@ def results(job_id: str):
         return JSONResponse(read_json(results_path, {}))
 
     # Fallback for workers that persist final data in job.json only.
-    if meta.get("status") == "done":
+    if meta.get("status") in {"done", "verified", "done_no_clips", "failed"}:
         return JSONResponse(meta)
 
     raise HTTPException(status_code=404, detail="No results yet")

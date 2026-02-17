@@ -5,117 +5,84 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ShiftClipper Tracker</title>
   <style>
-    :root { --bg:#f3f6fc; --card:#fff; --ink:#1f2a37; --muted:#5f6b7a; --line:#d6deea; --brand:#2b7cff; --brand2:#1d62d6; }
-    * { box-sizing: border-box; }
-    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: var(--bg); color:var(--ink); }
-    .container { max-width: 1180px; margin: 24px auto; padding: 0 16px; }
-    h2 { margin: 0 0 14px; }
-    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; box-shadow:0 6px 20px rgba(31,42,55,.06); }
-    .pill { display:inline-block; padding:5px 12px; border-radius:999px; background:#e8eefc; color:#234; font-weight:600; }
-    .bar { height:16px; background:#e9eef8; border-radius:999px; overflow:hidden; position:relative; width:min(100%,460px); border:1px solid #d2def0; }
-    .barFill { height:100%; width:0%; background:linear-gradient(90deg,var(--brand),var(--brand2)); }
-    .barText { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:12px; color:#123; }
-    .videoWrap { position:relative; max-width: 980px; }
-    video { width:100%; background:#000; border-radius:12px; }
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f4f7fb; }
+    .card { background: #fff; border: 1px solid #d9e2ef; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    label { font-size:12px; color:#516; }
+    .hint { font-size:12px; color:#555; }
+    .warn { background:#fff4d6; border:1px solid #f3cd68; padding:8px; border-radius:8px; margin-bottom:10px; display:none; }
+    .videoWrap { position: relative; max-width: 900px; }
+    video { width:100%; background:black; border-radius:8px; }
     canvas { position:absolute; left:0; top:0; pointer-events:none; }
-    label { font-size: 13px; color:var(--muted); font-weight:600; }
-    input, select { padding:8px 10px; border-radius:10px; border:1px solid #c6d2e2; background:#fff; }
-    button { padding:9px 14px; border-radius:10px; border:1px solid #a8c3ef; background: #eaf1ff; color:#183868; cursor:pointer; font-weight:600; }
-    button:hover:not(:disabled){ background:#dbe9ff; }
-    button:disabled { opacity: .45; cursor:not-allowed; }
-    .btn-primary { background:var(--brand); color:#fff; border-color:var(--brand2); }
-    .btn-primary:hover:not(:disabled){ background:var(--brand2); }
-    pre { background:#0b1020; color:#e8eefc; padding:12px; border-radius:12px; overflow:auto; font-size:12px; line-height:1.5; }
-    .j-key{ color:#9cdcfe; } .j-bool{ color:#4ec9b0; } .j-num{ color:#b5cea8; }
-    .hint { color:var(--muted); font-size:13px; }
+    details { margin-top: 8px; }
+    pre { background:#101827; color:#d0e0ff; padding:8px; border-radius:6px; overflow:auto; }
   </style>
 </head>
 <body>
-<div class="container">
-<h2>ShiftClipper — Broadcast Tracker</h2>
-
+<h2>ShiftClipper — Tracker v2</h2>
+<div id="verifyBanner" class="warn">Verify mode is ON: this run will NOT generate clips or a combined MP4.</div>
 <div class="card">
   <div class="row">
-    <button id="btnCreate" class="btn-primary">Create Job</button>
-    <span>Job: <b id="jobId">—</b></span>
-    <span class="pill" id="pill">idle</span>
-  </div>
-
-  <div style="margin-top:10px" class="row">
-    <div class="bar">
-      <div class="barFill" id="barFill"></div>
-      <div class="barText" id="barText">idle</div>
-    </div>
-  </div>
-
-  <div style="margin-top:10px" class="row">
-    <input id="file" type="file" accept="video/*" />
-    <button id="btnUpload" disabled>Upload Video</button>
-  </div>
-
-  <div style="margin-top:10px" class="row">
-    <label>Camera</label>
-    <select id="cameraMode">
-      <option value="broadcast" selected>broadcast (balanced)</option>
-      <option value="tactical">tactical (higher accuracy)</option>
-    </select>
-
-    <label>Jersey #</label>
-    <input id="playerNumber" type="text" inputmode="numeric" placeholder="e.g. 5" style="width:80px" />
-
-    <label>Jersey color</label>
-    <input id="jerseyColor" type="color" value="#1d3936" />
-
-    <label for="opponentColor">Opponent color</label>
-    <input id="opponentColor" type="color" value="#ffffff" />
-
-    <label>Auto-extend (sec)</label>
-    <input id="extendSec" type="number" min="0" max="60" value="20" style="width:90px" />
-
-    <label>Verify</label>
-    <select id="verifyMode">
-      <option value="off" selected>off (faster)</option>
-      <option value="on">on (OCR cross-check)</option>
-    </select>
-  </div>
-
-  <div style="margin-top:10px" class="row">
-    <button id="btnSelect" disabled>Select Player (clicks OFF)</button>
-    <button id="btnClearClicks" disabled>Clear clicks</button>
+    <button id="btnCreate">Create Job</button>
+    <button id="btnUpload" disabled>Upload</button>
     <button id="btnSave" disabled>Save setup</button>
-    <button id="btnRun" class="btn-primary" disabled>Run</button>
-    <button id="btnCancel" disabled>Cancel on backend</button>
-    <button id="btnRetry" disabled>Retry failed job</button>
-    <button id="btnCleanup">Cleanup old jobs</button>
+    <button id="btnRun" disabled>Run</button>
+    <span>Job: <b id="jobId">—</b></span>
+  </div>
+  <div class="row" style="margin-top:8px;">
+    <input id="file" type="file" accept="video/*" />
+    <label>Camera Mode</label>
+    <select id="cameraMode">
+      <option value="broadcast">Broadcast</option>
+      <option value="broadcast_wide">Broadcast (Wide / Youth)</option>
+      <option value="tactical">Tactical (Overhead/Wide)</option>
+    </select>
+    <label>Tracking Mode</label>
+    <select id="trackingMode">
+      <option value="clip">Clips (Highlights)</option>
+      <option value="shift">Shifts (TOI)</option>
+    </select>
+    <label>Verify Mode</label>
+    <select id="verifyMode"><option value="off">off</option><option value="on">on</option></select>
+  </div>
+  <div class="hint" id="cameraHelp"></div>
+  <div class="hint" id="trackingHelp"></div>
+
+  <div class="row" style="margin-top:8px;">
+    <label>Jersey #</label><input id="playerNumber" style="width:70px" />
+    <label>Jersey color</label><input id="jerseyColor" type="color" value="#1d3936" />
+    <label>Color tolerance</label><input id="colorTolerance" type="range" min="5" max="60" value="26" />
+    <label>Extend sec</label><input id="extendSec" type="number" value="20" />
   </div>
 
-  <div style="margin-top:8px;" class="hint" id="previewHint">Upload a video to start.</div>
-  <div style="margin-top:6px; font-size:13px;">
-    Clicks: <b id="clickCount">0</b><span id="clickWarn"></span>
-    <div id="clickList" style="margin-top:6px; color:#666"></div>
-  </div>
+  <details>
+    <summary>Advanced Tracking</summary>
+    <div class="row">
+      <label>Detect stride</label><input id="detectStride" type="number" value="1" />
+      <label>OCR min confidence</label><input id="ocrMinConf" type="number" step="0.01" value="0.22" />
+      <label>Lock after confirm</label><input id="lockSeconds" type="number" step="0.1" value="4.0" />
+      <label>Lost timeout</label><input id="lostTimeout" type="number" step="0.1" value="1.5" />
+      <label>Merge gap</label><input id="mergeGap" type="number" step="0.1" value="2.5" />
+      <label>Min segment</label><input id="minTrack" type="number" step="0.1" value="0.75" />
+      <span id="shiftOnly">
+        <label>Bench zone ratio</label><input id="benchZone" type="number" step="0.01" value="0.80" />
+      </span>
+    </div>
+  </details>
+  <details>
+    <summary>Debug Outputs</summary>
+    <div class="row">
+      <label>Generate debug overlay video</label><input id="debugOverlay" type="checkbox" />
+      <label>Save debug timeline JSON</label><input id="debugTimeline" type="checkbox" checked />
+    </div>
+  </details>
 </div>
 
 <div class="card">
-  <div class="videoWrap">
-    <video id="vid" controls playsinline></video>
-    <canvas id="overlay"></canvas>
-  </div>
+  <div class="videoWrap"><video id="vid" controls></video><canvas id="overlay"></canvas></div>
 </div>
-
-<div class="card">
-  <h3>Status JSON</h3>
-  <pre id="out">{}</pre>
-</div>
-
-<div class="card">
-  <h3>Clips</h3>
-  <div id="clipsUi">—</div>
-  <pre id="clips">—</pre>
-</div>
-</div>
-
+<div class="card"><h3>Status</h3><pre id="out">{}</pre></div>
+<div class="card"><h3>Results</h3><div id="resultsMessage">—</div><div id="artifacts"></div><pre id="clips">—</pre></div>
 <script src="/static/app.js" defer></script>
 </body>
 </html>

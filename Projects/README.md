@@ -90,3 +90,25 @@ curl -s -X POST "http://127.0.0.1:8000/jobs/cleanup?days=7&max_count=100"
 ```bash
 python Projects/scripts/smoke_test.py
 ```
+
+## Tracker v2 tuning guide
+
+### Camera mode selection
+- **Broadcast**: standard TV side angle; balanced OCR + motion tracking.
+- **Broadcast (Wide / Youth)**: wider view and smaller jersey numbers; use stronger color persistence and longer lock window.
+- **Tactical**: overhead/high-wide where OCR is often weak; rely on motion + color.
+
+### Tracking mode
+- **clip**: creates highlight clips from LOCKED windows.
+- **shift**: runs OFF_ICE -> ENTERING -> ON_ICE -> EXITING state machine and reports shifts + total TOI.
+
+### OCR/persistence tuning
+- Lower `ocr_min_conf` to catch angled/small numbers.
+- Increase `lock_seconds_after_confirm` for frequent occlusion/turns.
+- Increase `lost_timeout` if player disappears behind traffic.
+- Increase `gap_merge_seconds` to stitch short dropouts.
+- Increase `color_tolerance` in poor lighting; reduce it when drift occurs.
+
+### Debug interpretation
+- Enable `debug_overlay` to inspect bbox, OCR conf, color score, and SEARCHING/CONFIRMED/LOCKED state.
+- Enable `debug_timeline` to inspect state transitions, OCR hits, merges, shift boundaries, and end reasons.
