@@ -29,6 +29,7 @@
     pre { background:#0b1020; color:#e8eefc; padding:12px; border-radius:12px; overflow:auto; font-size:12px; line-height:1.5; }
     .j-key{ color:#9cdcfe; } .j-bool{ color:#4ec9b0; } .j-num{ color:#b5cea8; }
     .hint { color:var(--muted); font-size:13px; }
+    .warnBanner { margin-top:10px; padding:10px 12px; border:1px solid #f2c46d; background:#fff7e8; color:#7a4b00; border-radius:10px; font-weight:600; display:none; }
   </style>
 </head>
 <body>
@@ -91,6 +92,7 @@
   </div>
 
   <div style="margin-top:8px;" class="hint" id="previewHint">Upload a video to start.</div>
+  <div id="verifyBanner" class="warnBanner">Verify mode ON: this run will NOT generate clips or combined MP4.</div>
   <div style="margin-top:6px; font-size:13px;">
     Clicks: <b id="clickCount">0</b><span id="clickWarn"></span>
     <div id="clickList" style="margin-top:6px; color:#666"></div>

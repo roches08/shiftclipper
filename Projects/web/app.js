@@ -58,10 +58,15 @@ function updateButtons(meta){
   $('btnSave').disabled = !haveJob || clickCount < 3;
   const status = meta?.status || meta?.stage;
   const isReady = meta && (meta.status === 'ready' || meta.stage === 'ready');
-  const isBlocked = ['queued','processing','running','done','error','failed','cancelled'].includes(String(status));
+  const isBlocked = ['queued','processing','running','done','error','failed','cancelled','verified','no_clips_found'].includes(String(status));
   $('btnRun').disabled = !haveJob || !isReady || isBlocked;
   $('btnCancel').disabled = !haveJob;
   $('btnRetry').disabled = !haveJob || !['failed','cancelled'].includes(String(meta?.status || ''));
+}
+
+function updateVerifyBanner(){
+  const on = $('verifyMode').value === 'on';
+  $('verifyBanner').style.display = on ? 'block' : 'none';
 }
 
 function renderClicks(){
@@ -157,7 +162,7 @@ async function pollStatus(loop=false){
       updateButtons(meta);
 
       if(!loop) break;
-      if(['done','error','failed','cancelled'].includes(meta.status)) break;
+      if(['done','error','failed','cancelled','verified','no_clips_found'].includes(meta.status)) break;
       await new Promise(res=>setTimeout(res, 1200));
     }
   }catch(e){
@@ -245,6 +250,10 @@ async function saveSetup(){
 
 async function runJob(){
   if(!state.jobId) return;
+  if($('verifyMode').value === 'on'){
+    const okay = window.confirm('Verify mode is ON. This run will NOT generate clips or a combined MP4. Continue?');
+    if(!okay) return;
+  }
   const r = await apiJson('POST', `/jobs/${state.jobId}/run`);
   show(r);
   await pollStatus(true);
@@ -362,7 +371,8 @@ function wire(){
   const fileEl = must("file");
   const vidEl = must("vid");
   const canvasEl = must("overlay");
-  if(!btnCreate||!btnUpload||!btnSave||!btnRun||!btnCancel||!btnSelect||!btnClearClicks||!btnRetry||!btnCleanup||!fileEl||!vidEl||!canvasEl){
+  const verifyEl = must("verifyMode");
+  if(!btnCreate||!btnUpload||!btnSave||!btnRun||!btnCancel||!btnSelect||!btnClearClicks||!btnRetry||!btnCleanup||!fileEl||!vidEl||!canvasEl||!verifyEl){
     alert("UI is missing required elements. Hard refresh the page or re-upload web files.");
     return;
   }
@@ -378,6 +388,7 @@ function wire(){
   btnClearClicks.addEventListener('click', clearClicks);
 
   fileEl.addEventListener('change', ()=> updateButtons(state.lastStatus));
+  verifyEl.addEventListener('change', ()=> updateVerifyBanner());
   vidEl.addEventListener('click', handleVideoClick);
 
   window.addEventListener('resize', ()=>{ resizeOverlay(); drawOverlay(); });
@@ -392,6 +403,7 @@ function wire(){
   resizeOverlay();
   drawOverlay();
   updateButtons(null);
+  updateVerifyBanner();
 }
 
 if(document.readyState === "loading"){

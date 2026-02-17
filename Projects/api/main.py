@@ -248,12 +248,12 @@ def job_status(job_id: str):
                 meta["message"] = meta.get("message") or "Processing…"
             elif rq_state == "queued":
                 meta["rq_state"] = "queued"
-                if meta.get("status") not in {"cancelled", "failed", "done"}:
+                if meta.get("status") not in {"cancelled", "failed", "done", "verified", "no_clips_found"}:
                     meta["status"] = "queued"
                     meta["stage"] = "queued"
             elif rq_state == "finished":
                 meta["rq_state"] = "finished"
-                if meta.get("status") not in {"done", "cancelled", "failed"}:
+                if meta.get("status") not in {"done", "cancelled", "failed", "verified", "no_clips_found"}:
                     meta["status"] = "done"
                     meta["stage"] = "done"
                     meta["progress"] = 100
@@ -273,6 +273,7 @@ def job_status(job_id: str):
         "progress": meta.get("progress", 0),
         "message": meta.get("message"),
         "error": meta.get("error"),
+        "verify_mode": bool((meta.get("setup") or {}).get("verify_mode", False)),
         "updated_at": meta.get("updated_at"),
         "proxy_ready": meta.get("proxy_ready"),
         "proxy_url": meta.get("proxy_url"),
@@ -495,11 +496,29 @@ def results(job_id: str):
     results_path = jd / "results.json"
     meta = read_json(meta_path(job_id), {})
 
+    def with_artifacts(payload: Dict[str, Any]) -> Dict[str, Any]:
+        combined_path = payload.get("combined_path")
+        combined_url = payload.get("combined_url")
+        clips = payload.get("clips") or []
+        verify_mode = bool((payload.get("setup") or {}).get("verify_mode", False) or payload.get("status") == "verified")
+        payload["artifacts"] = payload.get("artifacts") or {
+            "combined": {"path": combined_path, "url": combined_url} if combined_path or combined_url else None,
+            "clips": [{"path": c.get("path"), "url": c.get("url"), "start": c.get("start"), "end": c.get("end")} for c in clips],
+            "manifest": {
+                "verify_mode": verify_mode,
+                "status": payload.get("status"),
+                "stage": payload.get("stage"),
+            },
+        }
+        if verify_mode and not payload.get("message"):
+            payload["message"] = "Verify mode: no clips/combined video are generated."
+        return payload
+
     if results_path.exists():
-        return JSONResponse(read_json(results_path, {}))
+        return JSONResponse(with_artifacts(read_json(results_path, {})))
 
     # Fallback for workers that persist final data in job.json only.
-    if meta.get("status") == "done":
-        return JSONResponse(meta)
+    if meta.get("status") in {"done", "verified", "no_clips_found", "failed"}:
+        return JSONResponse(with_artifacts(meta))
 
     raise HTTPException(status_code=404, detail="No results yet")
