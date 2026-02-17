@@ -68,7 +68,9 @@ def main() -> None:
 
     configure_logging()
     conn = redis.from_url(REDIS_URL)
-    logging.getLogger("worker").info("Worker starting | redis=%s | queues=%s | jobs_dir=%s", REDIS_URL, QUEUE_NAMES, JOBS_DIR, extra={"job_id":"-"})
+    from worker.tasks import resolve_device, _device_info
+    d = _device_info(resolve_device())
+    logging.getLogger("worker").info("Worker starting | redis=%s | queues=%s | jobs_dir=%s | device=%s | torch=%s | cuda=%s | gpu=%s", REDIS_URL, QUEUE_NAMES, JOBS_DIR, d.get("device"), d.get("torch_version"), d.get("cuda_available"), d.get("gpu_name"), extra={"job_id":"-"})
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))

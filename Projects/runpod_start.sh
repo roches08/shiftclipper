@@ -11,6 +11,7 @@ WORKER_LOG="/workspace/worker.log"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 export RQ_QUEUES="${RQ_QUEUES:-jobs}"
+export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 
 mkdir -p "$JOBS_DIR"
 
@@ -22,9 +23,11 @@ echo "==> Preparing Python virtualenv"
 if [ ! -d "$VENV_DIR" ]; then
   python3 -m venv "$VENV_DIR"
 fi
-# shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
+if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
+  pip install --extra-index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+fi
 pip install -r requirements.txt
 
 echo "==> Ensuring Redis is running"
@@ -43,15 +46,15 @@ API_PID=$!
 
 echo "==> Waiting for API readiness"
 for _ in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:8000/healthz" >/dev/null 2>&1 \
-    || curl -fsS "http://127.0.0.1:8000/jobs" >/dev/null 2>&1 \
-    || curl -fsS "http://127.0.0.1:8000/docs" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null 2>&1 \
+    && curl -fsS "http://127.0.0.1:8000/" >/dev/null 2>&1 \
+    && curl -fsS "http://127.0.0.1:8000/static/app.js" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
 
-if ! curl -fsS "http://127.0.0.1:8000/docs" >/dev/null 2>&1; then
+if ! curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null 2>&1; then
   echo "ERROR: API failed readiness checks. Last API logs:"
   tail -n 100 "$API_LOG" || true
   exit 1
@@ -60,12 +63,17 @@ fi
 echo "==> Starting worker for queue: jobs"
 nohup "$VENV_DIR/bin/rq" worker -u "$REDIS_URL" jobs > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
-
-sleep 1
+sleep 2
+if ! kill -0 "$WORKER_PID" >/dev/null 2>&1; then
+  echo "ERROR: Worker exited during startup. Last worker logs:"
+  tail -n 100 "$WORKER_LOG" || true
+  exit 1
+fi
 
 echo
 echo "===== ShiftClipper RunPod status ====="
 echo "REDIS_URL=$REDIS_URL"
+echo "SHIFTCLIPPER_DEVICE=$SHIFTCLIPPER_DEVICE"
 echo "RQ version: $("$VENV_DIR/bin/python" -c 'import rq; print(rq.__version__)')"
 echo "Redis ping: $(redis-cli -u "$REDIS_URL" ping)"
 echo "jobs queue length: $(redis-cli -u "$REDIS_URL" llen rq:queue:jobs)"

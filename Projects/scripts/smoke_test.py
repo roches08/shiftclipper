@@ -1,57 +1,45 @@
 #!/usr/bin/env python3
 import json
 import subprocess
-import sys
-import time
-import urllib.request
-
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
-
-
-def req(method, path, data=None):
-    body = None
-    headers = {}
-    if data is not None:
-        body = json.dumps(data).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    r = urllib.request.Request(BASE + path, method=method, data=body, headers=headers)
-    with urllib.request.urlopen(r, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+from pathlib import Path
 
 
 def main() -> int:
-    job = req("POST", "/jobs", {"name": "smoke"})
-    job_id = job["job_id"]
-    job_dir = f"Projects/data/jobs/{job_id}"
-    subprocess.run(["mkdir", "-p", job_dir], check=True)
-    in_path = f"{job_dir}/in.mp4"
+    out = Path("/tmp/shiftclipper_smoke")
+    out.mkdir(parents=True, exist_ok=True)
+    video = out / "sample.mp4"
+
+    # Simple synthetic clip with 3 presence windows.
     subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15", "-t", "2", in_path
-    ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=20:d=8",
+        "-vf",
+        "drawbox=enable='between(t,0.5,1.8)':x=220:y=80:w=60:h=140:color=green@0.95:t=fill,"
+        "drawbox=enable='between(t,3.0,4.0)':x=260:y=90:w=60:h=140:color=green@0.95:t=fill,"
+        "drawbox=enable='between(t,5.2,6.5)':x=300:y=95:w=60:h=140:color=green@0.95:t=fill",
+        str(video),
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    req("PUT", f"/jobs/{job_id}/setup", {"verify_mode": True, "clicks": []})
-    status = req("POST", f"/jobs/{job_id}/run")
-    print("run:", status)
+    eval_dir = out / "eval"
+    subprocess.run([
+        "python", "Projects/scripts/eval_tracker.py",
+        "--video", str(video),
+        "--target-number", "5",
+        "--jersey-color", "#00aa00",
+        "--mode", "broadcast",
+        "--out-dir", str(eval_dir),
+    ], check=True)
 
-    final = None
-    for _ in range(30):
-      time.sleep(1)
-      s = req("GET", f"/jobs/{job_id}/status")
-      print("status:", s)
-      if s.get("status") in {"done", "failed", "cancelled"}:
-        final = s
-        break
-
-    if final is None:
-      print("Timed out waiting for terminal status")
-      return 1
-
-    if final.get("status") != "done":
-      print("Job failed:", final)
-      return 1
-
-    results = req("GET", f"/jobs/{job_id}/results")
-    print("results:", results)
+    results = json.loads((eval_dir / "results.json").read_text())
+    clips = results.get("timestamps", [])
+    ok = len(clips) >= 2
+    if not ok and len(clips) == 1:
+        ok = (clips[0][1] - clips[0][0]) >= 2.0
+    assert ok, f"unexpected clips output: {clips}"
+    artifacts = results.get("artifacts", [])
+    assert artifacts, "results.json must include artifacts"
+    for item in artifacts:
+        assert Path(item["path"]).exists(), f"missing artifact path {item['path']}"
+    print(json.dumps({"clips": clips, "artifacts": len(artifacts)}, indent=2))
     return 0
 
 
