@@ -6,7 +6,7 @@ import time
 import requests
 
 
-TERMINAL = {"done", "failed", "cancelled", "verified", "done_no_clips"}
+TERMINAL = {"done", "failed", "cancelled", "verified", "done_no_clips", "done_no_shifts"}
 
 
 def main():
@@ -58,6 +58,15 @@ def main():
     res = requests.get(f"{b}/jobs/{jid}/results", timeout=20).json()
     artifacts = res.get("artifacts") or {}
     clips = artifacts.get("clips") or []
+    timeline = []
+    debug_path = artifacts.get("debug_timeline_path")
+    if debug_path:
+        try:
+            timeline = json.loads(open(debug_path, "r", encoding="utf-8").read())
+        except Exception:
+            timeline = []
+    first_lock = next((ev.get("t") for ev in timeline if ev.get("event") in {"present_on", "seed_lock"}), None)
+
     print(json.dumps({
         "job_id": jid,
         "status": res.get("status"),
@@ -66,6 +75,9 @@ def main():
         "artifact_paths": [c.get("path") for c in clips],
         "combined_path": artifacts.get("combined_path"),
         "debug_overlay_path": artifacts.get("debug_overlay_path"),
+        "segments_count": len((res.get("segments_summary") or {}).get("segments") or []),
+        "first_lock_time": first_lock,
+        "perf": res.get("perf") or {},
     }, indent=2))
 
 
