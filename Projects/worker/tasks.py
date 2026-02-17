@@ -112,7 +112,11 @@ class TrackingParams:
     color_tolerance: int = 26
     ocr_confirm_m: int = 2
     ocr_confirm_k: int = 5
+    ocr_veto_conf: float = 0.72
+    ocr_veto_seconds: float = 2.0
     bench_zone_ratio: float = 0.8
+    closeup_bbox_area_ratio: float = 0.18
+    allow_unconfirmed_clips: bool = False
     tracking_mode: str = "clip"
     verify_mode: bool = False
     debug_overlay: bool = False
@@ -328,11 +332,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     player_num = re.sub(r"\D+", "", str(setup.get("player_number") or ""))
 
     state = "SEARCHING"
+    lock_state = "UNLOCKED"
     lost_since = None
     locked_track_id = None
     last_box = None
     last_seen = -1.0
     reacquire_until = 0.0
+    vetoed_tracks: Dict[int, float] = {}
 
     seed_clicks = []
     for click in setup.get("clicks") or []:
@@ -444,44 +450,15 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         nearest_seed_track_id = tr.track_id
 
             best, ocr_used = None, 0
+            candidates = []
             for tr in tracks:
                 if not tr.is_confirmed():
                     continue
                 box = _clip(tr.to_ltrb(), w, h)
+                if t < vetoed_tracks.get(tr.track_id, 0.0):
+                    continue
                 cscore = _color_score(frame, box, jersey_hsv, params.color_tolerance)
                 motion = _iou(box, last_box) if last_box else 0.0
-                ocr_match = 0.0
-                ocr_txt = None
-                ocr_conf = 0.0
-
-                should_run_ocr = (
-                    ocr is not None
-                    and not params.ocr_disable
-                    and ocr_used < max(1, int(setup.get("ocr_max_crops_per_frame", params.ocr_max_crops_per_frame)))
-                    and (current_idx % ocr_every_n == 0)
-                )
-                if should_run_ocr:
-                    x1, y1, x2, y2 = box
-                    crop = frame[y1 + int((y2 - y1) * 0.2):y1 + int((y2 - y1) * 0.75), x1:x2]
-                    ocr_start = time.perf_counter()
-                    try:
-                        rr = ocr.readtext(crop, detail=1, paragraph=False)
-                        perf["ocr_calls"] += 1
-                        ocr_used += 1
-                        for _, txt, cf in rr:
-                            d = _parse_digits(str(txt))
-                            if d:
-                                ocr_txt, ocr_conf = d, float(cf)
-                                if player_num and d == player_num and ocr_conf >= params.ocr_min_conf:
-                                    ocr_match = 1.0
-                                    break
-                    except Exception as exc:
-                        if ocr_gpu and is_cuda and _is_cuda_fork_error(exc):
-                            ocr = easyocr.Reader(["en"], gpu=False)
-                            ocr_gpu = False
-                    finally:
-                        perf["ocr_ms"] += (time.perf_counter() - ocr_start) * 1000.0
-
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
                 seed_bonus, seed_match = 0.0, False
                 if (
@@ -493,23 +470,82 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     seed_bonus = float(setup.get("seed_bonus", params.seed_bonus))
                     seed_match = True
                     click_dist = nearest_seed_dist
+                score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus + seed_bonus
+                candidates.append({
+                    "track_id": tr.track_id,
+                    "box": box,
+                    "score": score,
+                    "color": cscore,
+                    "motion": motion,
+                    "ocr_txt": None,
+                    "ocr_conf": 0.0,
+                    "ocr_match": 0.0,
+                    "ocr_veto": False,
+                    "seed_match": seed_match,
+                    "seed_dist": click_dist,
+                })
 
-                score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match + identity_bonus + seed_bonus
-                if best is None or score > best["score"]:
-                    best = {
-                        "track_id": tr.track_id,
-                        "box": box,
-                        "score": score,
-                        "color": cscore,
-                        "motion": motion,
-                        "ocr_txt": ocr_txt,
-                        "ocr_conf": ocr_conf,
-                        "ocr_match": ocr_match,
-                        "seed_match": seed_match,
-                        "seed_dist": click_dist,
-                    }
+            max_ocr_crops = max(1, int(setup.get("ocr_max_crops_per_frame", params.ocr_max_crops_per_frame)))
+            should_run_ocr = (
+                ocr is not None
+                and not params.ocr_disable
+                and (current_idx % ocr_every_n == 0)
+                and bool(candidates)
+            )
+            if should_run_ocr:
+                candidates.sort(key=lambda c: c["score"], reverse=True)
+                for cand in candidates[:max_ocr_crops]:
+                    if ocr_used >= max_ocr_crops:
+                        break
+                    x1, y1, x2, y2 = cand["box"]
+                    bh, bw = max(1, y2 - y1), max(1, x2 - x1)
+                    cx1 = x1 + int(0.08 * bw)
+                    cx2 = x2 - int(0.08 * bw)
+                    cy1 = y1 + int(0.18 * bh)
+                    cy2 = y1 + int(0.72 * bh)
+                    crop = frame[max(0, cy1):min(h, cy2), max(0, cx1):min(w, cx2)]
+                    if crop.size == 0:
+                        continue
+                    ocr_start = time.perf_counter()
+                    try:
+                        rr = ocr.readtext(crop, detail=1, paragraph=False)
+                        perf["ocr_calls"] += 1
+                        ocr_used += 1
+                        for _, txt, cf in rr:
+                            d = _parse_digits(str(txt))
+                            if not d:
+                                continue
+                            cand["ocr_txt"] = d
+                            cand["ocr_conf"] = float(cf)
+                            if player_num and d == player_num and cand["ocr_conf"] >= params.ocr_min_conf:
+                                cand["ocr_match"] = 1.0
+                                break
+                            if player_num and d != player_num and cand["ocr_conf"] >= params.ocr_veto_conf:
+                                cand["ocr_veto"] = True
+                                vetoed_tracks[cand["track_id"]] = t + max(0.5, float(setup.get("ocr_veto_seconds", params.ocr_veto_seconds)))
+                                timeline.append({"t": t, "event": "ocr_veto", "track_id": cand["track_id"], "ocr_txt": d, "ocr_conf": cand["ocr_conf"]})
+                                break
+                    except Exception as exc:
+                        if ocr_gpu and is_cuda and _is_cuda_fork_error(exc):
+                            ocr = easyocr.Reader(["en"], gpu=False)
+                            ocr_gpu = False
+                    finally:
+                        perf["ocr_ms"] += (time.perf_counter() - ocr_start) * 1000.0
+
+            for cand in candidates:
+                box = cand["box"]
+                area_ratio = ((box[2] - box[0]) * (box[3] - box[1])) / max(1.0, float(w * h))
+                requires_ocr_confirm = bool(player_num) and area_ratio >= float(setup.get("closeup_bbox_area_ratio", params.closeup_bbox_area_ratio))
+                if cand["ocr_veto"]:
+                    cand["score"] -= 1.0
+                elif requires_ocr_confirm and cand["ocr_match"] < 1.0:
+                    cand["score"] -= 0.75
+                cand["score"] += params.ocr_weight * cand["ocr_match"]
+                if best is None or cand["score"] > best["score"]:
+                    best = cand
 
             prev_state = state
+            prev_lock_state = lock_state
             reacquire_threshold = float(setup.get("reacquire_score_lock_threshold", 0.40))
             lock_threshold = reacquire_threshold if t <= reacquire_until else params.score_lock_threshold
             unlock_threshold = float(setup.get("score_unlock_threshold", params.score_unlock_threshold))
@@ -526,6 +562,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 locked_track_id = best["track_id"]
                 last_seen = t
                 lost_since = None
+                if player_num and best.get("ocr_match", 0.0) >= 1.0:
+                    lock_state = "CONFIRMED"
+                elif player_num:
+                    lock_state = "PROVISIONAL"
+                else:
+                    lock_state = "CONFIRMED"
                 if t <= reacquire_until:
                     timeline.append({"t": t, "event": "reacquire", "reason": "score_recovered", "score": best["score"]})
                     reacquire_until = 0.0
@@ -537,6 +579,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold", "score": best["score"] if best else None, "threshold": unlock_threshold})
                 elif (t - lost_since) > params.lost_timeout:
                     state = "SEARCHING"
+                    lock_state = "UNLOCKED"
                     locked_track_id = None
                     reacquire_until = t + float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds))
                     timeline.append({"t": t, "event": "unlock", "reason": "lost_timeout", "lost_for": t - lost_since, "score": best["score"] if best else None, "threshold": unlock_threshold})
@@ -545,7 +588,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if t > reacquire_until:
                     lost_since = None
 
-            present = state == "LOCKED"
+            allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
+            present = state == "LOCKED" and (allow_unconfirmed or not player_num or lock_state == "CONFIRMED")
             if present and not present_prev:
                 seg_start = t
                 if shift_state == "OFF_ICE":
@@ -561,6 +605,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             if prev_state != state:
                 timeline.append({"t": t, "event": "state", "from": prev_state, "to": state})
+            if prev_lock_state != lock_state:
+                timeline.append({"t": t, "event": "lock_state", "from": prev_lock_state, "to": lock_state})
 
             if writer is not None:
                 draw = frame.copy()
@@ -568,7 +614,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     x1, y1, x2, y2 = best["box"]
                     cv2.rectangle(draw, (x1, y1), (x2, y2), (40, 220, 40), 2)
                     cv2.putText(draw, f"score:{best['score']:.2f}", (x1, max(20, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-                cv2.putText(draw, f"state:{state}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
+                cv2.putText(draw, f"state:{state} lock:{lock_state}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
                 writer.write(draw)
 
             processed_idx += 1
