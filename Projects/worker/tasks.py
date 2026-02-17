@@ -73,12 +73,19 @@ def _build_ocr_reader(device: str):
 @dataclass
 class TrackingParams:
     detect_stride: int = 1
+    yolo_imgsz: int = 512
+    ocr_every_n: int = 12
     ocr_min_conf: float = 0.22
     lock_seconds_after_confirm: float = 4.0
     gap_merge_seconds: float = 2.5
     lost_timeout: float = 1.5
     min_track_seconds: float = 0.75
+    min_clip_seconds: float = 1.0
     post_roll: float = 2.0
+    score_lock_threshold: float = 0.55
+    seed_lock_seconds: float = 8.0
+    seed_min_iou: float = 0.15
+    seed_search_window_seconds: float = 2.0
     color_weight: float = 0.35
     motion_weight: float = 0.30
     ocr_weight: float = 0.35
@@ -190,19 +197,33 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     model = YOLO("yolov8s.pt")
     device = resolve_device()
     ocr, ocr_gpu = _build_ocr_reader(device)
-    tracker = DeepSort(max_age=40, n_init=2, embedder="mobilenet", embedder_gpu=device.startswith("cuda"), bgr=True, half=True)
+    tracker = DeepSort(max_age=40, n_init=2, embedder="mobilenet", embedder_gpu=device.startswith("cuda"), bgr=True, half=device.startswith("cuda"))
 
     jersey_hsv = _hex_to_hsv(setup.get("jersey_color", "#203524"))
     player_num = re.sub(r"\D+", "", str(setup.get("player_number") or ""))
 
     state = "SEARCHING"
     ocr_window = deque(maxlen=params.ocr_confirm_k)
-    locked_until = 0.0
     lost_since = None
+    unlock_candidate_since = None
     low_color_frames = 0
-    locked_track = None
+    locked_track_id = None
     last_box = None
     last_seen = 0.0
+    seed_lock_until = 0.0
+    seeded_lock_active = False
+
+    seed_clicks = []
+    for click in setup.get("clicks") or []:
+        seed_t = max(0.0, float(click.get("t", 0.0)))
+        seed_clicks.append(
+            {
+                "t": seed_t,
+                "seed_frame": int(seed_t * fps),
+                "seed_px": (int(float(click.get("x", 0.0)) * w), int(float(click.get("y", 0.0)) * h)),
+                "acquired": False,
+            }
+        )
 
     segments = []
     seg_start = None
@@ -230,15 +251,79 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             continue
 
         t = frame_idx / fps
-        preds = model.predict(source=frame, conf=0.25, imgsz=640, verbose=False, device=device)
+        device_arg = 0 if device.startswith("cuda") else "cpu"
+        preds = model.predict(
+            frame,
+            conf=0.25,
+            device=device_arg,
+            imgsz=params.yolo_imgsz,
+            half=device.startswith("cuda"),
+            verbose=False,
+        )
         p = preds[0]
         dets = []
+        person_boxes = []
         for xyxy, conf, cls in zip(p.boxes.xyxy.cpu().numpy(), p.boxes.conf.cpu().numpy(), p.boxes.cls.cpu().numpy()):
             if int(cls) != 0:
                 continue
             x1, y1, x2, y2 = _clip(xyxy, w, h)
+            person_boxes.append((x1, y1, x2, y2))
             dets.append(([x1, y1, x2 - x1, y2 - y1], float(conf), "person"))
         tracks = tracker.update_tracks(dets, frame=frame)
+
+        seed_event = None
+        for seed in seed_clicks:
+            if seed["acquired"]:
+                continue
+            max_seed_frame = seed["seed_frame"] + int(params.seed_search_window_seconds * fps)
+            if frame_idx < seed["seed_frame"] or frame_idx > max_seed_frame:
+                continue
+            px, py = seed["seed_px"]
+            click_box = (max(0, px - 20), max(0, py - 20), min(w, px + 20), min(h, py + 20))
+            chosen_box = None
+            chosen_iou = 0.0
+            for box in person_boxes:
+                x1, y1, x2, y2 = box
+                inside = x1 <= px <= x2 and y1 <= py <= y2
+                iou = _iou(box, click_box)
+                if inside:
+                    chosen_box = box
+                    chosen_iou = max(chosen_iou, iou)
+                    break
+                if iou > chosen_iou:
+                    chosen_box = box
+                    chosen_iou = iou
+            if chosen_box is None:
+                continue
+
+            best_seed_track_id = None
+            best_seed_track_iou = 0.0
+            for tr in tracks:
+                if not tr.is_confirmed():
+                    continue
+                tr_box = _clip(tr.to_ltrb(), w, h)
+                tr_iou = _iou(chosen_box, tr_box)
+                if tr_iou > best_seed_track_iou:
+                    best_seed_track_iou = tr_iou
+                    best_seed_track_id = tr.track_id
+            if best_seed_track_id is None or best_seed_track_iou < params.seed_min_iou:
+                continue
+
+            seed["acquired"] = True
+            locked_track_id = best_seed_track_id
+            seeded_lock_active = True
+            seed_lock_until = max(seed_lock_until, seed["t"] + params.seed_lock_seconds)
+            state = "LOCKED"
+            unlock_candidate_since = None
+            lost_since = None
+            if seg_start is None:
+                seg_start = seed["t"]
+            if shift_state == "OFF_ICE":
+                shift_state = "ON_ICE"
+                if shift_start is None:
+                    shift_start = seed["t"]
+            seed_event = {"t": seed["t"], "event": "seed_lock", "track_id": int(best_seed_track_id), "frame": frame_idx}
+            break
 
         best = None
         for tr in tracks:
@@ -250,7 +335,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             ocr_match = 0.0
             ocr_txt = None
             ocr_conf = 0.0
-            if ocr is not None and (frame_idx % 4 == 0):
+            should_run_ocr = ocr is not None and (
+                state != "LOCKED" or (locked_track_id is not None and tr.track_id == locked_track_id and cscore < 0.1)
+            ) and (frame_idx % max(1, params.ocr_every_n) == 0)
+            if should_run_ocr:
                 x1, y1, x2, y2 = box
                 crop = frame[y1 + int((y2-y1)*0.2):y1 + int((y2-y1)*0.75), x1:x2]
                 try:
@@ -269,34 +357,45 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         ocr_gpu = False
                     else:
                         pass
-            identity_bonus = params.identity_weight if (locked_track is not None and tr.track_id == locked_track) else 0.0
+            identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
             score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match + identity_bonus
             if best is None or score > best["score"]:
-                best = {"track_id": tr.track_id, "box": box, "score": score, "color": cscore, "ocr_txt": ocr_txt, "ocr_conf": ocr_conf, "ocr_match": ocr_match}
+                best = {"track_id": tr.track_id, "box": box, "score": score, "color": cscore, "motion": motion, "ocr_txt": ocr_txt, "ocr_conf": ocr_conf, "ocr_match": ocr_match, "identity": identity_bonus}
 
         prev_state = state
         locked = False
         reason = None
+        if seed_event:
+            timeline.append(seed_event)
         if best:
             last_box = best["box"]
             last_seen = t
-            locked_track = best["track_id"] if locked_track is None else locked_track
+            if locked_track_id is None:
+                locked_track_id = best["track_id"]
             ocr_window.append(1 if best["ocr_match"] > 0 else 0)
-            if state == "SEARCHING" and sum(ocr_window) >= params.ocr_confirm_m:
-                state = "CONFIRMED"
-                timeline.append({"t": t, "event": "state", "from": "SEARCHING", "to": "CONFIRMED"})
-            if state in {"CONFIRMED", "LOCKED"}:
+            if seeded_lock_active or best["score"] >= params.score_lock_threshold:
                 state = "LOCKED"
                 locked = True
-                locked_until = max(locked_until, t + params.lock_seconds_after_confirm)
+                unlock_candidate_since = None
             if best["color"] < 0.05:
                 low_color_frames += 1
             else:
                 low_color_frames = 0
             lost_since = None
         else:
-            if state == "LOCKED" and t <= locked_until:
+            if state == "LOCKED":
                 locked = True
+                if lost_since is None:
+                    lost_since = t
+                if unlock_candidate_since is None:
+                    unlock_candidate_since = t
+                if (t - unlock_candidate_since) > params.lost_timeout:
+                    reason = "lost_timeout"
+                    state = "SEARCHING"
+                    locked = False
+                    ocr_window.clear()
+                    locked_track_id = None
+                    seeded_lock_active = False
             else:
                 if lost_since is None:
                     lost_since = t
@@ -304,21 +403,28 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     reason = "lost_timeout"
                     state = "SEARCHING"
                     ocr_window.clear()
-                    locked_track = None
+                    locked_track_id = None
             if low_color_frames > 8:
                 reason = "low_color"
                 state = "SEARCHING"
                 locked = False
 
+        if seeded_lock_active and t > seed_lock_until:
+            seeded_lock_active = False
+        if seeded_lock_active and state == "LOCKED" and unlock_candidate_since is not None and (t - unlock_candidate_since) <= params.lost_timeout:
+            state = "LOCKED"
+            locked = True
+
         if state == "LOCKED" and locked:
-            if seg_start is None:
+            if seg_start is None and prev_state != "LOCKED":
                 seg_start = t
             if shift_state == "OFF_ICE":
                 shift_state = "ON_ICE"
                 timeline.append({"t": t, "event": "shift_state", "to": shift_state})
         else:
             if seg_start is not None:
-                segments.append((seg_start, t, reason or "unlock"))
+                end_t = unlock_candidate_since if unlock_candidate_since is not None else t
+                segments.append((seg_start, end_t, reason or "unlock"))
                 seg_start = None
             if shift_state == "ON_ICE":
                 bench = False
@@ -346,7 +452,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 cv2.rectangle(draw, (x1, y1), (x2, y2), (40, 220, 40), 2)
                 cv2.putText(draw, f"track:{best['track_id']} color:{best['color']:.2f}", (x1, max(20, y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
                 cv2.putText(draw, f"ocr:{best['ocr_txt']} conf:{best['ocr_conf']:.2f}", (x1, max(38, y1+10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
-            cv2.putText(draw, f"state:{state} lock_left:{max(0.0, locked_until-t):.1f}s", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
+            cv2.putText(draw, f"state:{state}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
+            cv2.putText(draw, f"locked_track_id:{locked_track_id}", (10, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
+            if best:
+                cv2.putText(draw, f"score c:{best['color']:.2f} m:{best['motion']:.2f} o:{best['ocr_match']:.2f} i:{best['identity']:.2f} t:{best['score']:.2f}", (10, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255,255,255), 1)
+            if seeded_lock_active and t <= seed_lock_until:
+                cv2.putText(draw, "SEED LOCK ACTIVE", (10, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,128,255), 2)
             cv2.putText(draw, f"mode:{params.tracking_mode} cam:{setup.get('camera_mode')}", (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
             writer.write(draw)
 
@@ -366,7 +477,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
     merged = []
     for a, b, reason in segments:
-        if (b - a) < params.min_track_seconds:
+        if (b - a) < params.min_clip_seconds:
             continue
         if merged and a - merged[-1][1] <= params.gap_merge_seconds:
             prev_end = merged[-1][1]

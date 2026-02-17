@@ -19,9 +19,9 @@ const TRACK_HELP = {
   shift: "Shifts: Tracks full shifts on ice; outputs shift start/end + total TOI.",
 };
 const CAMERA_DEFAULTS = {
-  broadcast: { detect_stride: 1, ocr_min_conf: 0.20, lock_seconds_after_confirm: 4.0, gap_merge_seconds: 2.5, lost_timeout: 1.5, min_track_seconds: 0.75 },
-  broadcast_wide: { detect_stride: 1, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 1.9, min_track_seconds: 0.75 },
-  tactical: { detect_stride: 3, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 1.8, min_track_seconds: 0.75 },
+  broadcast: { detect_stride: 2, yolo_imgsz: 512, ocr_every_n: 12, ocr_min_conf: 0.20, lock_seconds_after_confirm: 4.0, gap_merge_seconds: 2.5, lost_timeout: 1.5, min_track_seconds: 0.75 },
+  broadcast_wide: { detect_stride: 3, yolo_imgsz: 512, ocr_every_n: 16, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 1.9, min_track_seconds: 0.75 },
+  tactical: { detect_stride: 4, yolo_imgsz: 416, ocr_every_n: 20, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 1.8, min_track_seconds: 0.75 },
 };
 const STAGE_META = [
   { key: 'uploading', label: 'Uploading', icon: '⬆️' },
@@ -62,14 +62,12 @@ function setJobId(jobId){
 }
 
 function updateRunButtonState(){
-  const verifyMode = $('verifyMode').value === 'on';
   const skipSeeding = $('skipSeeding').checked;
   const hasSeed = state.clicks.length > 0;
-  $('btnRun').disabled = !state.jobId || (!hasSeed && !verifyMode && !skipSeeding);
+  $('btnRun').disabled = !state.jobId || (!hasSeed && !skipSeeding);
   $('seedStatus').textContent = `Seed clicks: ${state.clicks.length}`;
   const clickList = state.clicks
-    .slice(-5)
-    .map((c, idx) => `#${state.clicks.length - (state.clicks.slice(-5).length - 1 - idx)} t=${Number(c.t).toFixed(2)} x=${Number(c.x).toFixed(3)} y=${Number(c.y).toFixed(3)}`)
+    .map((c, idx) => `#${idx + 1} t=${Number(c.t).toFixed(2)} x=${Number(c.x).toFixed(3)} y=${Number(c.y).toFixed(3)}`)
     .join(' | ');
   $('seedClicksList').textContent = clickList || '—';
 }
@@ -180,6 +178,7 @@ function payload(){
     lost_timeout: Number($('lostTimeout').value),
     gap_merge_seconds: Number($('mergeGap').value),
     min_track_seconds: Number($('minTrack').value),
+    clicks_count: state.clicks.length,
     bench_zone_ratio: Number($('benchZone').value),
     debug_overlay: $('debugOverlay').checked,
     debug_timeline: $('debugTimeline').checked,
@@ -194,8 +193,8 @@ async function run(){
     const ok = confirm('Verify mode will not create clips/combined video. Continue?\nCancel = Turn off verify + run');
     if(!ok){ $('verifyMode').value = 'off'; refreshHelp(); }
   }
-  if (state.clicks.length < 1 && $('verifyMode').value !== 'on' && !$('skipSeeding').checked){
-    alert('Add at least one seed click, enable Verify mode, or check Skip seeding before running.');
+  if (state.clicks.length < 1 && !$('skipSeeding').checked){
+    alert('Add at least one seed click or check Skip seeding before running.');
     return;
   }
   await save();
@@ -245,6 +244,12 @@ function clearSeedClicks(){
   drawClickMarkers();
 }
 
+function undoSeedClick(){
+  if (state.clicks.length < 1) return;
+  state.clicks.pop();
+  drawClickMarkers();
+}
+
 function drawClickMarkers(){
   const video = $('vid');
   const canvas = $('seedCanvas');
@@ -279,14 +284,19 @@ function drawClickMarkers(){
 }
 
 function registerSeedClick(evt){
-  const video = $('vid');
-  if (!video.src) return;
-  const rect = video.getBoundingClientRect();
+  const vid = $('vid');
+  if (!vid.src) return;
+  const rect = vid.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return;
-  const x = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
-  const y = Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height));
-  const t = Number(video.currentTime || 0);
-  state.clicks.push({ x, y, t });
+  const clickX = evt.clientX - rect.left;
+  const clickY = evt.clientY - rect.top;
+  const vidWidth = rect.width;
+  const vidHeight = rect.height;
+  state.clicks.push({
+    t: vid.currentTime,
+    x: clickX / vidWidth,
+    y: clickY / vidHeight,
+  });
   drawClickMarkers();
 }
 
@@ -370,6 +380,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('btnCancel').onclick = cancel;
   $('btnClear').onclick = clearJob;
   $('btnClearClicks').onclick = clearSeedClicks;
+  $('btnUndoClick').onclick = undoSeedClick;
   $('cameraMode').onchange = applyPreset;
   $('trackingMode').onchange = refreshHelp;
   $('verifyMode').onchange = refreshHelp;
