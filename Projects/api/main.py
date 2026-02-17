@@ -376,6 +376,15 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     return {"ok": True, "status": "ready", "job_id": job_id, "setup": setup}
 
 
+@app.get("/jobs/{job_id}/setup")
+def get_setup(job_id: str):
+    jd = job_dir(job_id)
+    if not jd.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    setup = read_json(jd / "setup.json", {})
+    return {"job_id": job_id, "setup": setup}
+
+
 @app.post("/jobs/{job_id}/run")
 def run_job(job_id: str):
     jd = job_dir(job_id)
@@ -403,6 +412,13 @@ def run_job(job_id: str):
             message="Missing input video (in.mp4). Upload a video first.",
         )
         raise HTTPException(status_code=400, detail="Missing input video")
+
+    setup = read_json(jd / "setup.json", {})
+    has_clicks = bool((setup.get("clicks") or []))
+    verify_mode = bool(setup.get("verify_mode", False))
+    skip_seeding = bool(setup.get("skip_seeding", False))
+    if not has_clicks and not verify_mode and not skip_seeding:
+        raise HTTPException(status_code=400, detail="At least one player seed click is required unless verify mode or skip seeding is enabled")
 
     if meta.get("cancel_requested"):
         meta["cancel_requested"] = False

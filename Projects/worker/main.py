@@ -2,9 +2,12 @@ import os
 import time
 import argparse
 import logging
+import multiprocessing as mp
+
+mp.set_start_method("spawn", force=True)
 
 import redis
-from rq import Queue, Worker
+from rq import Queue, SimpleWorker
 from rq.job import Job
 from common.config import resolve_device
 
@@ -61,7 +64,7 @@ def run_self_test(conn: redis.Redis) -> int:
     from worker.tasks import self_test_task
 
     queue = Queue("selftest", connection=conn)
-    worker = Worker([queue], connection=conn)
+    worker = SimpleWorker([queue], connection=conn)
     token = str(int(time.time()))
     job = queue.enqueue(self_test_task, {"token": token}, job_timeout=60)
     print(f"Self-test enqueue | redis={REDIS_URL} | queue=selftest | job_id={job.id}")
@@ -84,12 +87,21 @@ def main() -> None:
 
     configure_logging()
     conn = redis.from_url(REDIS_URL)
-    logging.getLogger("worker").info("Worker starting | redis=%s | queues=%s | jobs_dir=%s | %s", REDIS_URL, QUEUE_NAMES, JOBS_DIR, gpu_info(), extra={"job_id":"-"})
+    logging.getLogger("worker").info(
+        "Worker starting | redis=%s | queues=%s | jobs_dir=%s | mp_start=%s | selected_device=%s | %s",
+        REDIS_URL,
+        QUEUE_NAMES,
+        JOBS_DIR,
+        mp.get_start_method(),
+        resolve_device(),
+        gpu_info(),
+        extra={"job_id":"-"},
+    )
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))
 
-    worker = Worker([Queue(name, connection=conn) for name in QUEUE_NAMES], connection=conn)
+    worker = SimpleWorker([Queue(name, connection=conn) for name in QUEUE_NAMES], connection=conn)
     worker.work()
 
 

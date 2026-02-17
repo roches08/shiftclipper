@@ -1,5 +1,14 @@
 const $ = (id) => document.getElementById(id);
-const state = { jobId: null, clicks: [], lastStatus: null, pollTimer: null };
+const state = {
+  jobId: null,
+  clicks: [],
+  lastStatus: null,
+  pollTimer: null,
+  proxySrcSet: false,
+  proxySrc: null,
+  uploadInFlight: false,
+  uploadXhr: null,
+};
 
 const PRESET_HELP = {
   broadcast: "Broadcast: Standard TV side angle. OCR works intermittently.",
@@ -36,12 +45,27 @@ async function j(method, path, body){
 function mb(n){ return (n / (1024 * 1024)).toFixed(1); }
 
 function setJobId(jobId){
+  const changed = state.jobId !== jobId;
   state.jobId = jobId;
   if(jobId) localStorage.setItem('shiftclipper.jobId', jobId);
+  if(changed){
+    state.proxySrcSet = false;
+    state.proxySrc = null;
+    state.clicks = [];
+    drawClickMarkers();
+  }
   $('jobId').textContent = jobId || '—';
   $('btnUpload').disabled = !jobId;
   $('btnSave').disabled = !jobId;
-  $('btnRun').disabled = !jobId;
+  updateRunButtonState();
+}
+
+function updateRunButtonState(){
+  const verifyMode = $('verifyMode').value === 'on';
+  const skipSeeding = $('skipSeeding').checked;
+  const hasSeed = state.clicks.length > 0;
+  $('btnRun').disabled = !state.jobId || (!hasSeed && !verifyMode && !skipSeeding);
+  $('seedStatus').textContent = `Seed clicks: ${state.clicks.length}`;
 }
 
 function refreshHelp(){
@@ -50,6 +74,7 @@ function refreshHelp(){
   $('trackingHelp').textContent = TRACK_HELP[tm];
   $('shiftOnly').style.display = tm === 'shift' ? 'inline-flex' : 'none';
   $('verifyBanner').style.display = $('verifyMode').value === 'on' ? 'block' : 'none';
+  updateRunButtonState();
 }
 
 function applyPreset(){
@@ -88,16 +113,20 @@ function updateProgressUi(status){
 async function createJob(){
   const r = await j('POST', '/jobs', { name: 'ui-job' });
   setJobId(r.job_id);
+  await loadSetup();
   await pollOnce();
 }
 
 async function upload(){
   const f = $('file').files[0]; if(!f || !state.jobId) return;
+  if (state.uploadInFlight) return;
   const fd = new FormData(); fd.append('file', f);
   $('progressMessage').textContent = 'Uploading...';
+  state.uploadInFlight = true;
 
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    state.uploadXhr = xhr;
     xhr.open('POST', `/jobs/${state.jobId}/upload`, true);
     xhr.upload.onprogress = (evt) => {
       if (!evt.lengthComputable) return;
@@ -118,6 +147,9 @@ async function upload(){
     };
     xhr.onerror = () => reject(new Error('Upload failed'));
     xhr.send(fd);
+  }).finally(() => {
+    state.uploadInFlight = false;
+    state.uploadXhr = null;
   });
 
   startPolling();
@@ -128,6 +160,7 @@ function payload(){
     camera_mode: $('cameraMode').value,
     tracking_mode: $('trackingMode').value,
     verify_mode: $('verifyMode').value === 'on',
+    skip_seeding: $('skipSeeding').checked,
     player_number: $('playerNumber').value,
     jersey_color: $('jerseyColor').value,
     jersey_color_hex: $('jerseyColor').value,
@@ -154,9 +187,73 @@ async function run(){
     const ok = confirm('Verify mode will not create clips/combined video. Continue?\nCancel = Turn off verify + run');
     if(!ok){ $('verifyMode').value = 'off'; refreshHelp(); }
   }
+  if (state.clicks.length < 1 && $('verifyMode').value !== 'on' && !$('skipSeeding').checked){
+    alert('Add at least one seed click, enable Verify mode, or check Skip seeding before running.');
+    return;
+  }
   await save();
   await j('POST', `/jobs/${state.jobId}/run`);
   startPolling();
+}
+
+function drawClickMarkers(){
+  const video = $('vid');
+  const canvas = $('overlay');
+  const wrap = canvas.parentElement;
+  const rect = wrap.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  canvas.width = w;
+  canvas.height = h;
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const current = Number(video.currentTime || 0);
+  state.clicks.forEach((c, idx) => {
+    const x = c.x * w;
+    const y = c.y * h;
+    const isNearCurrent = Math.abs(Number(c.t || 0) - current) < 1.0;
+    ctx.beginPath();
+    ctx.arc(x, y, isNearCurrent ? 8 : 6, 0, Math.PI * 2);
+    ctx.fillStyle = isNearCurrent ? 'rgba(55, 185, 255, 0.95)' : 'rgba(255, 84, 84, 0.9)';
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '12px Arial';
+    ctx.fillText(`#${idx + 1}`, x + 10, y - 10);
+  });
+  updateRunButtonState();
+}
+
+function registerSeedClick(evt){
+  const video = $('vid');
+  if (!video.src) return;
+  const rect = video.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const x = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+  const y = Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height));
+  const t = Number(video.currentTime || 0);
+  state.clicks.push({ x, y, t });
+  drawClickMarkers();
+}
+
+async function loadSetup(){
+  if (!state.jobId) return;
+  try {
+    const resp = await j('GET', `/jobs/${state.jobId}/setup`);
+    const setup = resp.setup || {};
+    state.clicks = Array.isArray(setup.clicks) ? setup.clicks : [];
+    $('skipSeeding').checked = !!setup.skip_seeding;
+    drawClickMarkers();
+  } catch (_) {
+    state.clicks = [];
+    drawClickMarkers();
+  }
+  updateRunButtonState();
 }
 
 function renderResults(res){
@@ -178,7 +275,11 @@ async function pollOnce(){
   const s = await j('GET', `/jobs/${state.jobId}/status`);
   state.lastStatus = s;
   $('out').textContent = JSON.stringify(s, null, 2);
-  if(s.proxy_url) $('vid').src = s.proxy_url;
+  if(!state.uploadInFlight && s.proxy_ready && s.proxy_url && !state.proxySrcSet){
+    state.proxySrc = `${s.proxy_url}?ts=${Date.now()}`;
+    $('vid').src = state.proxySrc;
+    state.proxySrcSet = true;
+  }
   updateProgressUi(s);
 
   if(['done','failed','cancelled','verified','done_no_clips'].includes(s.status)){
@@ -207,11 +308,17 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('cameraMode').onchange = applyPreset;
   $('trackingMode').onchange = refreshHelp;
   $('verifyMode').onchange = refreshHelp;
+  $('skipSeeding').onchange = updateRunButtonState;
+  $('vid').addEventListener('click', registerSeedClick);
+  $('vid').addEventListener('loadedmetadata', drawClickMarkers);
+  $('vid').addEventListener('seeked', drawClickMarkers);
+  window.addEventListener('resize', drawClickMarkers);
   applyPreset();
 
   const existingJobId = localStorage.getItem('shiftclipper.jobId');
   if(existingJobId){
     setJobId(existingJobId);
+    await loadSetup();
     try {
       const s = await pollOnce();
       if (s && !['done','failed','cancelled','verified','done_no_clips'].includes(s.status)) startPolling();

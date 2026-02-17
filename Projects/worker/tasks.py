@@ -52,6 +52,24 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 JOBS_DIR = Path(os.getenv("JOBS_DIR", str(BASE_DIR / "data" / "jobs"))).resolve()
 
 
+def _is_cuda_fork_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return "cannot re-initialize cuda in forked subprocess" in msg
+
+
+def _build_ocr_reader(device: str):
+    if easyocr is None:
+        return None, False
+    use_gpu = device.startswith("cuda")
+    try:
+        return easyocr.Reader(["en"], gpu=use_gpu), use_gpu
+    except Exception as exc:
+        if use_gpu and _is_cuda_fork_error(exc):
+            log.warning("Falling back to CPU OCR due to CUDA fork constraint")
+            return easyocr.Reader(["en"], gpu=False), False
+        raise
+
+
 @dataclass
 class TrackingParams:
     detect_stride: int = 1
@@ -163,7 +181,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
     model = YOLO("yolov8s.pt")
     device = resolve_device()
-    ocr = easyocr.Reader(["en"], gpu=device.startswith("cuda")) if easyocr is not None else None
+    ocr, ocr_gpu = _build_ocr_reader(device)
     tracker = DeepSort(max_age=40, n_init=2, embedder="mobilenet", embedder_gpu=device.startswith("cuda"), bgr=True, half=True)
 
     jersey_hsv = _hex_to_hsv(setup.get("jersey_color", "#203524"))
@@ -236,8 +254,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             if player_num and d == player_num and ocr_conf >= params.ocr_min_conf:
                                 ocr_match = 1.0
                                 break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if ocr_gpu and device.startswith("cuda") and _is_cuda_fork_error(exc):
+                        log.warning("Falling back to CPU OCR due to CUDA fork constraint")
+                        ocr = easyocr.Reader(["en"], gpu=False)
+                        ocr_gpu = False
+                    else:
+                        pass
             identity_bonus = params.identity_weight if (locked_track is not None and tr.track_id == locked_track) else 0.0
             score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match + identity_bonus
             if best is None or score > best["score"]:
