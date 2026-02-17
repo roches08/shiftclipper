@@ -5,7 +5,7 @@ const state = {
   lastStatus: null,
   pollTimer: null,
   proxySrc: null,
-  uploadInFlight: false,
+  uploading: false,
   uploadXhr: null,
 };
 
@@ -120,10 +120,10 @@ async function createJob(){
 
 async function upload(){
   const f = $('file').files[0]; if(!f || !state.jobId) return;
-  if (state.uploadInFlight) return;
+  if (state.uploading) return;
   const fd = new FormData(); fd.append('file', f);
   $('progressMessage').textContent = 'Uploading...';
-  state.uploadInFlight = true;
+  state.uploading = true;
 
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -149,7 +149,7 @@ async function upload(){
     xhr.onerror = () => reject(new Error('Upload failed'));
     xhr.send(fd);
   }).finally(() => {
-    state.uploadInFlight = false;
+    state.uploading = false;
     state.uploadXhr = null;
   });
 
@@ -234,7 +234,7 @@ function clearSeedClicks(){
 
 function drawClickMarkers(){
   const video = $('vid');
-  const canvas = $('overlay');
+  const canvas = $('seedCanvas');
   const wrap = canvas.parentElement;
   const rect = wrap.getBoundingClientRect();
   const w = Math.max(1, Math.round(rect.width));
@@ -311,11 +311,13 @@ async function pollOnce(){
   const s = await j('GET', `/jobs/${state.jobId}/status`);
   state.lastStatus = s;
   $('out').textContent = JSON.stringify(s, null, 2);
-  if(!state.uploadInFlight && s.proxy_ready && s.proxy_url && state.proxySrc !== s.proxy_url){
+  if(!state.uploading && s.proxy_ready && s.proxy_url && state.proxySrc !== s.proxy_url){
     state.proxySrc = s.proxy_url;
     $('vid').src = state.proxySrc;
   }
-  updateProgressUi(s);
+  if(!state.uploading){
+    updateProgressUi(s);
+  }
 
   if(['done','failed','cancelled','verified','done_no_clips'].includes(s.status)){
     clearInterval(state.pollTimer);

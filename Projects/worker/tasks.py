@@ -377,9 +377,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
 
 def process_job(job_id: str) -> Dict[str, Any]:
-    class Cancelled(Exception):
-        pass
-
     _ensure_dirs()
     cur = get_current_job()
     stage = {"name": "queued", "updated": time.time(), "stalled": False}
@@ -413,6 +410,15 @@ def process_job(job_id: str) -> Dict[str, Any]:
             cur.save_meta()
         log.info("job_id=%s stage=%s progress=%s message=%s", job_id, stage_name, progress, message, extra={"job_id": job_id, "stage": stage_name})
 
+    def cancel_check() -> bool:
+        if not meta_path.exists():
+            return False
+        try:
+            latest_meta = json.loads(meta_path.read_text())
+        except Exception:
+            return False
+        return bool(latest_meta.get("cancel_requested"))
+
     try:
         in_path = meta.get("video_path") or str(job_dir / "in.mp4")
         if not Path(in_path).exists():
@@ -438,13 +444,15 @@ def process_job(job_id: str) -> Dict[str, Any]:
             return meta
 
         def hb(frame_idx, total, t):
+            if cancel_check():
+                raise RuntimeError("cancelled")
             if stage["stalled"]:
                 raise RuntimeError(f"Stalled in {stage['name']}")
             pct = int(min(70, 10 + (frame_idx / max(1, total)) * 60))
             write_status("processing", "tracking", pct, f"Tracking in progress ({t:.1f}s)")
 
         write_status("processing", "tracking", 12, "Tracking in progress")
-        data = track_presence(in_path, setup, heartbeat=hb)
+        data = track_presence(in_path, setup, heartbeat=hb, cancel_check=cancel_check)
 
         clips_dir = job_dir / "clips"
         clips_dir.mkdir(exist_ok=True)
@@ -548,6 +556,15 @@ def process_job(job_id: str) -> Dict[str, Any]:
         return meta
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
+        if str(e).lower() == "cancelled":
+            meta.update({"status": "cancelled", "stage": "cancelled", "progress": 100, "message": "Job cancelled.", "error": None, "updated_at": time.time()})
+            meta_path.write_text(json.dumps(meta, indent=2))
+            (job_dir / "results.json").write_text(json.dumps(meta, indent=2))
+            if cur:
+                cur.meta = {**(cur.meta or {}), "stage": "cancelled", "progress": 100, "message": "Job cancelled."}
+                cur.save_meta()
+            log.info("job_id=%s cancelled stage=%s", job_id, stage['name'], extra={"job_id": job_id, "stage": "cancelled"})
+            raise
         if stage["stalled"] or "stalled" in str(e).lower():
             err = f"Stalled in {stage['name']}"
         meta.update({"status": "failed", "stage": "failed", "progress": 100, "message": err, "error": traceback.format_exc(), "updated_at": time.time()})
