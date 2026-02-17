@@ -14,7 +14,7 @@ try:
     from rq.command import send_stop_job_command
 except Exception:  # pragma: no cover
     send_stop_job_command = None
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from common.config import normalize_setup
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -210,9 +210,11 @@ def job_status(job_id: str):
                 if rq_meta.get("progress") is not None:
                     meta["progress"] = int(rq_meta.get("progress"))
                 stage_message = {
-                    "proxy": "Preparing proxy",
+                    "uploading": "Uploading...",
+                    "queued": "Queued for processing.",
                     "tracking": "Tracking in progress",
-                    "exporting": "Exporting clips",
+                    "clips": "Creating clips",
+                    "combined": "Combining video",
                     "done": "Processing complete",
                 }
                 if rq_meta.get("message"):
@@ -261,7 +263,7 @@ def serve_job_file(job_id: str, path: str):
 
 
 @app.post("/jobs/{job_id}/upload")
-async def upload_video(job_id: str, file: UploadFile = File(...)):
+async def upload_video(job_id: str, request: Request, file: UploadFile = File(...)):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
@@ -270,14 +272,45 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
     in_path = str(jd / "in.mp4")
     proxy_path = str(jd / "input_proxy.mp4")
 
-    set_status(job_id, "uploading", extra={"progress": 5, "message": "Uploading…", "proxy_ready": False})
+    content_length = request.headers.get("content-length")
+    total_bytes = None
+    if content_length:
+        try:
+            total_bytes = max(1, int(content_length))
+        except ValueError:
+            total_bytes = None
 
+    set_status(
+        job_id,
+        "uploading",
+        stage="uploading",
+        progress=1,
+        message="Uploading...",
+        proxy_ready=False,
+        bytes_received=0,
+        bytes_total=total_bytes,
+    )
+
+    bytes_received = 0
     with open(in_path, "wb") as f:
         while True:
             chunk = await file.read(1024 * 1024)
             if not chunk:
                 break
             f.write(chunk)
+            bytes_received += len(chunk)
+            progress = 5
+            if total_bytes:
+                progress = min(100, max(1, int((bytes_received / total_bytes) * 100)))
+            set_status(
+                job_id,
+                "uploading",
+                stage="uploading",
+                progress=progress,
+                message="Uploading...",
+                bytes_received=bytes_received,
+                bytes_total=total_bytes,
+            )
 
     # Persist metadata for the worker (this was missing before)
     meta = read_json(meta_path(job_id), {})
@@ -293,6 +326,9 @@ async def upload_video(job_id: str, file: UploadFile = File(...)):
         "uploaded_at": time.time(),
         "progress": 10,
         "message": "Upload complete. Building proxy…",
+        "stage": "queued",
+        "bytes_received": bytes_received,
+        "bytes_total": total_bytes,
         "proxy_ready": False,
     })
 

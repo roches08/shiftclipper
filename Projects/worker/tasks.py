@@ -359,7 +359,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
     _ensure_dirs()
     cur = get_current_job()
-    stage = {"name": "starting", "updated": time.time(), "stalled": False}
+    stage = {"name": "queued", "updated": time.time(), "stalled": False}
     stop_watchdog = False
 
     def watchdog():
@@ -395,7 +395,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
             raise RuntimeError("missing input")
 
         verify_mode = bool(setup.get("verify_mode", False))
-        write_status("processing", "tracking", 10, "Tracking in progress")
+        write_status("processing", "queued", 10, "Queued for processing.")
 
         if verify_mode:
             meta.update({
@@ -414,29 +414,35 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
         def hb(frame_idx, total, t):
             if stage["stalled"]:
-                raise RuntimeError("stalled")
-            pct = int(min(85, 10 + (frame_idx / max(1, total)) * 70))
+                raise RuntimeError(f"Stalled in {stage['name']}")
+            pct = int(min(70, 10 + (frame_idx / max(1, total)) * 60))
             write_status("processing", "tracking", pct, f"Tracking in progress ({t:.1f}s)")
 
+        write_status("processing", "tracking", 12, "Tracking in progress")
         data = track_presence(in_path, setup, heartbeat=hb)
 
         clips_dir = job_dir / "clips"
         clips_dir.mkdir(exist_ok=True)
-        write_status("processing", "exporting", 88, "Exporting artifacts")
+        write_status("processing", "clips", 72, "Creating clips")
 
         clips = []
         clip_paths = []
+        segment_count = max(1, len(data["segments"]))
         for i, (a, b, _) in enumerate(data["segments"], start=1):
             outp = clips_dir / f"clip_{i:03d}.mp4"
             cut_clip(in_path, a, b + float(setup.get("post_roll", setup.get("extend_sec", 2.0))), str(outp))
             clip_paths.append(str(outp))
             clips.append({"start": a, "end": b, "path": str(outp), "url": f"/data/jobs/{job_id}/clips/{outp.name}"})
+            clip_progress = 70 + int((i / segment_count) * 20)
+            write_status("processing", "clips", min(90, clip_progress), f"Creating clips ({i}/{segment_count})")
 
         combined_path = None
         combined_url = None
         if bool(setup.get("generate_combined", True)) and clip_paths:
+            write_status("processing", "combined", 92, "Combining video")
             combined_path = str(job_dir / "combined.mp4")
             concat_clips(clip_paths, combined_path)
+            write_status("processing", "combined", 98, "Combining video")
             if Path(combined_path).exists():
                 combined_url = f"/data/jobs/{job_id}/combined.mp4"
 
@@ -479,14 +485,13 @@ def process_job(job_id: str) -> Dict[str, Any]:
         if artifacts.get("debug_json_path"):
             artifacts["list"].append({"type": "debug_timeline", "path": artifacts["debug_json_path"], "url": artifacts["debug_json_url"]})
 
-        status = "done"
-        message = "Processing complete"
         if not clips and not combined_path:
             raise RuntimeError("No clips created; see debug overlay/timeline (checked clips and combined outputs)")
 
         if stage["stalled"]:
-            raise RuntimeError("stalled")
+            raise RuntimeError(f"Stalled in {stage['name']}")
 
+        write_status("done", "done", 100, "Processing complete")
         meta.update({
             "clips": clips,
             "combined_path": combined_path,
@@ -495,10 +500,10 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "shifts": shifts_json,
             "total_toi": total_toi,
             "shift_count": len(shifts_json),
-            "status": status,
+            "status": "done",
             "stage": "done",
             "progress": 100,
-            "message": message,
+            "message": "Processing complete",
             "updated_at": time.time(),
         })
         meta_path.write_text(json.dumps(meta, indent=2))
@@ -506,11 +511,15 @@ def process_job(job_id: str) -> Dict[str, Any]:
         return meta
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
-        if "stalled" in str(e).lower():
-            err += " | no progress updates detected during tracking"
+        if stage["stalled"] or "stalled" in str(e).lower():
+            err = f"Stalled in {stage['name']}"
         meta.update({"status": "failed", "stage": "failed", "progress": 100, "message": err, "error": traceback.format_exc(), "updated_at": time.time()})
         meta_path.write_text(json.dumps(meta, indent=2))
         (job_dir / "results.json").write_text(json.dumps(meta, indent=2))
+        if cur:
+            cur.meta = {**(cur.meta or {}), "stage": "failed", "progress": 100, "message": err}
+            cur.save_meta()
+        log.error("job_id=%s failed stage=%s error=%s", job_id, stage['name'], err)
         raise
     finally:
         stop_watchdog = True
