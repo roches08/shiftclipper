@@ -19,9 +19,9 @@ const TRACK_HELP = {
   shift: "Shifts: Tracks full shifts on ice; outputs shift start/end + total TOI.",
 };
 const CAMERA_DEFAULTS = {
-  broadcast: { detect_stride: 2, yolo_imgsz: 512, ocr_every_n: 12, ocr_min_conf: 0.20, lock_seconds_after_confirm: 4.0, gap_merge_seconds: 2.5, lost_timeout: 1.5, min_track_seconds: 0.75 },
-  broadcast_wide: { detect_stride: 3, yolo_imgsz: 512, ocr_every_n: 16, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 1.9, min_track_seconds: 0.75 },
-  tactical: { detect_stride: 4, yolo_imgsz: 416, ocr_every_n: 20, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 1.8, min_track_seconds: 0.75 },
+  broadcast: { detect_stride: 2, yolo_imgsz: 512, ocr_every_n: 12, ocr_min_conf: 0.20, lock_seconds_after_confirm: 4.0, gap_merge_seconds: 2.5, lost_timeout: 4.0, reacquire_window_seconds: 8.0, score_unlock_threshold: 0.33, ocr_veto_conf: 0.92, ocr_veto_seconds: 1.0, min_track_seconds: 0.75 },
+  broadcast_wide: { detect_stride: 3, yolo_imgsz: 512, ocr_every_n: 16, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 3.0, lost_timeout: 4.0, reacquire_window_seconds: 8.0, score_unlock_threshold: 0.33, ocr_veto_conf: 0.92, ocr_veto_seconds: 1.0, min_track_seconds: 0.75 },
+  tactical: { detect_stride: 4, yolo_imgsz: 416, ocr_every_n: 20, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 2.0, lost_timeout: 4.0, reacquire_window_seconds: 8.0, score_unlock_threshold: 0.33, ocr_veto_conf: 0.92, ocr_veto_seconds: 1.0, min_track_seconds: 0.75 },
 };
 const STAGE_META = [
   { key: 'uploading', label: 'Uploading', icon: '⬆️' },
@@ -89,7 +89,12 @@ function applyPreset(){
   $('lockSeconds').value = p.lock_seconds_after_confirm;
   $('mergeGap').value = p.gap_merge_seconds;
   $('lostTimeout').value = p.lost_timeout;
+  $('reacquireWindow').value = p.reacquire_window_seconds;
+  $('scoreUnlockThreshold').value = p.score_unlock_threshold;
+  $('ocrVetoConf').value = p.ocr_veto_conf;
+  $('ocrVetoSeconds').value = p.ocr_veto_seconds;
   $('minTrack').value = p.min_track_seconds;
+  $('trackerType').value = 'bytetrack';
   refreshHelp();
 }
 
@@ -172,14 +177,20 @@ function payload(){
     jersey_color_rgb: (() => { const v=$('jerseyColor').value.replace("#",""); return { r: parseInt(v.slice(0,2),16), g: parseInt(v.slice(2,4),16), b: parseInt(v.slice(4,6),16) }; })(),
     color_tolerance: Number($('colorTolerance').value),
     extend_sec: Number($('extendSec').value),
+    tracker_type: 'bytetrack',
     detect_stride: Number($('detectStride').value),
     ocr_min_conf: Number($('ocrMinConf').value),
     lock_seconds_after_confirm: Number($('lockSeconds').value),
     lost_timeout: Number($('lostTimeout').value),
+    reacquire_window_seconds: Number($('reacquireWindow').value),
     gap_merge_seconds: Number($('mergeGap').value),
     min_track_seconds: Number($('minTrack').value),
+    score_unlock_threshold: Number($('scoreUnlockThreshold').value),
     clicks_count: state.clicks.length,
     bench_zone_ratio: Number($('benchZone').value),
+    ocr_veto_conf: Number($('ocrVetoConf').value),
+    ocr_veto_seconds: Number($('ocrVetoSeconds').value),
+    allow_unconfirmed_clips: $('allowUnconfirmedClips').checked,
     debug_overlay: $('debugOverlay').checked,
     debug_timeline: $('debugTimeline').checked,
     clicks: state.clicks,
@@ -305,8 +316,28 @@ async function loadSetup(){
   try {
     const resp = await j('GET', `/jobs/${state.jobId}/setup`);
     const setup = resp.setup || {};
+    $('cameraMode').value = setup.camera_mode || $('cameraMode').value;
+    $('trackingMode').value = setup.tracking_mode || $('trackingMode').value;
+    $('verifyMode').value = setup.verify_mode ? 'on' : 'off';
+    $('playerNumber').value = setup.player_number ?? $('playerNumber').value;
+    $('jerseyColor').value = setup.jersey_color_hex || setup.jersey_color || $('jerseyColor').value;
+    $('colorTolerance').value = setup.color_tolerance ?? $('colorTolerance').value;
+    $('extendSec').value = setup.extend_sec ?? $('extendSec').value;
+    $('trackerType').value = setup.tracker_type || 'bytetrack';
+    $('detectStride').value = setup.detect_stride ?? $('detectStride').value;
+    $('ocrMinConf').value = setup.ocr_min_conf ?? $('ocrMinConf').value;
+    $('lockSeconds').value = setup.lock_seconds_after_confirm ?? $('lockSeconds').value;
+    $('lostTimeout').value = setup.lost_timeout ?? $('lostTimeout').value;
+    $('reacquireWindow').value = setup.reacquire_window_seconds ?? $('reacquireWindow').value;
+    $('scoreUnlockThreshold').value = setup.score_unlock_threshold ?? $('scoreUnlockThreshold').value;
+    $('ocrVetoConf').value = setup.ocr_veto_conf ?? $('ocrVetoConf').value;
+    $('ocrVetoSeconds').value = setup.ocr_veto_seconds ?? $('ocrVetoSeconds').value;
+    $('mergeGap').value = setup.gap_merge_seconds ?? $('mergeGap').value;
+    $('minTrack').value = setup.min_track_seconds ?? $('minTrack').value;
+    $('allowUnconfirmedClips').checked = !!setup.allow_unconfirmed_clips;
     state.clicks = Array.isArray(setup.clicks) ? setup.clicks : [];
     $('skipSeeding').checked = !!setup.skip_seeding;
+    refreshHelp();
     drawClickMarkers();
   } catch (_) {
     state.clicks = [];
