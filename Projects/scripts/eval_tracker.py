@@ -17,6 +17,7 @@ def main():
     ap.add_argument("--jersey-color", default="#1d3936")
     ap.add_argument("--camera-mode", default="broadcast")
     ap.add_argument("--tracking-mode", default="clip")
+    ap.add_argument("--tracker-type", default="bytetrack")
     ap.add_argument("--detect-stride", type=int)
     ap.add_argument("--ocr-min-conf", type=float)
     ap.add_argument("--min-track-seconds", type=float)
@@ -38,6 +39,7 @@ def main():
         "jersey_color": args.jersey_color,
         "jersey_color_hex": args.jersey_color,
         "verify_mode": args.verify_mode,
+        "tracker_type": args.tracker_type,
         "debug_overlay": True,
         "debug_timeline": True,
     }
@@ -65,7 +67,7 @@ def main():
             timeline = json.loads(open(debug_path, "r", encoding="utf-8").read())
         except Exception:
             timeline = []
-    first_lock = next((ev.get("t") for ev in timeline if ev.get("event") in {"present_on", "seed_lock"}), None)
+    first_lock = next((ev.get("t") for ev in timeline if ev.get("event") in {"lock", "present_on", "seed_lock"}), None)
 
     print(json.dumps({
         "job_id": jid,

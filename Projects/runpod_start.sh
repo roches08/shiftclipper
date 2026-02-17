@@ -40,9 +40,9 @@ PIP_BIN="$VENV_DIR/bin/pip"
 "$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel
 
 if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
-  "$PIP_BIN" install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+  "$PYTHON_BIN" -m pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
 else
-  "$PIP_BIN" install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+  "$PYTHON_BIN" -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
 fi
 
 REQUIREMENTS_FILE="requirements.runpod_pro.txt"
@@ -53,7 +53,7 @@ if [ "$(wc -l < "$REQUIREMENTS_FILE")" -lt 5 ]; then
   head -c 500 "$REQUIREMENTS_FILE"
   exit 1
 fi
-"$PIP_BIN" install -r "$REQUIREMENTS_FILE"
+"$PYTHON_BIN" -m pip install -r "$REQUIREMENTS_FILE"
 
 "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
 "$PYTHON_BIN" -c "from ultralytics import YOLO; import torch; m=YOLO('yolov8s.pt'); m.predict(source='https://ultralytics.com/images/bus.jpg', device=0, imgsz=640, verbose=False); print('ultralytics gpu ok', torch.cuda.is_available())"

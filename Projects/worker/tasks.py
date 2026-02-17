@@ -72,12 +72,13 @@ def _build_ocr_reader(device: str):
 
 @dataclass
 class TrackingParams:
-    detect_stride: int = 1
+    detect_stride: int = 2
     yolo_imgsz: int = 512
     ocr_every_n: int = 8
     ocr_max_crops_per_frame: int = 1
     ocr_disable: bool = False
     yolo_batch: int = 4
+    tracker_type: str = "bytetrack"
     ocr_min_conf: float = 0.22
     lock_seconds_after_confirm: float = 4.0
     gap_merge_seconds: float = 2.5
@@ -189,13 +190,90 @@ def concat_clips(paths: List[str], out_path: str) -> None:
     _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path])
 
 
+@dataclass
+class _LiteTrack:
+    track_id: int
+    box: Tuple[int, int, int, int]
+    confidence: float
+    confirmed: bool = True
+
+    def is_confirmed(self):
+        return self.confirmed
+
+    def to_ltrb(self):
+        return self.box
+
+
+class LightweightIOUTracker:
+    def __init__(self, max_misses: int = 12, min_match_iou: float = 0.12):
+        self.max_misses = max_misses
+        self.min_match_iou = min_match_iou
+        self._next_id = 1
+        self._tracks: Dict[int, Dict[str, Any]] = {}
+
+    def update_tracks(self, detections, frame=None):
+        det_boxes = []
+        for xywh, conf, _ in detections:
+            x, y, w, h = [int(v) for v in xywh]
+            det_boxes.append(((x, y, x + w, y + h), float(conf)))
+
+        updated = set()
+        used = set()
+        for tid, track in list(self._tracks.items()):
+            best_idx, best_score = -1, 0.0
+            for i, (box, conf) in enumerate(det_boxes):
+                if i in used:
+                    continue
+                score = _iou(track["box"], box)
+                if score > best_score:
+                    best_idx, best_score = i, score
+            if best_idx >= 0 and best_score >= self.min_match_iou:
+                box, conf = det_boxes[best_idx]
+                track.update({"box": box, "conf": conf, "misses": 0, "hits": track["hits"] + 1})
+                updated.add(tid)
+                used.add(best_idx)
+            else:
+                track["misses"] += 1
+
+        for i, (box, conf) in enumerate(det_boxes):
+            if i in used:
+                continue
+            tid = self._next_id
+            self._next_id += 1
+            self._tracks[tid] = {"box": box, "conf": conf, "hits": 1, "misses": 0}
+            updated.add(tid)
+
+        for tid in list(self._tracks.keys()):
+            if self._tracks[tid]["misses"] > self.max_misses:
+                del self._tracks[tid]
+
+        output = []
+        for tid, t in self._tracks.items():
+            if t["misses"] == 0:
+                output.append(_LiteTrack(track_id=tid, box=t["box"], confidence=t["conf"], confirmed=t["hits"] >= 1))
+        return output
+
+
+def _perf_breakdown(perf: Dict[str, float], frames: int) -> Dict[str, Any]:
+    comps = ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms"]
+    avg = {k: (perf[k] / max(1, frames)) for k in comps}
+    loop_total = max(1e-6, perf["loop_ms"])
+    pct = {k: (100.0 * perf[k] / loop_total) for k in comps if k != "loop_ms"}
+    return {"avg_ms": avg, "pct_of_loop": pct}
+
+
 def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cancel_check=None):
-    if cv2 is None or DeepSort is None or YOLO is None:
+    if cv2 is None or YOLO is None:
         raise RuntimeError("tracking dependencies unavailable")
 
     params = TrackingParams(**{k: v for k, v in setup.items() if k in TrackingParams.__annotations__})
     if "ocr_every_n_frames" in setup:
         params.ocr_every_n = max(1, int(setup.get("ocr_every_n_frames", params.ocr_every_n)))
+    params.detect_stride = max(1, int(setup.get("detect_stride", params.detect_stride)))
+    params.yolo_imgsz = max(320, int(setup.get("yolo_imgsz", params.yolo_imgsz)))
+    params.yolo_batch = max(1, int(setup.get("yolo_batch", params.yolo_batch)))
+    params.ocr_disable = bool(setup.get("ocr_disable", params.ocr_disable))
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"could not open video: {video_path}")
@@ -204,27 +282,34 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     model = YOLO("yolov8s.pt")
-    device = resolve_device()
+    device, yolo_device = resolve_device()
     is_cuda = device.startswith("cuda")
-    yolo_device = 0 if is_cuda else "cpu"
     ocr, ocr_gpu = _build_ocr_reader(device)
-    tracker = DeepSort(max_age=40, n_init=2, embedder="mobilenet", embedder_gpu=is_cuda, bgr=True, half=is_cuda)
 
-    detect_stride = max(1, int(params.detect_stride))
+    tracker_type = str(setup.get("tracker_type", "bytetrack")).lower()
+    tracker = None
+    if tracker_type == "deepsort":
+        if DeepSort is None:
+            raise RuntimeError("deepsort tracker requested but deep_sort_realtime unavailable")
+        tracker = DeepSort(max_age=40, n_init=2, embedder="mobilenet", embedder_gpu=is_cuda, bgr=True, half=is_cuda)
+    else:
+        tracker = LightweightIOUTracker(max_misses=max(3, int(params.lost_timeout * fps / max(1, params.detect_stride))))
+
+    detect_stride = params.detect_stride
     ocr_every_n = max(1, int(params.ocr_every_n))
-    yolo_batch = max(1, int(params.yolo_batch))
-    effective_fps_target = fps / detect_stride
+    yolo_batch = params.yolo_batch
 
     log.info(
-        "GPU check: resolved=%s yolo_device=%s torch=%s cuda_available=%s gpu=%s imgsz=%s stride=%s eff_fps=%.2f",
+        "runtime device=%s yolo_device_arg=%s tracker=%s torch=%s cuda_available=%s gpu=%s imgsz=%s stride=%s batch=%s",
         device,
         yolo_device,
+        tracker_type,
         getattr(torch, "__version__", "n/a") if torch else "missing",
         bool(torch and torch.cuda.is_available()),
         torch.cuda.get_device_name(0) if torch and torch.cuda.is_available() else "-",
         params.yolo_imgsz,
         detect_stride,
-        effective_fps_target,
+        yolo_batch,
     )
 
     jersey_hsv = _hex_to_hsv(setup.get("jersey_color", "#203524"))
@@ -234,29 +319,23 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     lost_since = None
     locked_track_id = None
     last_box = None
-    last_seen = 0.0
-    seed_lock_until = 0.0
-    seeded_lock_active = False
+    last_seen = -1.0
     reacquire_until = 0.0
 
     seed_clicks = []
     for click in setup.get("clicks") or []:
         seed_t = max(0.0, float(click.get("t", 0.0)))
-        seed_clicks.append(
-            {
-                "t": seed_t,
-                "seed_frame": int(seed_t * fps),
-                "seed_px": (int(float(click.get("x", 0.0)) * w), int(float(click.get("y", 0.0)) * h)),
-                "acquired": False,
-            }
-        )
+        seed_clicks.append({
+            "t": seed_t,
+            "seed_frame": int(seed_t * fps),
+            "seed_px": (int(float(click.get("x", 0.0)) * w), int(float(click.get("y", 0.0)) * h)),
+            "acquired": False,
+        })
 
-    segments = []
-    shifts = []
+    segments, shifts = [], []
     shift_start = None
     shift_state = "OFF_ICE"
     present_prev = False
-
     timeline = []
     overlay_path = None
     writer = None
@@ -275,6 +354,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "effective_fps": 0.0,
         "device": device,
         "yolo_device": yolo_device,
+        "tracker_type": tracker_type,
     }
 
     frame_idx = 0
@@ -287,12 +367,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         if cancel_check and cancel_check():
             raise RuntimeError("cancelled")
 
-        batch_frames: List[np.ndarray] = []
-        batch_indices: List[int] = []
-        batch_times: List[float] = []
-
+        batch_frames, batch_indices, batch_times = [], [], []
         while len(batch_frames) < yolo_batch:
-            loop_start = time.perf_counter()
             read_start = time.perf_counter()
             ok, frame = cap.read()
             perf["frame_read_ms"] += (time.perf_counter() - read_start) * 1000.0
@@ -305,7 +381,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             batch_frames.append(frame)
             batch_indices.append(current_idx)
             batch_times.append(current_idx / fps)
-            perf["loop_ms"] += (time.perf_counter() - loop_start) * 1000.0
 
         if not batch_frames:
             break
@@ -314,7 +389,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         source = batch_frames if len(batch_frames) > 1 else batch_frames[0]
         preds = model.predict(source=source, conf=0.25, device=yolo_device, imgsz=params.yolo_imgsz, half=is_cuda, verbose=False)
         perf["yolo_ms"] += (time.perf_counter() - yolo_start) * 1000.0
-
         if not isinstance(preds, list):
             preds = [preds]
 
@@ -335,18 +409,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             tracks = tracker.update_tracks(dets, frame=frame)
             perf["deepsort_ms"] += (time.perf_counter() - ds_start) * 1000.0
 
-            active_seed = None
-            click_dist = float("inf")
+            active_seed, click_dist = None, float("inf")
             for seed in seed_clicks:
                 if abs(t - seed["t"]) <= float(setup.get("seed_window_s", params.seed_window_s)):
                     active_seed = seed
-                    if not seed.get("window_logged"):
-                        timeline.append({"t": t, "event": "seed_window", "seed_t": seed["t"]})
-                        seed["window_logged"] = True
                     break
 
-            best = None
-            ocr_used = 0
+            best, ocr_used = None, 0
             for tr in tracks:
                 if not tr.is_confirmed():
                     continue
@@ -359,13 +428,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
                 should_run_ocr = (
                     ocr is not None
-                    and not bool(setup.get("ocr_disable", params.ocr_disable))
+                    and not params.ocr_disable
                     and ocr_used < max(1, int(setup.get("ocr_max_crops_per_frame", params.ocr_max_crops_per_frame)))
                     and (current_idx % ocr_every_n == 0)
                 )
                 if should_run_ocr:
                     x1, y1, x2, y2 = box
-                    crop = frame[y1 + int((y2-y1)*0.2):y1 + int((y2-y1)*0.75), x1:x2]
+                    crop = frame[y1 + int((y2 - y1) * 0.2):y1 + int((y2 - y1) * 0.75), x1:x2]
                     ocr_start = time.perf_counter()
                     try:
                         rr = ocr.readtext(crop, detail=1, paragraph=False)
@@ -380,15 +449,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                                     break
                     except Exception as exc:
                         if ocr_gpu and is_cuda and _is_cuda_fork_error(exc):
-                            log.warning("Falling back to CPU OCR due to CUDA fork constraint")
                             ocr = easyocr.Reader(["en"], gpu=False)
                             ocr_gpu = False
                     finally:
                         perf["ocr_ms"] += (time.perf_counter() - ocr_start) * 1000.0
 
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
-                seed_bonus = 0.0
-                seed_match = False
+                seed_bonus, seed_match = 0.0, False
                 if active_seed is not None:
                     px, py = active_seed["seed_px"]
                     cx = (box[0] + box[2]) / 2.0
@@ -398,6 +465,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     if dist <= float(setup.get("seed_dist_max", params.seed_dist_max)):
                         seed_bonus = float(setup.get("seed_bonus", params.seed_bonus))
                         seed_match = True
+
                 score = params.color_weight * cscore + params.motion_weight * motion + params.ocr_weight * ocr_match + identity_bonus + seed_bonus
                 if best is None or score > best["score"]:
                     best = {
@@ -414,62 +482,58 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     }
 
             prev_state = state
-            unlock_reason = None
             lock_threshold = float(setup.get("reacquire_score_lock_threshold", 0.40)) if t <= reacquire_until else params.score_lock_threshold
-
             if best:
                 last_box = best["box"]
+
+            if best and best["score"] >= lock_threshold:
+                if state != "LOCKED":
+                    timeline.append({"t": t, "event": "lock", "reason": "score", "score": best["score"], "threshold": lock_threshold})
+                state = "LOCKED"
+                locked_track_id = best["track_id"]
                 last_seen = t
-                seed_based_lock = bool(active_seed is not None and best.get("seed_match") and best.get("seed_dist", 1.0) <= params.seed_dist_max)
-                if best["score"] >= lock_threshold or best["ocr_match"] > 0 or seed_based_lock:
-                    state = "LOCKED"
-                    locked_track_id = best["track_id"]
-                    if seed_based_lock and active_seed is not None:
-                        seeded_lock_active = True
-                        seed_lock_until = max(seed_lock_until, t + float(setup.get("seed_lock_seconds", params.seed_lock_seconds)))
-                        active_seed["acquired"] = True
-                        timeline.append({"event": "seed_lock", "t": t, "click_t": active_seed["t"], "track_id": best["track_id"], "dist": best.get("seed_dist")})
                 lost_since = None
-            else:
+                if t <= reacquire_until:
+                    timeline.append({"t": t, "event": "reacquire", "reason": "score_recovered", "score": best["score"]})
+                    reacquire_until = 0.0
+            elif state == "LOCKED":
                 if lost_since is None:
                     lost_since = t
-                if state == "LOCKED" and (t - lost_since) > params.lost_timeout:
-                    unlock_reason = "lost_timeout"
+                    timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold", "score": best["score"] if best else None, "threshold": lock_threshold})
+                elif (t - lost_since) > params.lost_timeout:
                     state = "SEARCHING"
                     locked_track_id = None
-                    reacquire_until = t + float(setup.get("reacquire_window_seconds", 4.0))
-                    timeline.append({"t": t, "event": "reacquire_start", "until": reacquire_until})
+                    reacquire_until = t + float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds))
+                    timeline.append({"t": t, "event": "unlock", "reason": "lost_timeout", "lost_for": t - lost_since, "score": best["score"] if best else None})
+                    timeline.append({"t": t, "event": "reacquire", "reason": "window_open", "until": reacquire_until})
+            else:
+                if t > reacquire_until:
+                    lost_since = None
 
-            if seeded_lock_active and t > seed_lock_until:
-                seeded_lock_active = False
-            if seeded_lock_active and state != "LOCKED":
-                state = "LOCKED"
-
-            present = bool((best and best["score"] >= lock_threshold) or (state == "LOCKED" and t <= max(seed_lock_until, last_seen + params.lost_timeout)))
+            present = state == "LOCKED"
             if present and not present_prev:
                 seg_start = t
-                timeline.append({"t": t, "event": "present_on", "score": best["score"] if best else None})
                 if shift_state == "OFF_ICE":
                     shift_state = "ON_ICE"
                     shift_start = t
             if (not present) and present_prev:
                 seg_end = t
-                segments.append((seg_start, seg_end, unlock_reason or "present_off"))
-                timeline.append({"t": t, "event": "present_off", "reason": unlock_reason or "present_off"})
+                segments.append((seg_start, seg_end, "unlock"))
                 if shift_state == "ON_ICE" and shift_start is not None:
                     shifts.append((shift_start, seg_end))
                     shift_state = "OFF_ICE"
                     shift_start = None
 
             if prev_state != state:
-                timeline.append({"t": t, "event": "state", "from": prev_state, "to": state, "reason": unlock_reason})
+                timeline.append({"t": t, "event": "state", "from": prev_state, "to": state})
 
             if writer is not None:
                 draw = frame.copy()
                 if best:
                     x1, y1, x2, y2 = best["box"]
                     cv2.rectangle(draw, (x1, y1), (x2, y2), (40, 220, 40), 2)
-                cv2.putText(draw, f"state:{state} present:{present}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
+                    cv2.putText(draw, f"score:{best['score']:.2f}", (x1, max(20, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+                cv2.putText(draw, f"state:{state}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 2)
                 writer.write(draw)
 
             processed_idx += 1
@@ -479,7 +543,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             perf["effective_fps"] = processed_idx / elapsed
 
             if heartbeat and (time.time() - last_hb) >= HEARTBEAT_SECONDS:
-                avg = {k: (perf[k] / max(1, processed_idx)) for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms"]}
+                breakdown = _perf_breakdown(perf, processed_idx)
                 perf_summary = {
                     "eff_fps": perf["effective_fps"],
                     "frames": processed_idx,
@@ -488,14 +552,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "ocr_calls": perf["ocr_calls"],
                     "device": device,
                     "yolo_device": yolo_device,
+                    "tracker_type": tracker_type,
                     "totals": {k: perf[k] for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms", "ocr_calls"]},
-                    "avg": avg,
+                    **breakdown,
                 }
-                log.info(
-                    "perf eff_fps=%.2f read_ms=%.2f yolo_ms=%.2f deepsort_ms=%.2f ocr_ms=%.2f ocr_calls=%s frames=%s/%s",
-                    perf_summary["eff_fps"], avg["frame_read_ms"], avg["yolo_ms"], avg["deepsort_ms"], avg["ocr_ms"], perf["ocr_calls"], current_idx, total,
-                    extra={"job_id": "-", "stage": "tracking"},
-                )
                 heartbeat(current_idx, total, t, perf_summary)
                 last_hb = time.time()
 
@@ -504,7 +564,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     cap.release()
     if writer is not None:
         writer.release()
-
     if present_prev:
         eof_t = frame_idx / max(fps, 1.0)
         segments.append((seg_start, eof_t, "eof"))
@@ -520,7 +579,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         else:
             merged.append((a, b, reason))
 
-    avg = {k: (perf[k] / max(1, processed_idx)) for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms"]}
     perf_summary = {
         "eff_fps": perf["effective_fps"],
         "frames": processed_idx,
@@ -528,8 +586,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "ocr_calls": perf["ocr_calls"],
         "device": device,
         "yolo_device": yolo_device,
+        "tracker_type": tracker_type,
         "totals": {k: perf[k] for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms", "ocr_calls"]},
-        "avg": avg,
+        **_perf_breakdown(perf, processed_idx),
     }
     return {
         "segments": merged,

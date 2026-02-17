@@ -41,16 +41,20 @@ CAMERA_PRESETS = {
 }
 
 
-def resolve_device() -> str:
+def resolve_device() -> Tuple[str, int | str]:
     override = os.getenv("SHIFTCLIPPER_DEVICE")
     if override:
-        return override
+        if override.startswith("cuda"):
+            return override, 0
+        return override, "cpu"
     try:
         import torch
 
-        return "cuda:0" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda:0", 0
+        return "cpu", "cpu"
     except Exception:
-        return "cpu"
+        return "cpu", "cpu"
 
 
 def _as_float(src: Dict[str, Any], key: str, default: float) -> float:
@@ -85,6 +89,10 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     tracking_mode = str(src.get("tracking_mode") or "clip").lower()
     if tracking_mode not in {"clip", "shift"}:
         tracking_mode = "clip"
+
+    tracker_type = str(src.get("tracker_type") or "bytetrack").lower()
+    if tracker_type not in {"bytetrack", "iou", "deepsort"}:
+        tracker_type = "bytetrack"
 
     preset = CAMERA_PRESETS[camera_mode]
     verify_mode = bool(src.get("verify_mode", False))
@@ -126,6 +134,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "ocr_max_crops_per_frame": _as_int(src, "ocr_max_crops_per_frame", preset.get("ocr_max_crops_per_frame", 1)),
         "ocr_disable": bool(src.get("ocr_disable", False)),
         "yolo_batch": max(1, _as_int(src, "yolo_batch", 4)),
+        "tracker_type": tracker_type,
         "ocr_min_conf": _as_float(src, "ocr_min_conf", preset["ocr_min_conf"]),
         "lock_seconds_after_confirm": _as_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"]),
         "gap_merge_seconds": _as_float(src, "gap_merge_seconds", preset["gap_merge_seconds"]),

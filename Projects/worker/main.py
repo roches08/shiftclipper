@@ -52,12 +52,13 @@ def configure_logging() -> None:
 def gpu_info() -> str:
     try:
         import torch
-        dev = resolve_device()
+        dev, _ = resolve_device()
         cuda_ok = bool(torch.cuda.is_available())
         name = torch.cuda.get_device_name(0) if cuda_ok else "-"
         return f"device={dev} torch={torch.__version__} cuda_available={cuda_ok} gpu={name}"
     except Exception as e:
-        return f"device={resolve_device()} torch=unavailable cuda_available=False gpu=- err={e}"
+        dev, _ = resolve_device()
+        return f"device={dev} torch=unavailable cuda_available=False gpu=- err={e}"
 
 
 def run_self_test(conn: redis.Redis) -> int:
@@ -95,7 +96,7 @@ def main() -> None:
         QUEUE_NAMES,
         JOBS_DIR,
         mp.get_start_method(),
-        resolve_device(),
+        resolve_device()[0],
         gpu_info(),
         extra={"job_id":"-"},
     )
