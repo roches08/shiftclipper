@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+from urllib.parse import urlparse
 
 import redis
 from rq import Queue, Worker
@@ -10,6 +11,12 @@ from rq.job import Job
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
 JOBS_DIR = os.getenv("JOBS_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "jobs")))
+
+
+def describe_redis(url: str) -> str:
+    parsed = urlparse(url)
+    db = parsed.path.lstrip("/") or "0"
+    return f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 6379}/{db}"
 
 
 def run_self_test(conn: redis.Redis) -> int:
@@ -38,7 +45,13 @@ def main() -> None:
     os.remove(probe_path)
 
     conn = redis.from_url(REDIS_URL)
-    print(f"Worker starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS_DIR}")
+    print(
+        "Worker starting "
+        f"| redis={REDIS_URL} "
+        f"| redis_endpoint={describe_redis(REDIS_URL)} "
+        f"| queues={QUEUE_NAMES} "
+        f"| jobs_dir={JOBS_DIR}"
+    )
 
     if args.self_test:
         raise SystemExit(run_self_test(conn))

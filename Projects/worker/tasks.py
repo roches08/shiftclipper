@@ -664,6 +664,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
     return fail_meta
   except Exception as e:
     tb = traceback.format_exc()
+    log.exception("job failed | job_id=%s", job_id)
     try:
       os.makedirs(JOBS_DIR, exist_ok=True)
       failed_job_dir = os.path.join(JOBS_DIR, job_id)
