@@ -11,12 +11,25 @@ WORKER_LOG="/workspace/worker.log"
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 export RQ_QUEUES="${RQ_QUEUES:-jobs}"
+export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 
 mkdir -p "$JOBS_DIR"
 
-echo "==> Installing system dependencies"
-apt-get update -y
-apt-get install -y ffmpeg redis-server python3-venv python3-pip curl
+echo "==> Ensuring required system dependencies are installed"
+MISSING_PACKAGES=()
+for pkg in ffmpeg redis-server python3-venv python3-pip curl redis-tools; do
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+    MISSING_PACKAGES+=("$pkg")
+  fi
+done
+
+if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
+  echo "Installing missing packages: ${MISSING_PACKAGES[*]}"
+  apt-get update -y
+  apt-get install -y "${MISSING_PACKAGES[@]}"
+else
+  echo "All required system packages already installed; skipping apt-get"
+fi
 
 echo "==> Preparing Python virtualenv"
 if [ ! -d "$VENV_DIR" ]; then
@@ -37,35 +50,57 @@ echo "==> Stopping old API/worker processes"
 pkill -f "uvicorn api.main:app" || true
 pkill -f "rq worker -u" || true
 
+echo "==> Starting worker for queue: jobs"
+nohup "$VENV_DIR/bin/rq" worker -u "$REDIS_URL" jobs > "$WORKER_LOG" 2>&1 &
+WORKER_PID=$!
+
+sleep 2
+if ! kill -0 "$WORKER_PID" >/dev/null 2>&1; then
+  echo "ERROR: Worker exited unexpectedly during startup. Last worker logs:"
+  tail -n 200 "$WORKER_LOG" || true
+  exit 1
+fi
+
 echo "==> Starting API (0.0.0.0:8000)"
 nohup "$VENV_DIR/bin/uvicorn" api.main:app --host 0.0.0.0 --port 8000 --log-level info > "$API_LOG" 2>&1 &
 API_PID=$!
 
 echo "==> Waiting for API readiness"
 for _ in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:8000/healthz" >/dev/null 2>&1 \
-    || curl -fsS "http://127.0.0.1:8000/jobs" >/dev/null 2>&1 \
+  if curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null 2>&1 \
     || curl -fsS "http://127.0.0.1:8000/docs" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
 
-if ! curl -fsS "http://127.0.0.1:8000/docs" >/dev/null 2>&1; then
+if ! curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null 2>&1 \
+  && ! curl -fsS "http://127.0.0.1:8000/docs" >/dev/null 2>&1; then
   echo "ERROR: API failed readiness checks. Last API logs:"
   tail -n 100 "$API_LOG" || true
   exit 1
 fi
 
-echo "==> Starting worker for queue: jobs"
-nohup "$VENV_DIR/bin/rq" worker -u "$REDIS_URL" jobs > "$WORKER_LOG" 2>&1 &
-WORKER_PID=$!
+echo "==> Validating UI endpoints"
+if ! curl -fsS "http://127.0.0.1:8000/" >/dev/null 2>&1; then
+  echo "ERROR: UI root endpoint failed (expected HTTP 200): http://127.0.0.1:8000/"
+  tail -n 100 "$API_LOG" || true
+  exit 1
+fi
+
+if ! curl -fsS "http://127.0.0.1:8000/static/app.js" >/dev/null 2>&1; then
+  echo "ERROR: UI static bundle failed (expected HTTP 200): http://127.0.0.1:8000/static/app.js"
+  tail -n 100 "$API_LOG" || true
+  exit 1
+fi
 
 sleep 1
 
 echo
 echo "===== ShiftClipper RunPod status ====="
 echo "REDIS_URL=$REDIS_URL"
+echo "SHIFTCLIPPER_DEVICE=$SHIFTCLIPPER_DEVICE"
+echo "Torch CUDA available: $($VENV_DIR/bin/python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null || echo unavailable)"
 echo "RQ version: $("$VENV_DIR/bin/python" -c 'import rq; print(rq.__version__)')"
 echo "Redis ping: $(redis-cli -u "$REDIS_URL" ping)"
 echo "jobs queue length: $(redis-cli -u "$REDIS_URL" llen rq:queue:jobs)"
