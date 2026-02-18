@@ -306,6 +306,12 @@ def _compute_clip_end_for_loss(last_seen_time: float, loss_timeout: float, video
 def _append_segment(segments: List[Tuple[float, float, str]], start_time: float, end_time: float, reason: ClipEndReason) -> None:
     if end_time > start_time:
         segments.append((float(start_time), float(end_time), reason.value))
+
+
+def _is_boundary_reason(reason: str) -> bool:
+    return reason in {"lock_lost", "stoppage", "cut_gap"}
+
+
 def _merge_segments(
     segments: List[Tuple[float, float, str]],
     *,
@@ -321,7 +327,7 @@ def _merge_segments(
         for a, b, reason in raw_segments:
             if (b - a) < min_clip_seconds:
                 continue
-            if merged and a - merged[-1][1] <= gap_merge_seconds:
+            if merged and a - merged[-1][1] <= gap_merge_seconds and not _is_boundary_reason(reason) and not _is_boundary_reason(merged[-1][2]):
                 merged_reason = "seed_clip" if (reason == "seed_clip" or merged[-1][2] == "seed_clip") else "merged"
                 merged[-1] = (merged[-1][0], max(merged[-1][1], b), merged_reason)
             else:
@@ -345,6 +351,8 @@ def _merge_segments(
             not merged_last
             and gap <= gap_merge_seconds
             and gap <= reacquire_window_seconds
+            and not _is_boundary_reason(prev_reason)
+            and not _is_boundary_reason(reason)
             and prev_reason == "unlock"
             and reason == "unlock"
         )
@@ -1094,6 +1102,30 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     if lost_since is None:
                         lost_since = t
                     if (t - lost_since) >= max(0.0, float(setup.get("lost_timeout", params.lost_timeout))):
+                        lock_lost_frames = int(max(0, round((t - (lost_since or t)) * fps)))
+                        timeline.append({
+                            "t": t,
+                            "event": "lock_lost",
+                            "lost_frames": lock_lost_frames,
+                            "last_identity_score": float(best.get("score", -1.0)) if best else -1.0,
+                            "unlock_threshold": unlock_threshold,
+                        })
+                        if clip_start_time is not None:
+                            seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
+                            segments.append((float(clip_start_time), float(seg_end), "lock_lost"))
+                            clip_end_reason = "lock_lost"
+                            timeline.append({
+                                "t": t,
+                                "event": "clip_force_closed",
+                                "reason": "lock_lost",
+                                "start_time": clip_start_time,
+                                "end_time": seg_end,
+                            })
+                            clip_start_time = None
+                            if present_prev and shift_state == "ON_ICE" and shift_start is not None:
+                                shifts.append((shift_start, seg_end))
+                                shift_state = "OFF_ICE"
+                                shift_start = None
                         lost_start_time = t
                         state = "LOST"
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
@@ -1102,6 +1134,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif state in {"SEARCH", "LOST"}:
                 if lost_start_time is not None and t > reacquire_until:
                     if not reacquire_failed_logged:
+                        timeline.append({
+                            "t": t,
+                            "event": "reacquire_expired",
+                            "time_since_loss": t - lost_start_time,
+                            "window_seconds": reacquire_window_seconds,
+                        })
                         timeline.append({
                             "t": t,
                             "event": "reacquire_failed",
@@ -1116,7 +1154,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     lock_state = "SEARCHING"
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
-            clip_score_threshold = float(setup.get("score_lock_threshold", params.score_lock_threshold))
+            clip_score_threshold = threshold_used if lock_state == "PROVISIONAL" else float(setup.get("score_lock_threshold", params.score_lock_threshold))
             identity_score = float(best["score"]) if best else -1.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             base_gate = (
@@ -1133,7 +1171,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 gate_held
                 and (
                     lock_state == "CONFIRMED"
-                    or (lock_state == "PROVISIONAL" and allow_unconfirmed)
+                    or (
+                        lock_state == "PROVISIONAL"
+                        and (
+                            allow_unconfirmed
+                            or identity_score >= clip_score_threshold
+                        )
+                    )
                 )
             )
             clip_reason = "allowed"
@@ -1141,7 +1185,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 clip_reason = "searching"
             elif state != "LOCKED":
                 clip_reason = "state_not_locked"
-            elif lock_state == "PROVISIONAL" and not allow_unconfirmed:
+            elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_score_threshold:
                 clip_reason = "provisional_disallowed"
             elif identity_score < unlock_threshold:
                 clip_reason = "identity_below_unlock_threshold"
@@ -1207,8 +1251,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             if prev_state != state:
                 timeline.append({"t": t, "event": "state", "from": prev_state, "to": state})
+                timeline.append({"t": t, "event": "state_transition", "kind": "state", "from": prev_state, "to": state})
             if prev_lock_state != lock_state:
                 timeline.append({"t": t, "event": "lock_state", "from": prev_lock_state, "to": lock_state})
+                timeline.append({"t": t, "event": "state_transition", "kind": "lock_state", "from": prev_lock_state, "to": lock_state})
 
             log.info(
                 "decision frame_time=%.3f status=%s candidates=%d chosen_id=%s sim=%.3f in_rink=%s in_bench=%s end_reason=%s",
@@ -1267,18 +1313,22 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             shifts.append((shift_start, eof_t))
 
     if bool(setup.get("allow_seed_clips", params.allow_seed_clips)):
-        clip_center_lead = float(setup.get("extend_sec", 20.0))
+        seed_lock_seconds = float(setup.get("seed_lock_seconds", params.seed_lock_seconds))
+        last_clip_end = max((seg[1] for seg in segments), default=0.0)
         for seed in seed_clicks:
             if not seed.get("acquired") or seed.get("seed_clip_emitted"):
                 continue
-            clip_start = max(0.0, seed["t"] - clip_center_lead)
+            unclamped_start = max(0.0, seed["t"] - seed_lock_seconds)
+            clip_start = max(last_clip_end, unclamped_start)
             clip_end = max(clip_start + params.min_clip_seconds, seed["t"])
             seed["seed_clip_emitted"] = True
             segments.append((clip_start, clip_end, "seed_clip"))
+            last_clip_end = max(last_clip_end, clip_end)
             timeline.append({
                 "t": seed["t"],
                 "event": "seed_clip_emitted",
                 "click_t": seed["t"],
+                "seed_lock_seconds": seed_lock_seconds,
                 "clip_start": clip_start,
                 "clip_end": clip_end,
             })
