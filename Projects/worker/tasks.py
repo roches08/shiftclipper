@@ -121,7 +121,6 @@ class TrackingParams:
     debug_timeline: bool = True
     use_rink_mask: bool = True
     use_bench_mask: bool = True
-    use_reid: bool = True
     reid_enable: bool = True
     reid_model: str = "osnet_x0_25"
     reid_weight: float = 0.40
@@ -678,7 +677,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     params.yolo_batch = max(1, int(setup.get("yolo_batch", params.yolo_batch)))
     params.ocr_disable = bool(setup.get("ocr_disable", params.ocr_disable))
     params.reid_enable = bool(setup.get("reid_enable", setup.get("use_reid", params.reid_enable)))
-    params.use_reid = params.reid_enable
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -1073,7 +1071,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if cand["closeup_blocked"]:
                     cand["score"] -= 0.75
                 cand["score"] += params.ocr_weight * cand["ocr_match"]
-                if params.use_reid and cand.get("sim", -1.0) >= 0:
+                if params.reid_enable and cand.get("sim", -1.0) >= 0:
                     cand["score"] += 0.5 * cand["sim"]
                 if best is None or cand["score"] > best["score"]:
                     best = cand

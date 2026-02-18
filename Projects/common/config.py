@@ -177,7 +177,6 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
         "use_rink_mask": bool(src.get("use_rink_mask", True)),
         "use_bench_mask": bool(src.get("use_bench_mask", True)),
-        "use_reid": bool(src.get("use_reid", True)),
         "reid_enable": bool(src.get("reid_enable", src.get("use_reid", True))),
         "reid_model": str(src.get("reid_model") or "osnet_x0_25"),
         "reid_weight": _as_float(src, "reid_weight", 0.45),
@@ -206,5 +205,4 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     }
     if setup["reid_model"] not in {"osnet_x0_25", "osnet_x1_0"}:
         setup["reid_model"] = "osnet_x0_25"
-    setup["use_reid"] = bool(setup["reid_enable"])
     return setup
