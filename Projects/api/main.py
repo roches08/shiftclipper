@@ -374,13 +374,13 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
 
     for nm in [
         "score_lock_threshold", "score_unlock_threshold", "reacquire_score_lock_threshold",
-        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf",
+        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf", "swap_guard_bonus",
     ]:
         _check_01(nm)
 
     for nm in [
         "lost_timeout", "reacquire_window_seconds", "gap_merge_seconds", "lock_seconds_after_confirm",
-        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds",
+        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds",
     ]:
         _check_non_negative(nm)
 

@@ -27,6 +27,8 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["reacquire_score_lock_threshold"] == 0.30
     assert setup["score_lock_threshold"] == 0.55
     assert setup["score_unlock_threshold"] == 0.33
+    assert setup["swap_guard_seconds"] == 2.0
+    assert setup["swap_guard_bonus"] == 0.1
     assert setup["gap_merge_seconds"] == 1.5
     assert setup["transcode_enabled"] is False
     assert setup["transcode_scale_max"] == 1080

@@ -133,6 +133,8 @@ class TrackingParams:
     reid_alpha: float = 0.7
     reid_min_px: int = 24
     reid_sharpness_threshold: float = 15.0
+    swap_guard_seconds: float = 2.0
+    swap_guard_bonus: float = 0.1
 
 
 class ClipEndReason(str, Enum):
@@ -306,6 +308,46 @@ def _compute_clip_end_for_loss(last_seen_time: float, loss_timeout: float, video
 def _append_segment(segments: List[Tuple[float, float, str]], start_time: float, end_time: float, reason: ClipEndReason) -> None:
     if end_time > start_time:
         segments.append((float(start_time), float(end_time), reason.value))
+
+
+def _clamp_segment_window(start_time: float, end_time: float, video_duration: float) -> Optional[Tuple[float, float]]:
+    final_start = max(0.0, min(float(start_time), float(video_duration)))
+    final_end = max(0.0, min(float(end_time), float(video_duration)))
+    if final_end <= final_start:
+        return None
+    return final_start, final_end
+
+
+def _compute_seed_clip_window(
+    *,
+    click_t: float,
+    seed_lock_seconds: float,
+    min_clip_seconds: float,
+    video_duration: float,
+    last_clip_end: Optional[float],
+) -> Dict[str, float]:
+    computed_start = max(0.0, float(click_t) - max(0.0, float(seed_lock_seconds)))
+    computed_end = max(computed_start + max(0.0, float(min_clip_seconds)), min(float(click_t), float(video_duration)))
+
+    final_start = computed_start
+    if last_clip_end is not None and float(last_clip_end) <= float(click_t):
+        final_start = max(final_start, float(last_clip_end))
+    final_end = max(final_start + max(0.0, float(min_clip_seconds)), min(float(click_t), float(video_duration)))
+    final_end = min(final_end, float(video_duration))
+
+    clamped = _clamp_segment_window(final_start, final_end, video_duration)
+    if clamped is None:
+        final_start = float(video_duration)
+        final_end = float(video_duration)
+    else:
+        final_start, final_end = clamped
+
+    return {
+        "computed_start": computed_start,
+        "computed_end": computed_end,
+        "final_start": final_start,
+        "final_end": final_end,
+    }
 
 
 def _is_boundary_reason(reason: str) -> bool:
@@ -664,6 +706,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     ocr_penalties: Dict[int, float] = {}
     best_hold_track_id: Optional[int] = None
     best_hold_start: Optional[float] = None
+    swap_guard_until: float = 0.0
 
     seed_clicks = []
     for click in setup.get("clicks") or []:
@@ -974,6 +1017,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             reacquire_window_seconds = float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds))
             reacquire_threshold = float(setup.get("reacquire_score_lock_threshold", params.reacquire_score_lock_threshold))
             score_lock_threshold = float(setup.get("score_lock_threshold", params.score_lock_threshold))
+            swap_guard_seconds = max(0.0, float(setup.get("swap_guard_seconds", params.swap_guard_seconds)))
+            swap_guard_bonus = max(0.0, float(setup.get("swap_guard_bonus", params.swap_guard_bonus)))
             lock_threshold = reacquire_threshold if t <= reacquire_until else score_lock_threshold
             unlock_threshold = float(setup.get("score_unlock_threshold", params.score_unlock_threshold))
             allow_seed_relaxed_lock = bool(best and best.get("seed_match"))
@@ -1018,6 +1063,31 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             reacquire_ready = bool(best and reacquire_mode and seconds_held >= float(setup.get("min_track_seconds", params.min_track_seconds)) and (best.get("reacquire_identity_score", -1.0) >= threshold_used or best["score"] >= threshold_used))
             promote_from_seed = bool(state in {"SEARCH", "LOST"} and best_seed_stable and score_ready)
             promote_from_reacquire = bool(state in {"SEARCH", "LOST"} and reacquire_ready)
+            swap_guard_active = bool(
+                locked_track_id is not None
+                and best is not None
+                and best.get("track_id") != locked_track_id
+                and t <= swap_guard_until
+            )
+            if swap_guard_active and best is not None:
+                guard_threshold = score_lock_threshold + swap_guard_bonus
+                guard_identity_score = max(float(best.get("reacquire_identity_score", -1.0)), float(best.get("score", -1.0)))
+                if guard_identity_score < guard_threshold:
+                    timeline.append({
+                        "t": t,
+                        "event": "swap_guard_active",
+                        "from_track_id": locked_track_id,
+                        "to_track_id": best["track_id"],
+                        "identity_score": guard_identity_score,
+                        "guard_threshold": guard_threshold,
+                        "guard_until": swap_guard_until,
+                    })
+                    best = None
+                    sim_ok = False
+                    promote_from_seed = False
+                    promote_from_reacquire = False
+                    score_ready = False
+                    reacquire_ready = False
 
             if best and sim_ok and not best.get("closeup_blocked", False) and (best["score"] >= lock_threshold or promote_from_seed or promote_from_reacquire):
                 if state in {"SEARCH", "LOST"}:
@@ -1042,6 +1112,16 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             "motion_iou": best.get("motion", 0.0),
                             "identity_score": best.get("score"),
                             "frame_idx": current_idx,
+                        })
+                        swap_guard_until = t + swap_guard_seconds
+                        timeline.append({
+                            "t": t,
+                            "event": "swap_guard_active",
+                            "from_track_id": locked_track_id,
+                            "to_track_id": best["track_id"],
+                            "identity_score": float(best.get("score", -1.0)),
+                            "guard_threshold": score_lock_threshold + swap_guard_bonus,
+                            "guard_until": swap_guard_until,
                         })
                     lock_recovered_from_loss = lost_start_time
                     locked_track_id = best["track_id"]
@@ -1305,36 +1385,69 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     cap.release()
     if writer is not None:
         writer.release()
+    video_duration = max(0.0, frame_idx / max(fps, 1.0))
     if present_prev:
-        eof_t = frame_idx / max(fps, 1.0)
-        _append_segment(segments, clip_start_time or seg_start, eof_t, ClipEndReason.VIDEO_END)
-        timeline.append({"t": eof_t, "event": "clip_end", "reason": ClipEndReason.VIDEO_END.value})
+        _append_segment(segments, clip_start_time or seg_start, video_duration, ClipEndReason.VIDEO_END)
+        timeline.append({"t": video_duration, "event": "clip_end", "reason": ClipEndReason.VIDEO_END.value})
         if shift_state == "ON_ICE" and shift_start is not None:
-            shifts.append((shift_start, eof_t))
+            shifts.append((shift_start, video_duration))
 
     if bool(setup.get("allow_seed_clips", params.allow_seed_clips)):
         seed_lock_seconds = float(setup.get("seed_lock_seconds", params.seed_lock_seconds))
-        last_clip_end = max((seg[1] for seg in segments), default=0.0)
-        for seed in seed_clicks:
-            if not seed.get("acquired") or seed.get("seed_clip_emitted"):
-                continue
-            unclamped_start = max(0.0, seed["t"] - seed_lock_seconds)
-            clip_start = max(last_clip_end, unclamped_start)
-            clip_end = max(clip_start + params.min_clip_seconds, seed["t"])
+        ordered_seeds = sorted(
+            [seed for seed in seed_clicks if seed.get("acquired") and not seed.get("seed_clip_emitted")],
+            key=lambda seed: float(seed.get("t", 0.0)),
+        )
+        for seed in ordered_seeds:
+            click_t = float(seed["t"])
+            prior_segments = [seg for seg in segments if seg[1] <= click_t]
+            last_clip_end = max((seg[1] for seg in prior_segments), default=None)
+            seed_window = _compute_seed_clip_window(
+                click_t=click_t,
+                seed_lock_seconds=seed_lock_seconds,
+                min_clip_seconds=params.min_clip_seconds,
+                video_duration=video_duration,
+                last_clip_end=last_clip_end,
+            )
+            clip_start = seed_window["final_start"]
+            clip_end = seed_window["final_end"]
             seed["seed_clip_emitted"] = True
+            if clip_end <= clip_start:
+                continue
+            if (
+                abs(seed_window["computed_start"] - clip_start) > 1e-6
+                or abs(seed_window["computed_end"] - clip_end) > 1e-6
+            ):
+                timeline.append({
+                    "t": min(click_t, video_duration),
+                    "event": "seed_clip_clamped",
+                    "click_t": click_t,
+                    "computed_start": seed_window["computed_start"],
+                    "computed_end": seed_window["computed_end"],
+                    "final_start": clip_start,
+                    "final_end": clip_end,
+                    "last_clip_end": last_clip_end,
+                    "video_duration": video_duration,
+                })
             segments.append((clip_start, clip_end, "seed_clip"))
-            last_clip_end = max(last_clip_end, clip_end)
             timeline.append({
-                "t": seed["t"],
+                "t": min(click_t, video_duration),
                 "event": "seed_clip_emitted",
-                "click_t": seed["t"],
+                "click_t": click_t,
                 "seed_lock_seconds": seed_lock_seconds,
                 "clip_start": clip_start,
                 "clip_end": clip_end,
             })
 
+    clamped_segments: List[Tuple[float, float, str]] = []
+    for seg_start_t, seg_end_t, reason in segments:
+        clamped = _clamp_segment_window(seg_start_t, seg_end_t, video_duration)
+        if clamped is None:
+            continue
+        clamped_segments.append((clamped[0], clamped[1], reason))
+
     merged = _merge_segments(
-        segments,
+        clamped_segments,
         min_clip_seconds=params.min_clip_seconds,
         gap_merge_seconds=float(setup.get("gap_merge_seconds", params.gap_merge_seconds)),
         tracking_mode=tracking_mode,
