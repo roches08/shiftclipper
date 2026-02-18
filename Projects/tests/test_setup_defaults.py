@@ -30,6 +30,7 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["swap_guard_seconds"] == 2.5
     assert setup["swap_guard_bonus"] == 0.1
     assert setup["reid_enable"] is True
+    assert "use_reid" not in setup
     assert setup["reid_model"] == "osnet_x0_25"
     assert setup["reid_every_n_frames"] == 5
     assert setup["reid_weight"] == 0.45
@@ -182,3 +183,25 @@ def test_process_job_transcode_writes_preflight_and_uses_transcoded_path(tmp_pat
     assert "video_preflight" in events
     assert "transcode_started" in events
     assert "transcode_completed" in events
+
+
+def test_setup_accepts_legacy_use_reid_and_normalizes_to_reid_enable(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "legacy-reid"})["job_id"]
+    api_main.setup_job(job_id, {"use_reid": False})
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["reid_enable"] is False
+    assert "use_reid" not in setup
+
+
+def test_setup_reid_enable_takes_precedence_over_legacy_use_reid(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "reid-precedence"})["job_id"]
+    api_main.setup_job(job_id, {"use_reid": False, "reid_enable": True})
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["reid_enable"] is True
+    assert "use_reid" not in setup

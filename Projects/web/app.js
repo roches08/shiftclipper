@@ -263,7 +263,6 @@ function payload(){
     transcode_deinterlace: $('transcodeDeinterlace').checked,
     transcode_denoise: $('transcodeDenoise').checked,
     reid_enable: $('reidEnable').checked,
-    use_reid: $('reidEnable').checked,
     reid_model: $('reidModel').value,
     reid_every_n_frames: toInt('reidEveryNFrames'),
     reid_weight: toNumber('reidWeight'),
@@ -427,7 +426,7 @@ async function loadSetup(){
     setValueIfDefined('yoloImgsz', setup.yolo_imgsz);
     setValueIfDefined('yoloBatch', setup.yolo_batch);
     setValueIfDefined('trackerType', setup.tracker_type);
-    setCheckedIfDefined('reidEnable', setup.reid_enable ?? setup.use_reid);
+    setCheckedIfDefined('reidEnable', setup.reid_enable);
     setValueIfDefined('reidModel', setup.reid_model);
     setValueIfDefined('reidEveryNFrames', setup.reid_every_n_frames);
     setValueIfDefined('reidWeight', setup.reid_weight);
