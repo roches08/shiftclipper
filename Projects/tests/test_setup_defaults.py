@@ -30,6 +30,8 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["swap_guard_seconds"] == 2.5
     assert setup["swap_guard_bonus"] == 0.1
     assert setup["reid_enable"] is True
+    assert setup["reid_fail_policy"] == "disable"
+    assert setup["reid_weights_path"] == ""
     assert "use_reid" not in setup
     assert setup["reid_model"] == "osnet_x0_25"
     assert setup["reid_every_n_frames"] == 5
@@ -205,3 +207,13 @@ def test_setup_reid_enable_takes_precedence_over_legacy_use_reid(tmp_path, monke
     setup = json.loads((tmp_path / job_id / "setup.json").read_text())
     assert setup["reid_enable"] is True
     assert "use_reid" not in setup
+
+
+def test_setup_reid_fail_policy_is_normalized(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "reid-fail-policy"})["job_id"]
+    api_main.setup_job(job_id, {"reid_fail_policy": "unknown"})
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["reid_fail_policy"] == "disable"
