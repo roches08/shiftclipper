@@ -91,15 +91,15 @@ class TrackingParams:
     tracker_type: str = "bytetrack"
     ocr_min_conf: float = 0.22
     lock_seconds_after_confirm: float = 4.0
-    gap_merge_seconds: float = 2.5
+    gap_merge_seconds: float = 1.5
     lost_timeout: float = 1.5
     reacquire_window_seconds: float = 4.0
     reacquire_score_lock_threshold: float = 0.40
     min_track_seconds: float = 0.75
     min_clip_seconds: float = 1.0
     post_roll: float = 2.0
-    score_lock_threshold: float = 0.55
-    score_unlock_threshold: float = 0.35
+    score_lock_threshold: float = 0.50
+    score_unlock_threshold: float = 0.40
     seed_lock_seconds: float = 8.0
     seed_iou_min: float = 0.12
     seed_dist_max: float = 0.16
@@ -183,6 +183,65 @@ def _expand_box(box: Tuple[int, int, int, int], scale: float, w: int, h: int) ->
     bw = max(1.0, (x2 - x1) * scale)
     bh = max(1.0, (y2 - y1) * scale)
     return _clip((cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0), w, h)
+
+
+def _merge_segments(
+    segments: List[Tuple[float, float, str]],
+    *,
+    min_clip_seconds: float,
+    gap_merge_seconds: float,
+    tracking_mode: str,
+    reacquire_window_seconds: float,
+) -> List[Tuple[float, float, str]]:
+    merged: List[Tuple[float, float, str]] = []
+    raw_segments = sorted(segments, key=lambda x: x[0])
+
+    if tracking_mode != "shift":
+        for a, b, reason in raw_segments:
+            if (b - a) < min_clip_seconds:
+                continue
+            if merged and a - merged[-1][1] <= gap_merge_seconds:
+                merged_reason = "seed_clip" if (reason == "seed_clip" or merged[-1][2] == "seed_clip") else "merged"
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b), merged_reason)
+            else:
+                merged.append((a, b, reason))
+        return merged
+
+    previous = None
+    merged_last = False
+    for a, b, reason in raw_segments:
+        if (b - a) < min_clip_seconds:
+            continue
+
+        if previous is None:
+            previous = (a, b, reason)
+            merged_last = False
+            continue
+
+        prev_a, prev_b, prev_reason = previous
+        gap = a - prev_b
+        can_merge = (
+            not merged_last
+            and gap <= gap_merge_seconds
+            and gap <= reacquire_window_seconds
+            and prev_reason == "unlock"
+            and reason == "unlock"
+        )
+        if can_merge:
+            merged_reason = "merged"
+            merged.append((prev_a, max(prev_b, b), merged_reason))
+            previous = None
+            merged_last = True
+            continue
+
+        merged.append(previous)
+        previous = (a, b, reason)
+        merged_last = False
+
+    if previous is not None:
+        merged.append(previous)
+
+    return merged
 
 
 class FFmpegError(RuntimeError):
@@ -737,15 +796,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "clip_end": clip_end,
             })
 
-    merged = []
-    for a, b, reason in sorted(segments, key=lambda x: x[0]):
-        if (b - a) < params.min_clip_seconds:
-            continue
-        if merged and a - merged[-1][1] <= params.gap_merge_seconds:
-            merged_reason = "seed_clip" if (reason == "seed_clip" or merged[-1][2] == "seed_clip") else "merged"
-            merged[-1] = (merged[-1][0], max(merged[-1][1], b), merged_reason)
-        else:
-            merged.append((a, b, reason))
+    merged = _merge_segments(
+        segments,
+        min_clip_seconds=params.min_clip_seconds,
+        gap_merge_seconds=float(setup.get("gap_merge_seconds", params.gap_merge_seconds)),
+        tracking_mode=tracking_mode,
+        reacquire_window_seconds=float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds)),
+    )
 
     perf_summary = {
         "eff_fps": perf["effective_fps"],
