@@ -9,7 +9,7 @@ from pathlib import Path
 
 log = logging.getLogger("worker")
 
-_MIN_WEIGHTS_BYTES = 10 * 1024 * 1024
+_MIN_WEIGHTS_BYTES = 5 * 1024 * 1024
 _MAX_RETRIES = 3
 
 

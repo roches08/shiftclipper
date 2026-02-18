@@ -38,7 +38,7 @@ REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
 REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
 REID_WEIGHTS_TMP="${REID_WEIGHTS_DEST}.tmp"
 REID_WEIGHTS_URL="https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
-REID_MIN_BYTES=$((10 * 1024 * 1024))
+REID_MIN_BYTES=$((5 * 1024 * 1024))
 
 file_size(){ wc -c < "$1" | tr -d ' '; }
 
@@ -100,6 +100,10 @@ else
   else
     mv "$REID_WEIGHTS_TMP" "$REID_WEIGHTS_DEST"
   fi
+fi
+
+if [ -s "$REID_WEIGHTS_DEST" ] && [ "$(file_size "$REID_WEIGHTS_DEST")" -gt "$REID_MIN_BYTES" ]; then
+  "$PYTHON_BIN" -c "from worker.reid import OSNetEmbedder, ReIDConfig; import torch; e=OSNetEmbedder(ReIDConfig(model_name='osnet_x0_25', device='cuda:0' if torch.cuda.is_available() else 'cpu', batch_size=1, use_fp16=torch.cuda.is_available(), weights_path='$REID_WEIGHTS_DEST')); print('reid ok')"
 fi
 
 if ! "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
