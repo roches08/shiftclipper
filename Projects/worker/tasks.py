@@ -699,6 +699,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     reid_disabled_reason: Optional[str] = None
     reid_embedder = None
     setup["_runtime_reid_active"] = False
+    setup["_runtime_reid_disabled"] = False
+    setup["_runtime_reid_disabled_reason"] = None
     if params.reid_enable:
         reid_fail_policy = str(setup.get("reid_fail_policy", params.reid_fail_policy) or "disable").lower()
         if reid_fail_policy not in {"disable", "fail"}:
@@ -720,10 +722,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             reid_init_timeline_events.append({
                 "t": 0.0,
                 "event": "reid_ready",
-                "model": str(setup.get("reid_model", params.reid_model) or "osnet_x0_25"),
+                "model": setup.get("reid_model"),
                 "weights_path": reid_weights_path,
-                "device": str(setup.get("reid_device", params.reid_device) or device),
-                "fp16": bool(is_cuda),
+                "device": setup.get("reid_device"),
+                "fp16": is_cuda,
             })
         except Exception as exc:
             if reid_fail_policy == "fail":
