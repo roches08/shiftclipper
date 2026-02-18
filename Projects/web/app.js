@@ -23,6 +23,69 @@ const CAMERA_DEFAULTS = {
   broadcast_wide: { detect_stride: 3, yolo_imgsz: 512, ocr_every_n: 16, ocr_min_conf: 0.18, lock_seconds_after_confirm: 6.0, gap_merge_seconds: 1.5, lost_timeout: 1.9, min_track_seconds: 0.75 },
   tactical: { detect_stride: 4, yolo_imgsz: 416, ocr_every_n: 20, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 1.5, lost_timeout: 1.8, min_track_seconds: 0.75 },
 };
+
+const ADVANCED_PRESETS = {
+  balanced: {
+    score_lock_threshold: 0.55,
+    score_unlock_threshold: 0.35,
+    lost_timeout: 1.5,
+    reacquire_window_seconds: 4,
+    reacquire_score_lock_threshold: 0.4,
+    gap_merge_seconds: 2.5,
+    lock_seconds_after_confirm: 4,
+    min_track_seconds: 0.75,
+    min_clip_seconds: 1,
+    allow_unconfirmed_clips: false,
+    allow_seed_clips: true,
+    seed_lock_seconds: 8,
+    seed_iou_min: 0.12,
+    seed_dist_max: 0.16,
+    seed_bonus: 0.8,
+    seed_window_s: 3,
+    ocr_disable: false,
+    ocr_every_n_frames: 12,
+    ocr_min_conf: 0.2,
+    ocr_veto_conf: 0.85,
+    ocr_veto_seconds: 2,
+    detect_stride: 2,
+    yolo_imgsz: 512,
+    yolo_batch: 4,
+    tracker_type: 'bytetrack',
+  },
+  more_clips: {
+    score_lock_threshold: 0.45,
+    score_unlock_threshold: 0.20,
+    lost_timeout: 4.0,
+    reacquire_window_seconds: 10,
+    reacquire_score_lock_threshold: 0.30,
+    gap_merge_seconds: 4.0,
+    min_track_seconds: 0.35,
+    min_clip_seconds: 0.75,
+    allow_unconfirmed_clips: true,
+    allow_seed_clips: true,
+    seed_lock_seconds: 12,
+    seed_iou_min: 0.08,
+    seed_dist_max: 0.22,
+    ocr_veto_conf: 0.92,
+    ocr_veto_seconds: 1.0,
+  },
+  track_quality: {
+    score_lock_threshold: 0.60,
+    score_unlock_threshold: 0.40,
+    lost_timeout: 1.5,
+    reacquire_window_seconds: 4,
+    reacquire_score_lock_threshold: 0.45,
+    gap_merge_seconds: 2.0,
+    min_track_seconds: 0.90,
+    min_clip_seconds: 1.25,
+    allow_unconfirmed_clips: false,
+    seed_iou_min: 0.14,
+    seed_dist_max: 0.14,
+    ocr_veto_conf: 0.85,
+    ocr_veto_seconds: 2.0,
+  },
+};
+
 const STAGE_META = [
   { key: 'uploading', label: 'Uploading', icon: '⬆️' },
   { key: 'queued', label: 'Queued', icon: '🕒' },
@@ -82,6 +145,35 @@ function refreshHelp(){
   updateRunButtonState();
 }
 
+function applyAdvancedPreset(name){
+  const p = { ...ADVANCED_PRESETS.balanced, ...(ADVANCED_PRESETS[name] || {}) };
+  $('scoreLockThreshold').value = p.score_lock_threshold;
+  $('scoreUnlockThreshold').value = p.score_unlock_threshold;
+  $('lostTimeout').value = p.lost_timeout;
+  $('reacquireWindowSeconds').value = p.reacquire_window_seconds;
+  $('reacquireScoreLockThreshold').value = p.reacquire_score_lock_threshold;
+  $('mergeGap').value = p.gap_merge_seconds;
+  $('lockSeconds').value = p.lock_seconds_after_confirm;
+  $('minTrack').value = p.min_track_seconds;
+  $('minClipSeconds').value = p.min_clip_seconds;
+  $('allowUnconfirmedClips').checked = !!p.allow_unconfirmed_clips;
+  $('allowSeedClips').checked = !!p.allow_seed_clips;
+  $('seedLockSeconds').value = p.seed_lock_seconds;
+  $('seedIouMin').value = p.seed_iou_min;
+  $('seedDistMax').value = p.seed_dist_max;
+  $('seedBonus').value = p.seed_bonus;
+  $('seedWindowS').value = p.seed_window_s;
+  $('ocrDisable').checked = !!p.ocr_disable;
+  $('ocrEveryNFrames').value = p.ocr_every_n_frames;
+  $('ocrMinConf').value = p.ocr_min_conf;
+  $('ocrVetoConf').value = p.ocr_veto_conf;
+  $('ocrVetoSeconds').value = p.ocr_veto_seconds;
+  $('detectStride').value = p.detect_stride;
+  $('yoloImgsz').value = p.yolo_imgsz;
+  $('yoloBatch').value = p.yolo_batch;
+  $('trackerType').value = p.tracker_type;
+}
+
 function applyPreset(){
   const p = CAMERA_DEFAULTS[$('cameraMode').value];
   $('detectStride').value = p.detect_stride;
@@ -90,10 +182,7 @@ function applyPreset(){
   $('mergeGap').value = p.gap_merge_seconds;
   $('lostTimeout').value = p.lost_timeout;
   $('minTrack').value = p.min_track_seconds;
-  $('scoreLockThreshold').value = 0.50;
-  $('scoreUnlockThreshold').value = 0.40;
-  $('reacquireWindowSeconds').value = 4.0;
-  $('allowUnconfirmedClips').checked = false;
+  applyAdvancedPreset('balanced');
   refreshHelp();
 }
 
@@ -188,15 +277,30 @@ function payload(){
     color_tolerance: Number($('colorTolerance').value),
     extend_sec: Number($('extendSec').value),
     detect_stride: Number($('detectStride').value),
+    yolo_imgsz: Number($('yoloImgsz').value),
+    yolo_batch: Number($('yoloBatch').value),
+    tracker_type: $('trackerType').value || 'bytetrack',
     ocr_min_conf: Number($('ocrMinConf').value),
+    ocr_disable: $('ocrDisable').checked,
+    ocr_every_n_frames: Number($('ocrEveryNFrames').value),
+    ocr_veto_conf: Number($('ocrVetoConf').value),
+    ocr_veto_seconds: Number($('ocrVetoSeconds').value),
     lock_seconds_after_confirm: Number($('lockSeconds').value),
     lost_timeout: Number($('lostTimeout').value),
     gap_merge_seconds: Number($('mergeGap').value),
     score_lock_threshold: Number($('scoreLockThreshold').value),
     score_unlock_threshold: Number($('scoreUnlockThreshold').value),
     reacquire_window_seconds: Number($('reacquireWindowSeconds').value),
+    reacquire_score_lock_threshold: Number($('reacquireScoreLockThreshold').value),
     allow_unconfirmed_clips: $('allowUnconfirmedClips').checked,
+    allow_seed_clips: $('allowSeedClips').checked,
     min_track_seconds: Number($('minTrack').value),
+    min_clip_seconds: Number($('minClipSeconds').value),
+    seed_lock_seconds: Number($('seedLockSeconds').value),
+    seed_iou_min: Number($('seedIouMin').value),
+    seed_dist_max: Number($('seedDistMax').value),
+    seed_bonus: Number($('seedBonus').value),
+    seed_window_s: Number($('seedWindowS').value),
     clicks_count: state.clicks.length,
     bench_zone_ratio: Number($('benchZone').value),
     debug_overlay: $('debugOverlay').checked,
@@ -341,9 +445,24 @@ async function loadSetup(){
     setValueIfDefined('scoreLockThreshold', setup.score_lock_threshold);
     setValueIfDefined('scoreUnlockThreshold', setup.score_unlock_threshold);
     setValueIfDefined('reacquireWindowSeconds', setup.reacquire_window_seconds);
+    setValueIfDefined('reacquireScoreLockThreshold', setup.reacquire_score_lock_threshold);
     setValueIfDefined('minTrack', setup.min_track_seconds);
+    setValueIfDefined('minClipSeconds', setup.min_clip_seconds);
+    setValueIfDefined('seedLockSeconds', setup.seed_lock_seconds);
+    setValueIfDefined('seedIouMin', setup.seed_iou_min);
+    setValueIfDefined('seedDistMax', setup.seed_dist_max);
+    setValueIfDefined('seedBonus', setup.seed_bonus);
+    setValueIfDefined('seedWindowS', setup.seed_window_s);
+    setValueIfDefined('ocrEveryNFrames', setup.ocr_every_n_frames);
+    setValueIfDefined('ocrVetoConf', setup.ocr_veto_conf);
+    setValueIfDefined('ocrVetoSeconds', setup.ocr_veto_seconds);
+    setValueIfDefined('yoloImgsz', setup.yolo_imgsz);
+    setValueIfDefined('yoloBatch', setup.yolo_batch);
+    setValueIfDefined('trackerType', setup.tracker_type);
     setValueIfDefined('benchZone', setup.bench_zone_ratio);
     setCheckedIfDefined('allowUnconfirmedClips', setup.allow_unconfirmed_clips);
+    setCheckedIfDefined('allowSeedClips', setup.allow_seed_clips);
+    setCheckedIfDefined('ocrDisable', setup.ocr_disable);
     setCheckedIfDefined('debugOverlay', setup.debug_overlay);
     setCheckedIfDefined('debugTimeline', setup.debug_timeline);
     state.clicks = Array.isArray(setup.clicks) ? setup.clicks : [];
@@ -423,6 +542,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('btnClear').onclick = clearJob;
   $('btnClearClicks').onclick = clearSeedClicks;
   $('btnUndoClick').onclick = undoSeedClick;
+  $('presetBalanced').onclick = () => applyAdvancedPreset('balanced');
+  $('presetMoreClips').onclick = () => applyAdvancedPreset('more_clips');
+  $('presetTrackQuality').onclick = () => applyAdvancedPreset('track_quality');
   $('cameraMode').onchange = applyPreset;
   $('trackingMode').onchange = refreshHelp;
   $('verifyMode').onchange = refreshHelp;

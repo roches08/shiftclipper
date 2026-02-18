@@ -52,9 +52,11 @@ def resolve_device() -> Tuple[str, int | str]:
 
         if torch.cuda.is_available():
             return "cuda:0", 0
-        return "cpu", "cpu"
+        raise RuntimeError("CUDA is required for ShiftClipper tracking, but no CUDA device is available.")
+    except RuntimeError:
+        raise
     except Exception:
-        return "cpu", "cpu"
+        raise RuntimeError("CUDA is required for ShiftClipper tracking, but CUDA runtime is unavailable.")
 
 
 def _as_float(src: Dict[str, Any], key: str, default: float) -> float:
@@ -93,16 +95,16 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     mode_defaults = {
         "clip": {
             "score_lock_threshold": 0.50,
-            "score_unlock_threshold": 0.40,
-            "lost_timeout": 1.5,
-            "reacquire_window_seconds": 4.0,
+            "score_unlock_threshold": 0.33,
+            "lost_timeout": 4.0,
+            "reacquire_window_seconds": 8.0,
             "reacquire_score_lock_threshold": 0.30,
         },
         "shift": {
             "score_lock_threshold": 0.50,
-            "score_unlock_threshold": 0.40,
-            "lost_timeout": 1.5,
-            "reacquire_window_seconds": 4.0,
+            "score_unlock_threshold": 0.33,
+            "lost_timeout": 4.0,
+            "reacquire_window_seconds": 8.0,
             "reacquire_score_lock_threshold": 0.30,
         },
     }[tracking_mode]
@@ -180,8 +182,8 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "ocr_confirm_k": _as_int(src, "ocr_confirm_k", 5),
         "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", False)),
         "allow_seed_clips": bool(src.get("allow_seed_clips", True)),
-        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.995),
-        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 0.5),
+        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.92),
+        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 1.0),
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
         "use_rink_mask": bool(src.get("use_rink_mask", True)),
         "use_bench_mask": bool(src.get("use_bench_mask", True)),

@@ -361,11 +361,44 @@ async def upload_video(job_id: str, request: Request, file: UploadFile = File(..
     return {"ok": True, "video_path": in_path, "proxy_path": proxy_path}
 
 
+def _validate_setup_payload(payload: Dict[str, Any]) -> None:
+    def _check_01(name: str):
+        if name in payload and payload[name] is not None:
+            val = float(payload[name])
+            if not (0.0 <= val <= 1.0):
+                raise HTTPException(status_code=400, detail=f"{name} must be between 0 and 1")
+
+    def _check_non_negative(name: str):
+        if name in payload and payload[name] is not None and float(payload[name]) < 0:
+            raise HTTPException(status_code=400, detail=f"{name} must be >= 0")
+
+    for nm in [
+        "score_lock_threshold", "score_unlock_threshold", "reacquire_score_lock_threshold",
+        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf",
+    ]:
+        _check_01(nm)
+
+    for nm in [
+        "lost_timeout", "reacquire_window_seconds", "gap_merge_seconds", "lock_seconds_after_confirm",
+        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds",
+    ]:
+        _check_non_negative(nm)
+
+    if "detect_stride" in payload and int(payload["detect_stride"]) < 1:
+        raise HTTPException(status_code=400, detail="detect_stride must be >= 1")
+    if "yolo_imgsz" in payload:
+        imgsz = int(payload["yolo_imgsz"])
+        if imgsz < 256 or imgsz > 1280:
+            raise HTTPException(status_code=400, detail="yolo_imgsz must be between 256 and 1280")
+
+
+
 @app.put("/jobs/{job_id}/setup")
 def setup_job(job_id: str, payload: Dict[str, Any]):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
+    _validate_setup_payload(payload or {})
     setup = normalize_setup(payload)
     write_json(jd / "setup.json", setup)
 
