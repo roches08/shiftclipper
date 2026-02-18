@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -20,6 +21,9 @@ try:
     from torchreid import models as torchreid_models
 except Exception:  # pragma: no cover
     torchreid_models = None
+
+
+log = logging.getLogger("worker")
 
 
 def normalize_vector(vec: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -80,6 +84,17 @@ def _extract_state_dict(checkpoint: object) -> object:
     return checkpoint
 
 
+def _strip_prefixes(state_dict: object) -> object:
+    if not isinstance(state_dict, dict):
+        return state_dict
+    if not state_dict:
+        return state_dict
+    keys = list(state_dict.keys())
+    if all(isinstance(k, str) and k.startswith("module.") for k in keys):
+        return {k[len("module."):]: v for k, v in state_dict.items()}
+    return state_dict
+
+
 class OSNetEmbedder:
     def __init__(self, cfg: ReIDConfig):
         if torch is None:
@@ -105,14 +120,34 @@ class OSNetEmbedder:
         weights_path = str(cfg.weights_path or "").strip()
         try:
             if not weights_path:
-                raise RuntimeError("reid_weights_path is required for OSNetEmbedder")
+                raise RuntimeError("Missing ReID weights; set reid_weights_path or enable auto-download")
             local_path = Path(weights_path)
             if not local_path.exists():
-                raise RuntimeError(f"Configured reid_weights_path does not exist: {local_path}")
+                raise RuntimeError("Missing ReID weights; set reid_weights_path or enable auto-download")
             model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
             checkpoint = torch.load(str(local_path), map_location="cpu")
-            state_dict = _extract_state_dict(checkpoint)
-            model.load_state_dict(state_dict, strict=False)
+            state_dict = _strip_prefixes(_extract_state_dict(checkpoint))
+            try:
+                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=True)
+                loaded_keys = len(getattr(state_dict, "keys", lambda: [])()) if isinstance(state_dict, dict) else -1
+                log.info(
+                    "ReID OSNet weights loaded strict=True model=%s keys=%s missing=%d unexpected=%d",
+                    cfg.model_name,
+                    loaded_keys,
+                    len(missing_keys),
+                    len(unexpected_keys),
+                )
+            except RuntimeError as strict_exc:
+                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                loaded_keys = len(getattr(state_dict, "keys", lambda: [])()) if isinstance(state_dict, dict) else -1
+                log.warning(
+                    "ReID OSNet strict=True load failed (%s); continued with strict=False model=%s keys=%s missing=%d unexpected=%d",
+                    strict_exc,
+                    cfg.model_name,
+                    loaded_keys,
+                    len(missing_keys),
+                    len(unexpected_keys),
+                )
             return model
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to load OSNet model {cfg.model_name}: {exc}") from exc
