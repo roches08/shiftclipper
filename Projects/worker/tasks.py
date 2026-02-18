@@ -87,14 +87,14 @@ class TrackingParams:
     ocr_min_conf: float = 0.22
     lock_seconds_after_confirm: float = 4.0
     gap_merge_seconds: float = 1.5
-    lost_timeout: float = 1.5
-    reacquire_window_seconds: float = 4.0
-    reacquire_score_lock_threshold: float = 0.40
+    lost_timeout: float = 4.0
+    reacquire_window_seconds: float = 8.0
+    reacquire_score_lock_threshold: float = 0.30
     min_track_seconds: float = 0.75
     min_clip_seconds: float = 1.0
     post_roll: float = 2.0
-    score_lock_threshold: float = 0.50
-    score_unlock_threshold: float = 0.40
+    score_lock_threshold: float = 0.55
+    score_unlock_threshold: float = 0.33
     seed_lock_seconds: float = 8.0
     seed_iou_min: float = 0.12
     seed_dist_max: float = 0.16
@@ -107,8 +107,8 @@ class TrackingParams:
     color_tolerance: int = 26
     ocr_confirm_m: int = 2
     ocr_confirm_k: int = 5
-    ocr_veto_conf: float = 0.85
-    ocr_veto_seconds: float = 2.0
+    ocr_veto_conf: float = 0.92
+    ocr_veto_seconds: float = 1.0
     bench_zone_ratio: float = 0.8
     closeup_bbox_area_ratio: float = 0.18
     allow_unconfirmed_clips: bool = False
@@ -377,6 +377,82 @@ def _run(cmd: List[str]) -> None:
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "").strip()
         raise FFmpegError(cmd, p.returncode, err)
+
+
+def video_probe(video_path: str) -> Dict[str, Any]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        video_path,
+    ]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout or "").strip()
+        raise RuntimeError(f"ffprobe failed: {err}")
+
+    payload = json.loads(p.stdout or "{}")
+    streams = payload.get("streams") or []
+    video_stream = next((st for st in streams if st.get("codec_type") == "video"), {})
+
+    def _parse_rate(val: str) -> float:
+        txt = str(val or "0/1")
+        if "/" in txt:
+            a, b = txt.split("/", 1)
+            num = float(a or 0.0)
+            den = float(b or 1.0)
+            return num / den if den else 0.0
+        return float(txt or 0.0)
+
+    avg_rate_raw = str(video_stream.get("avg_frame_rate") or "0/1")
+    real_rate_raw = str(video_stream.get("r_frame_rate") or "0/1")
+    avg_rate = _parse_rate(avg_rate_raw)
+    real_rate = _parse_rate(real_rate_raw)
+
+    fmt = payload.get("format") or {}
+    duration = video_stream.get("duration") or fmt.get("duration")
+    bit_rate = video_stream.get("bit_rate") or fmt.get("bit_rate")
+
+    return {
+        "width": int(video_stream.get("width") or 0),
+        "height": int(video_stream.get("height") or 0),
+        "fps": avg_rate if avg_rate > 0 else real_rate,
+        "codec": video_stream.get("codec_name"),
+        "bit_rate": int(bit_rate) if bit_rate not in (None, "") else None,
+        "duration": float(duration) if duration not in (None, "") else None,
+        "is_vfr": abs(avg_rate - real_rate) > 0.01,
+        "avg_frame_rate": avg_rate_raw,
+        "r_frame_rate": real_rate_raw,
+    }
+
+
+def normalize_video_input(in_path: str, out_path: str, probe: Dict[str, Any]) -> None:
+    fps = float(probe.get("fps") or 30.0)
+    fps = 30.0 if fps <= 0 else fps
+    width = int(probe.get("width") or 0)
+    height = int(probe.get("height") or 0)
+
+    vf_parts = [f"fps={fps:.6f}"]
+    if max(width, height) > 1280:
+        if width >= height:
+            vf_parts.append("scale=1280:-2")
+        else:
+            vf_parts.append("scale=-2:1280")
+
+    _run([
+        "ffmpeg", "-y", "-i", in_path,
+        "-vf", ",".join(vf_parts),
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        out_path,
+    ])
 
 
 def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
@@ -1156,6 +1232,19 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
         verify_mode = bool(setup.get("verify_mode", False))
         tracking_mode = str(setup.get("tracking_mode") or "clip").lower()
+
+        device, _ = resolve_device()
+        cuda_available = bool(torch and torch.cuda.is_available())
+        gpu_name = torch.cuda.get_device_name(0) if cuda_available else "-"
+        log.info(
+            "job_id=%s gpu_check cuda_available=%s gpu_name=%s chosen_device=%s",
+            job_id,
+            cuda_available,
+            gpu_name,
+            device,
+            extra={"job_id": job_id, "stage": "queued"},
+        )
+
         write_status("processing", "queued", 10, "Queued for processing.")
 
         if verify_mode:
@@ -1182,8 +1271,36 @@ def process_job(job_id: str) -> Dict[str, Any]:
             extra = {"perf": perf} if perf else {}
             write_status("processing", "tracking", pct, f"Tracking in progress ({t:.1f}s)", **extra)
 
+        probe = video_probe(in_path)
+        probe_path = job_dir / "probe.json"
+        probe_path.write_text(json.dumps(probe, indent=2))
+
+        normalize_video = bool(setup.get("normalize_video", False))
+        tracking_input_path = in_path
+        if normalize_video:
+            tracking_input_path = str(job_dir / "normalized.mp4")
+            log.info(
+                "job_id=%s normalization enabled source=%s target=%s",
+                job_id,
+                in_path,
+                tracking_input_path,
+                extra={"job_id": job_id, "stage": "tracking"},
+            )
+            write_status("processing", "preflight", 11, "Normalizing video")
+            normalize_video_input(in_path, tracking_input_path, probe)
+        else:
+            log.info(
+                "job_id=%s normalization disabled source=%s",
+                job_id,
+                in_path,
+                extra={"job_id": job_id, "stage": "tracking"},
+            )
+
+        meta["transcode_used"] = normalize_video
+        meta_path.write_text(json.dumps(meta, indent=2))
+
         write_status("processing", "tracking", 12, "Tracking in progress")
-        data = track_presence(in_path, setup, heartbeat=hb, cancel_check=cancel_check)
+        data = track_presence(tracking_input_path, setup, heartbeat=hb, cancel_check=cancel_check)
 
         clips_dir = job_dir / "clips"
         clips_dir.mkdir(exist_ok=True)
@@ -1194,7 +1311,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
         segment_count = max(1, len(data["segments"]))
         for i, (a, b, _) in enumerate(data["segments"], start=1):
             outp = clips_dir / f"clip_{i:03d}.mp4"
-            cut_clip(in_path, a, b + float(setup.get("post_roll", setup.get("extend_sec", 2.0))), str(outp))
+            cut_clip(tracking_input_path, a, b + float(setup.get("post_roll", setup.get("extend_sec", 2.0))), str(outp))
             clip_paths.append(str(outp))
             clips.append({"start": a, "end": b, "path": str(outp), "url": f"/data/jobs/{job_id}/clips/{outp.name}"})
             clip_progress = 70 + int((i / segment_count) * 20)
@@ -1227,7 +1344,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
         if bool(setup.get("debug_timeline", True)):
             (job_dir / "debug_timeline.json").write_text(json.dumps(data["timeline"], indent=2))
-            (job_dir / "debug.json").write_text(json.dumps(data["timeline"], indent=2))
+            (job_dir / "debug.json").write_text(json.dumps({"setup": setup, "timeline": data["timeline"]}, indent=2))
 
         hard_events = {"ocr_veto", "swap_suspicion", "reacquire", "lost"}
         hard_packets = [e for e in data.get("timeline", []) if e.get("event") in hard_events]
@@ -1304,6 +1421,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "progress": 100,
             "message": terminal_message,
             "updated_at": time.time(),
+            "transcode_used": bool(meta.get("transcode_used", False)),
         })
         meta_path.write_text(json.dumps(meta, indent=2))
         (job_dir / "results.json").write_text(json.dumps(meta, indent=2))
@@ -1324,18 +1442,20 @@ def process_job(job_id: str) -> Dict[str, Any]:
             raise
         if stage["stalled"] or "stalled" in str(e).lower():
             err = f"Stalled in {stage['name']}"
+        is_cuda_error = "CUDA not available but GPU required" in str(e)
         meta.update({
-            "status": "failed",
-            "stage": "failed",
+            "status": "error" if is_cuda_error else "failed",
+            "stage": "error" if is_cuda_error else "failed",
             "progress": 100,
             "message": err,
             "error": ffmpeg_stderr or traceback.format_exc(),
             "updated_at": time.time(),
+            "transcode_used": bool(meta.get("transcode_used", False)),
         })
         meta_path.write_text(json.dumps(meta, indent=2))
         (job_dir / "results.json").write_text(json.dumps(meta, indent=2))
         if cur:
-            cur.meta = {**(cur.meta or {}), "stage": "failed", "progress": 100, "message": err}
+            cur.meta = {**(cur.meta or {}), "stage": ("error" if is_cuda_error else "failed"), "progress": 100, "message": err}
             cur.save_meta()
         log.error("job_id=%s failed stage=%s error=%s", job_id, stage['name'], err)
         raise
