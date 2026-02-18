@@ -24,67 +24,7 @@ const CAMERA_DEFAULTS = {
   tactical: { detect_stride: 4, yolo_imgsz: 416, ocr_every_n: 20, ocr_min_conf: 0.30, lock_seconds_after_confirm: 5.0, gap_merge_seconds: 1.5, lost_timeout: 1.8, min_track_seconds: 0.75 },
 };
 
-const ADVANCED_PRESETS = {
-  balanced: {
-    score_lock_threshold: 0.55,
-    score_unlock_threshold: 0.33,
-    lost_timeout: 4.0,
-    reacquire_window_seconds: 8.0,
-    reacquire_score_lock_threshold: 0.4,
-    gap_merge_seconds: 2.5,
-    lock_seconds_after_confirm: 4,
-    min_track_seconds: 0.75,
-    min_clip_seconds: 1,
-    allow_unconfirmed_clips: false,
-    allow_seed_clips: true,
-    seed_lock_seconds: 8,
-    seed_iou_min: 0.12,
-    seed_dist_max: 0.16,
-    seed_bonus: 0.8,
-    seed_window_s: 3,
-    ocr_disable: false,
-    ocr_every_n_frames: 12,
-    ocr_min_conf: 0.2,
-    ocr_veto_conf: 0.92,
-    ocr_veto_seconds: 1.0,
-    detect_stride: 2,
-    yolo_imgsz: 512,
-    yolo_batch: 4,
-    tracker_type: 'bytetrack',
-  },
-  more_clips: {
-    score_lock_threshold: 0.45,
-    score_unlock_threshold: 0.20,
-    lost_timeout: 4.0,
-    reacquire_window_seconds: 10,
-    reacquire_score_lock_threshold: 0.30,
-    gap_merge_seconds: 4.0,
-    min_track_seconds: 0.35,
-    min_clip_seconds: 0.75,
-    allow_unconfirmed_clips: true,
-    allow_seed_clips: true,
-    seed_lock_seconds: 12,
-    seed_iou_min: 0.08,
-    seed_dist_max: 0.22,
-    ocr_veto_conf: 0.92,
-    ocr_veto_seconds: 1.0,
-  },
-  track_quality: {
-    score_lock_threshold: 0.60,
-    score_unlock_threshold: 0.40,
-    lost_timeout: 1.5,
-    reacquire_window_seconds: 4,
-    reacquire_score_lock_threshold: 0.45,
-    gap_merge_seconds: 2.0,
-    min_track_seconds: 0.90,
-    min_clip_seconds: 1.25,
-    allow_unconfirmed_clips: false,
-    seed_iou_min: 0.14,
-    seed_dist_max: 0.14,
-    ocr_veto_conf: 0.85,
-    ocr_veto_seconds: 2.0,
-  },
-};
+const { getAdvancedPreset } = window.ShiftClipperPresets;
 
 const STAGE_META = [
   { key: 'uploading', label: 'Uploading', icon: '⬆️' },
@@ -146,7 +86,7 @@ function refreshHelp(){
 }
 
 function applyAdvancedPreset(name){
-  const p = { ...ADVANCED_PRESETS.balanced, ...(ADVANCED_PRESETS[name] || {}) };
+  const p = getAdvancedPreset(name);
   $('scoreLockThreshold').value = p.score_lock_threshold;
   $('scoreUnlockThreshold').value = p.score_unlock_threshold;
   $('lostTimeout').value = p.lost_timeout;
@@ -172,6 +112,16 @@ function applyAdvancedPreset(name){
   $('yoloImgsz').value = p.yolo_imgsz;
   $('yoloBatch').value = p.yolo_batch;
   $('trackerType').value = p.tracker_type;
+  $('reidEnable').checked = !!p.reid_enable;
+  $('reidModel').value = p.reid_model;
+  $('reidEveryNFrames').value = p.reid_every_n_frames;
+  $('reidWeight').value = p.reid_weight;
+  $('reidMinSim').value = p.reid_min_sim;
+  $('reidCropExpand').value = p.reid_crop_expand;
+  $('reidBatch').value = p.reid_batch;
+  $('reidDevice').value = p.reid_device;
+  $('swapGuardSeconds').value = p.swap_guard_seconds;
+  $('swapGuardBonus').value = p.swap_guard_bonus;
 }
 
 function applyPreset(){
@@ -264,6 +214,8 @@ async function upload(){
 }
 
 function payload(){
+  const toNumber = (id) => parseFloat($(id).value);
+  const toInt = (id) => parseInt($(id).value, 10);
   return {
     camera_mode: $('cameraMode').value,
     tracking_mode: $('trackingMode').value,
@@ -274,50 +226,53 @@ function payload(){
     jersey_color_hex: $('jerseyColor').value,
     opponent_color: $('opponentColor').value,
     jersey_color_rgb: (() => { const v=$('jerseyColor').value.replace("#",""); return { r: parseInt(v.slice(0,2),16), g: parseInt(v.slice(2,4),16), b: parseInt(v.slice(4,6),16) }; })(),
-    color_tolerance: Number($('colorTolerance').value),
-    extend_sec: Number($('extendSec').value),
-    detect_stride: Number($('detectStride').value),
-    yolo_imgsz: Number($('yoloImgsz').value),
-    yolo_batch: Number($('yoloBatch').value),
+    color_tolerance: toInt('colorTolerance'),
+    extend_sec: toNumber('extendSec'),
+    detect_stride: toInt('detectStride'),
+    yolo_imgsz: toInt('yoloImgsz'),
+    yolo_batch: toInt('yoloBatch'),
     tracker_type: $('trackerType').value || 'bytetrack',
-    ocr_min_conf: Number($('ocrMinConf').value),
+    ocr_min_conf: toNumber('ocrMinConf'),
     ocr_disable: $('ocrDisable').checked,
-    ocr_every_n_frames: Number($('ocrEveryNFrames').value),
-    ocr_veto_conf: Number($('ocrVetoConf').value),
-    ocr_veto_seconds: Number($('ocrVetoSeconds').value),
-    lock_seconds_after_confirm: Number($('lockSeconds').value),
-    lost_timeout: Number($('lostTimeout').value),
-    gap_merge_seconds: Number($('mergeGap').value),
-    score_lock_threshold: Number($('scoreLockThreshold').value),
-    score_unlock_threshold: Number($('scoreUnlockThreshold').value),
-    reacquire_window_seconds: Number($('reacquireWindowSeconds').value),
-    reacquire_score_lock_threshold: Number($('reacquireScoreLockThreshold').value),
+    ocr_every_n_frames: toInt('ocrEveryNFrames'),
+    ocr_veto_conf: toNumber('ocrVetoConf'),
+    ocr_veto_seconds: toNumber('ocrVetoSeconds'),
+    lock_seconds_after_confirm: toNumber('lockSeconds'),
+    lost_timeout: toNumber('lostTimeout'),
+    gap_merge_seconds: toNumber('mergeGap'),
+    score_lock_threshold: toNumber('scoreLockThreshold'),
+    score_unlock_threshold: toNumber('scoreUnlockThreshold'),
+    reacquire_window_seconds: toNumber('reacquireWindowSeconds'),
+    reacquire_score_lock_threshold: toNumber('reacquireScoreLockThreshold'),
     allow_unconfirmed_clips: $('allowUnconfirmedClips').checked,
     allow_seed_clips: $('allowSeedClips').checked,
-    min_track_seconds: Number($('minTrack').value),
-    min_clip_seconds: Number($('minClipSeconds').value),
-    seed_lock_seconds: Number($('seedLockSeconds').value),
-    seed_iou_min: Number($('seedIouMin').value),
-    seed_dist_max: Number($('seedDistMax').value),
-    seed_bonus: Number($('seedBonus').value),
-    seed_window_s: Number($('seedWindowS').value),
+    min_track_seconds: toNumber('minTrack'),
+    min_clip_seconds: toNumber('minClipSeconds'),
+    seed_lock_seconds: toNumber('seedLockSeconds'),
+    seed_iou_min: toNumber('seedIouMin'),
+    seed_dist_max: toNumber('seedDistMax'),
+    seed_bonus: toNumber('seedBonus'),
+    seed_window_s: toNumber('seedWindowS'),
     clicks_count: state.clicks.length,
-    bench_zone_ratio: Number($('benchZone').value),
+    bench_zone_ratio: toNumber('benchZone'),
     debug_overlay: $('debugOverlay').checked,
     debug_timeline: $('debugTimeline').checked,
     transcode_enabled: $('transcodeEnabled').checked,
-    transcode_scale_max: Number($('transcodeScaleMax').value),
-    transcode_fps: $('transcodeFps').value ? Number($('transcodeFps').value) : null,
+    transcode_scale_max: toInt('transcodeScaleMax'),
+    transcode_fps: $('transcodeFps').value ? toInt('transcodeFps') : null,
     transcode_deinterlace: $('transcodeDeinterlace').checked,
     transcode_denoise: $('transcodeDenoise').checked,
-    reid_enable: true,
-    reid_model: 'osnet_x0_25',
-    reid_every_n_frames: 5,
-    reid_weight: 0.4,
-    reid_min_sim: 0.45,
-    reid_crop_expand: 0.1,
-    reid_batch: 16,
-    reid_device: 'cuda:0',
+    reid_enable: $('reidEnable').checked,
+    use_reid: $('reidEnable').checked,
+    reid_model: $('reidModel').value,
+    reid_every_n_frames: toInt('reidEveryNFrames'),
+    reid_weight: toNumber('reidWeight'),
+    reid_min_sim: toNumber('reidMinSim'),
+    reid_crop_expand: toNumber('reidCropExpand'),
+    reid_batch: toInt('reidBatch'),
+    reid_device: $('reidDevice').value,
+    swap_guard_seconds: toNumber('swapGuardSeconds'),
+    swap_guard_bonus: toNumber('swapGuardBonus'),
     clicks: state.clicks,
   };
 }
@@ -472,6 +427,16 @@ async function loadSetup(){
     setValueIfDefined('yoloImgsz', setup.yolo_imgsz);
     setValueIfDefined('yoloBatch', setup.yolo_batch);
     setValueIfDefined('trackerType', setup.tracker_type);
+    setCheckedIfDefined('reidEnable', setup.reid_enable ?? setup.use_reid);
+    setValueIfDefined('reidModel', setup.reid_model);
+    setValueIfDefined('reidEveryNFrames', setup.reid_every_n_frames);
+    setValueIfDefined('reidWeight', setup.reid_weight);
+    setValueIfDefined('reidMinSim', setup.reid_min_sim);
+    setValueIfDefined('reidCropExpand', setup.reid_crop_expand);
+    setValueIfDefined('reidBatch', setup.reid_batch);
+    setValueIfDefined('reidDevice', setup.reid_device);
+    setValueIfDefined('swapGuardSeconds', setup.swap_guard_seconds);
+    setValueIfDefined('swapGuardBonus', setup.swap_guard_bonus);
     setValueIfDefined('benchZone', setup.bench_zone_ratio);
     setCheckedIfDefined('allowUnconfirmedClips', setup.allow_unconfirmed_clips);
     setCheckedIfDefined('allowSeedClips', setup.allow_seed_clips);
