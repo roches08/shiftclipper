@@ -92,18 +92,18 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
 
     mode_defaults = {
         "clip": {
-            "score_lock_threshold": 0.55,
-            "score_unlock_threshold": 0.35,
-            "lost_timeout": 1.5,
-            "reacquire_window_seconds": 4.0,
-            "reacquire_score_lock_threshold": 0.40,
+            "score_lock_threshold": 0.45,
+            "score_unlock_threshold": 0.25,
+            "lost_timeout": 3.0,
+            "reacquire_window_seconds": 10.0,
+            "reacquire_score_lock_threshold": 0.30,
         },
         "shift": {
             "score_lock_threshold": 0.45,
-            "score_unlock_threshold": 0.30,
-            "lost_timeout": 2.5,
-            "reacquire_window_seconds": 8.0,
-            "reacquire_score_lock_threshold": 0.33,
+            "score_unlock_threshold": 0.25,
+            "lost_timeout": 3.0,
+            "reacquire_window_seconds": 10.0,
+            "reacquire_score_lock_threshold": 0.30,
         },
     }[tracking_mode]
 
@@ -154,7 +154,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "tracker_type": tracker_type,
         "ocr_min_conf": _as_float(src, "ocr_min_conf", preset["ocr_min_conf"]),
         "lock_seconds_after_confirm": _as_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"]),
-        "gap_merge_seconds": _as_float(src, "gap_merge_seconds", preset["gap_merge_seconds"]),
+        "gap_merge_seconds": _as_float(src, "gap_merge_seconds", 4.0),
         "lost_timeout": _as_float(src, "lost_timeout", mode_defaults["lost_timeout"]),
         "reacquire_window_seconds": _as_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"]),
         "reacquire_score_lock_threshold": _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"]),
@@ -178,10 +178,10 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "debug_timeline": bool(src.get("debug_timeline", True)),
         "ocr_confirm_m": _as_int(src, "ocr_confirm_m", 2),
         "ocr_confirm_k": _as_int(src, "ocr_confirm_k", 5),
-        "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", False)),
+        "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", True)),
         "allow_seed_clips": bool(src.get("allow_seed_clips", True)),
-        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.85),
-        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 2.0),
+        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.995),
+        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 0.5),
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
     }
     return setup
