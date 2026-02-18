@@ -25,6 +25,15 @@ fi
 PROJECTS_DIR="$REPO_DIR/Projects"
 cd "$PROJECTS_DIR"
 
+echo "Checking UI build output..."
+ls -la "$PROJECTS_DIR/static" || true
+if [ ! -f "$PROJECTS_DIR/static/app.js" ]; then
+  echo "ERROR: static/app.js missing on disk at $PROJECTS_DIR/static/app.js"
+  echo "Static dir contents:"
+  find "$PROJECTS_DIR/static" -maxdepth 2 -type f -print 2>/dev/null || true
+  exit 1
+fi
+
 REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
 REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
 REID_WEIGHTS_TMP="${REID_WEIGHTS_DEST}.tmp"
@@ -119,12 +128,21 @@ sleep 1
 nohup "$VENV_DIR/bin/uvicorn" api.main:app --host 0.0.0.0 --port 8000 --log-level info > "$API_LOG" 2>&1 &
 API_PID=$!
 
+API_UP=0
 for _ in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:8000/api/health" >/dev/null 2>&1; then
+    API_UP=1
     break
   fi
   sleep 1
 done
+
+if [ "$API_UP" -ne 1 ]; then
+  echo "ERROR: API never became healthy"
+  echo "--- API log tail ---"
+  tail -n 250 "$API_LOG" || true
+  exit 1
+fi
 
 check_api() {
   local url="$1"
@@ -133,8 +151,10 @@ check_api() {
   code="$(curl -sS -o /dev/null -w "%{http_code}" "$url" || true)"
   if [[ "$code" != "$expect" ]]; then
     echo "ERROR: API check failed for $url (expected $expect, got ${code:-n/a})"
+    echo "--- curl -I ---"
+    curl -sS -I "$url" || true
     echo "--- API log tail ---"
-    tail -n 200 "$API_LOG" || true
+    tail -n 250 "$API_LOG" || true
     exit 1
   fi
 }
