@@ -25,14 +25,73 @@ fi
 PROJECTS_DIR="$REPO_DIR/Projects"
 cd "$PROJECTS_DIR"
 
-echo "Checking UI build output..."
-ls -la "$PROJECTS_DIR/static" || true
-if [ ! -f "$PROJECTS_DIR/static/app.js" ]; then
-  echo "ERROR: static/app.js missing on disk at $PROJECTS_DIR/static/app.js"
-  echo "Static dir contents:"
-  find "$PROJECTS_DIR/static" -maxdepth 2 -type f -print 2>/dev/null || true
-  exit 1
-fi
+ensure_ui_static() {
+  local static_js="$PROJECTS_DIR/static/app.js"
+
+  if [ -f "$static_js" ]; then
+    echo "UI static already present: $static_js"
+    return 0
+  fi
+
+  echo "UI static missing; building UI..."
+
+  apt-get update -y
+  apt-get install -y nodejs npm
+
+  local pkg=""
+  for p in "$PROJECTS_DIR/ui/package.json" "$PROJECTS_DIR/web/package.json" "$PROJECTS_DIR/frontend/package.json"; do
+    if [ -f "$p" ]; then
+      pkg="$p"
+      break
+    fi
+  done
+
+  if [ -z "$pkg" ]; then
+    pkg="$(find "$PROJECTS_DIR" -maxdepth 4 -name package.json | head -n 1 || true)"
+  fi
+
+  if [ -z "$pkg" ]; then
+    echo "ERROR: package.json not found; cannot build UI"
+    return 1
+  fi
+
+  local ui_dir
+  ui_dir="$(dirname "$pkg")"
+  echo "Building UI in $ui_dir"
+
+  pushd "$ui_dir" >/dev/null
+  if [ -f package-lock.json ]; then
+    npm ci
+  else
+    npm install
+  fi
+  npm run build
+  popd >/dev/null
+
+  mkdir -p "$PROJECTS_DIR/static"
+  if [ -f "$ui_dir/dist/app.js" ]; then
+    cp -r "$ui_dir/dist/"* "$PROJECTS_DIR/static/"
+  elif [ -f "$ui_dir/build/app.js" ]; then
+    cp -r "$ui_dir/build/"* "$PROJECTS_DIR/static/"
+  else
+    local dist_dir
+    dist_dir="$(find "$ui_dir" -maxdepth 2 -type d -name dist | head -n 1 || true)"
+    if [ -n "$dist_dir" ]; then
+      cp -r "$dist_dir/"* "$PROJECTS_DIR/static/"
+    fi
+  fi
+
+  if [ ! -f "$static_js" ]; then
+    echo "ERROR: UI build completed but $static_js still missing."
+    echo "Static dir contents:"
+    ls -lah "$PROJECTS_DIR/static" || true
+    return 1
+  fi
+
+  echo "UI static ready: $static_js"
+}
+
+ensure_ui_static
 
 REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
 REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
