@@ -9,7 +9,7 @@ from pathlib import Path
 
 log = logging.getLogger("worker")
 
-_MIN_WEIGHTS_BYTES = 1 * 1024 * 1024
+_MIN_WEIGHTS_BYTES = 10 * 1024 * 1024
 _MAX_RETRIES = 3
 
 
@@ -63,7 +63,8 @@ def ensure_reid_weights(weights_path: str, weights_url: str, timeout_sec: float 
     if not url:
         raise RuntimeError("reid_weights_url is required")
 
-    if target.exists() and target.stat().st_size > _MIN_WEIGHTS_BYTES:
+    if target.exists():
+        _validate_weights_file(target)
         return target
 
     target.parent.mkdir(parents=True, exist_ok=True)

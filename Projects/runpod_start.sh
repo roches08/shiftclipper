@@ -25,6 +25,12 @@ fi
 PROJECTS_DIR="$REPO_DIR/Projects"
 cd "$PROJECTS_DIR"
 
+REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
+REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
+REID_WEIGHTS_TMP="${REID_WEIGHTS_DEST}.tmp"
+REID_WEIGHTS_URL="https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+REID_MIN_BYTES=$((10 * 1024 * 1024))
+
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 mkdir -p "$JOBS_DIR"
 
@@ -63,6 +69,21 @@ if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq;
   tail -n 120 "$API_LOG" || true
   tail -n 120 "$WORKER_LOG" || true
   exit 1
+fi
+
+mkdir -p "$REID_WEIGHTS_DIR"
+if [ -s "$REID_WEIGHTS_DEST" ] && [ "$(stat -c%s "$REID_WEIGHTS_DEST")" -gt "$REID_MIN_BYTES" ]; then
+  echo "ReID weights already present at $REID_WEIGHTS_DEST"
+else
+  echo "Bootstrapping ReID weights to $REID_WEIGHTS_DEST"
+  rm -f "$REID_WEIGHTS_TMP"
+  curl -L --fail --retry 3 --retry-delay 2 "$REID_WEIGHTS_URL" -o "$REID_WEIGHTS_TMP"
+  if [ ! -s "$REID_WEIGHTS_TMP" ] || [ "$(stat -c%s "$REID_WEIGHTS_TMP")" -le "$REID_MIN_BYTES" ]; then
+    echo "ERROR: ReID weights download failed validation for $REID_WEIGHTS_URL"
+    rm -f "$REID_WEIGHTS_TMP"
+    exit 1
+  fi
+  mv "$REID_WEIGHTS_TMP" "$REID_WEIGHTS_DEST"
 fi
 
 if ! "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
