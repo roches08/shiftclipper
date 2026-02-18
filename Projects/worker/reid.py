@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover
 
 
 log = logging.getLogger("worker")
+_MAX_MISSING_KEYS = 50
 
 
 def normalize_vector(vec: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -89,10 +90,13 @@ def _strip_prefixes(state_dict: object) -> object:
         return state_dict
     if not state_dict:
         return state_dict
-    keys = list(state_dict.keys())
-    if all(isinstance(k, str) and k.startswith("module.") for k in keys):
-        return {k[len("module."):]: v for k, v in state_dict.items()}
-    return state_dict
+    out = {}
+    for key, value in state_dict.items():
+        if isinstance(key, str) and key.startswith("module."):
+            out[key[len("module."):]] = value
+        else:
+            out[key] = value
+    return out
 
 
 class OSNetEmbedder:
@@ -120,15 +124,17 @@ class OSNetEmbedder:
         weights_path = str(cfg.weights_path or "").strip()
         try:
             if not weights_path:
-                raise RuntimeError("Missing ReID weights; set reid_weights_path or enable auto-download")
+                raise RuntimeError("Missing ReID weights; set reid_weights_path")
             local_path = Path(weights_path)
             if not local_path.exists():
-                raise RuntimeError("Missing ReID weights; set reid_weights_path or enable auto-download")
+                raise RuntimeError(f"Missing ReID weights at {local_path}")
             model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
             checkpoint = torch.load(str(local_path), map_location="cpu")
             state_dict = _strip_prefixes(_extract_state_dict(checkpoint))
             try:
-                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=True)
+                strict_result = model.load_state_dict(state_dict, strict=True)
+                missing_keys = list(getattr(strict_result, "missing_keys", []) or [])
+                unexpected_keys = list(getattr(strict_result, "unexpected_keys", []) or [])
                 loaded_keys = len(getattr(state_dict, "keys", lambda: [])()) if isinstance(state_dict, dict) else -1
                 log.info(
                     "ReID OSNet weights loaded strict=True model=%s keys=%s missing=%d unexpected=%d",
@@ -139,15 +145,24 @@ class OSNetEmbedder:
                 )
             except RuntimeError as strict_exc:
                 missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                missing_keys = list(missing_keys)
+                unexpected_keys = list(unexpected_keys)
                 loaded_keys = len(getattr(state_dict, "keys", lambda: [])()) if isinstance(state_dict, dict) else -1
                 log.warning(
-                    "ReID OSNet strict=True load failed (%s); continued with strict=False model=%s keys=%s missing=%d unexpected=%d",
+                    "ReID OSNet strict=True load failed (%s); continued with strict=False model=%s keys=%s missing=%d unexpected=%d missing_keys=%s unexpected_keys=%s",
                     strict_exc,
                     cfg.model_name,
                     loaded_keys,
                     len(missing_keys),
                     len(unexpected_keys),
+                    missing_keys,
+                    unexpected_keys,
                 )
+                if len(missing_keys) > _MAX_MISSING_KEYS:
+                    raise RuntimeError(
+                        f"too many missing keys; wrong checkpoint/model mismatch (missing={len(missing_keys)} threshold={_MAX_MISSING_KEYS})"
+                    ) from strict_exc
+            log.info("timeline event=reid_ready model=%s weights_path=%s", cfg.model_name, str(local_path))
             return model
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to load OSNet model {cfg.model_name}: {exc}") from exc
