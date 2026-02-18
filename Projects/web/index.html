@@ -103,6 +103,16 @@
       <label>YOLO imgsz</label><input id="yoloImgsz" type="number" value="512" min="256" max="1280" />
       <label>YOLO batch</label><input id="yoloBatch" type="number" value="4" min="1" />
       <label>Tracker type</label><input id="trackerType" type="text" value="bytetrack" />
+      <label>ReID enabled</label><input id="reidEnable" type="checkbox" checked />
+      <label>ReID model</label><input id="reidModel" type="text" value="osnet_x0_25" />
+      <label>ReID every n frames</label><input id="reidEveryNFrames" type="number" step="1" value="5" min="1" />
+      <label>ReID weight</label><input id="reidWeight" type="number" step="0.01" value="0.45" min="0" max="1" />
+      <label>ReID min similarity</label><input id="reidMinSim" type="number" step="0.01" value="0.50" min="0" max="1" />
+      <label>ReID crop expand</label><input id="reidCropExpand" type="number" step="0.01" value="0.15" min="0" max="1" />
+      <label>ReID batch</label><input id="reidBatch" type="number" step="1" value="16" min="1" />
+      <label>ReID device</label><input id="reidDevice" type="text" value="cuda:0" />
+      <label>Swap guard seconds</label><input id="swapGuardSeconds" type="number" step="0.1" value="2.5" min="0" />
+      <label>Swap guard bonus</label><input id="swapGuardBonus" type="number" step="0.01" value="0.10" min="0" />
       <label>Transcode for tracking (recommended for messy footage)</label><input id="transcodeEnabled" type="checkbox" />
       <label>Max transcode resolution</label><input id="transcodeScaleMax" type="number" min="360" step="2" value="1080" />
       <label>Force transcode FPS (optional)</label><input id="transcodeFps" type="number" min="1" step="1" placeholder="keep source" />
@@ -137,6 +147,7 @@
 </div>
 <div class="card"><h3>Status</h3><pre id="out">{}</pre></div>
 <div class="card"><h3>Results</h3><div id="resultsMessage">—</div><div id="artifacts"></div><pre id="clips">—</pre></div>
+<script src="/static/presets.js" defer></script>
 <script src="/static/app.js" defer></script>
 </body>
 </html>
