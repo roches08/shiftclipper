@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -68,6 +69,15 @@ class ReIDConfig:
     device: str = "cuda:0"
     batch_size: int = 16
     use_fp16: bool = True
+    weights_path: str = ""
+
+
+def _extract_state_dict(checkpoint: object) -> object:
+    if isinstance(checkpoint, dict):
+        for key in ("state_dict", "model", "model_state_dict"):
+            if key in checkpoint and isinstance(checkpoint[key], (dict,)):
+                return checkpoint[key]
+    return checkpoint
 
 
 class OSNetEmbedder:
@@ -79,13 +89,9 @@ class OSNetEmbedder:
         self.cfg = cfg
         if cfg.model_name not in {"osnet_x0_25", "osnet_x1_0"}:
             raise RuntimeError(f"Unsupported reid_model={cfg.model_name}")
-        try:
-            if torchreid_models is not None:
-                self.model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=True, use_gpu=True)
-            else:
-                self.model = torch.hub.load("KaiyangZhou/deep-person-reid", cfg.model_name, pretrained=True)
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(f"Failed to load OSNet model {cfg.model_name}: {exc}") from exc
+        if torchreid_models is None:
+            raise RuntimeError("torchreid is required for OSNet ReID model loading")
+        self.model = self._build_model(cfg)
         self.device = torch.device(cfg.device)
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -93,6 +99,23 @@ class OSNetEmbedder:
         self.input_hw = (256, 128)
         self.mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32, device=self.device).view(1, 3, 1, 1)
         self.std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32, device=self.device).view(1, 3, 1, 1)
+
+    def _build_model(self, cfg: ReIDConfig):
+        use_gpu = str(cfg.device).startswith("cuda")
+        weights_path = str(cfg.weights_path or "").strip()
+        try:
+            if weights_path:
+                local_path = Path(weights_path)
+                if not local_path.exists():
+                    raise RuntimeError(f"Configured reid_weights_path does not exist: {local_path}")
+                model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
+                checkpoint = torch.load(str(local_path), map_location="cpu")
+                state_dict = _extract_state_dict(checkpoint)
+                model.load_state_dict(state_dict, strict=False)
+                return model
+            return torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=True, use_gpu=use_gpu)
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(f"Failed to load OSNet model {cfg.model_name}: {exc}") from exc
 
     def _preprocess(self, crop: np.ndarray):
         img = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)

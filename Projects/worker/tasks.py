@@ -123,6 +123,8 @@ class TrackingParams:
     use_bench_mask: bool = True
     reid_enable: bool = True
     reid_model: str = "osnet_x0_25"
+    reid_fail_policy: str = "disable"
+    reid_weights_path: str = ""
     reid_weight: float = 0.40
     reid_min_sim: float = 0.45
     reid_crop_expand: float = 0.10
@@ -690,14 +692,34 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     is_cuda = device.startswith("cuda")
     warm_easyocr_models(device)
     ocr, ocr_gpu = _build_ocr_reader(device)
+    reid_init_timeline_events: List[Dict[str, Any]] = []
+    reid_disabled_reason: Optional[str] = None
     reid_embedder = None
     if params.reid_enable:
-        reid_embedder = OSNetEmbedder(ReIDConfig(
-            model_name=str(setup.get("reid_model", params.reid_model) or "osnet_x0_25"),
-            device=str(setup.get("reid_device", params.reid_device) or device),
-            batch_size=max(1, int(setup.get("reid_batch", params.reid_batch))),
-            use_fp16=is_cuda,
-        ))
+        reid_fail_policy = str(setup.get("reid_fail_policy", params.reid_fail_policy) or "disable").lower()
+        if reid_fail_policy not in {"disable", "fail"}:
+            reid_fail_policy = "disable"
+        try:
+            reid_embedder = OSNetEmbedder(ReIDConfig(
+                model_name=str(setup.get("reid_model", params.reid_model) or "osnet_x0_25"),
+                device=str(setup.get("reid_device", params.reid_device) or device),
+                batch_size=max(1, int(setup.get("reid_batch", params.reid_batch))),
+                use_fp16=is_cuda,
+                weights_path=str(setup.get("reid_weights_path", params.reid_weights_path) or ""),
+            ))
+        except Exception as exc:
+            if reid_fail_policy == "fail":
+                raise
+            reid_embedder = None
+            reid_disabled_reason = str(exc)
+            setup["_runtime_reid_disabled"] = True
+            setup["_runtime_reid_disabled_reason"] = reid_disabled_reason
+            log.warning("ReID initialization failed; continuing with ReID disabled: %s", exc)
+            reid_init_timeline_events.append({
+                "t": 0.0,
+                "event": "reid_disabled_due_to_error",
+                "error": reid_disabled_reason,
+            })
 
     tracker_type = str(setup.get("tracker_type", "bytetrack") or "bytetrack").lower()
     if tracker_type != "bytetrack":
@@ -786,7 +808,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     shift_start = None
     shift_state = "OFF_ICE"
     present_prev = False
-    timeline = []
+    timeline = list(reid_init_timeline_events)
     overlay_path = None
     writer = None
     if params.debug_overlay:
@@ -1596,6 +1618,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "fps": fps,
         "perf": perf_summary,
         "target_embed_history": target_embed_history,
+        "reid_disabled_due_to_error": reid_disabled_reason,
     }
 
 def process_job(job_id: str) -> Dict[str, Any]:
@@ -1685,7 +1708,10 @@ def process_job(job_id: str) -> Dict[str, Any]:
                 raise RuntimeError(f"Stalled in {stage['name']}")
             pct = int(min(70, 10 + (frame_idx / max(1, total)) * 60))
             extra = {"perf": perf} if perf else {}
-            write_status("processing", "tracking", pct, f"Tracking in progress ({t:.1f}s)", **extra)
+            message = f"Tracking in progress ({t:.1f}s)"
+            if setup.get("_runtime_reid_disabled"):
+                message = f"ReID disabled, continuing ({t:.1f}s)"
+            write_status("processing", "tracking", pct, message, **extra)
 
         probe = analyze_video_quality(in_path)
         probe_path = job_dir / "probe.json"
@@ -1748,6 +1774,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
         write_status("processing", "tracking", 12, "Tracking in progress")
         data = track_presence(tracking_input_path, setup, heartbeat=hb, cancel_check=cancel_check)
+        if data.get("reid_disabled_due_to_error"):
+            write_status("processing", "tracking", 71, "ReID disabled, continuing")
         data["timeline"] = preflight_timeline + (data.get("timeline") or [])
 
         clips_dir = job_dir / "clips"

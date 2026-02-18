@@ -124,3 +124,125 @@ def test_reid_disabled_does_not_initialize_embedder(tmp_path, monkeypatch):
 
     assert calls["count"] == 0
     assert isinstance(out, dict)
+
+
+def test_reid_init_failure_disables_and_continues_when_policy_disable(tmp_path, monkeypatch):
+    from worker import tasks as worker_tasks
+
+    class _FakeCapture:
+        def __init__(self, _):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == worker_tasks.cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_COUNT:
+                return 0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_WIDTH:
+                return 1920
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_HEIGHT:
+                return 1080
+            return 0
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            return None
+
+    class _FakeYOLO:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    def _broken_embedder(*_args, **_kwargs):
+        raise RuntimeError("hub cache unavailable")
+
+    if worker_tasks.cv2 is None:
+        class _FakeCv2:
+            CAP_PROP_FPS = 5
+            CAP_PROP_FRAME_COUNT = 7
+            CAP_PROP_FRAME_WIDTH = 3
+            CAP_PROP_FRAME_HEIGHT = 4
+            VideoCapture = _FakeCapture
+
+        monkeypatch.setattr(worker_tasks, "cv2", _FakeCv2)
+    else:
+        monkeypatch.setattr(worker_tasks.cv2, "VideoCapture", _FakeCapture)
+    monkeypatch.setattr(worker_tasks, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cuda:0", 0))
+    monkeypatch.setattr(worker_tasks, "warm_easyocr_models", lambda *_: None)
+    monkeypatch.setattr(worker_tasks, "_build_ocr_reader", lambda *_: (None, False))
+    monkeypatch.setattr(worker_tasks, "_hex_to_hsv", lambda *_: (60, 80, 80))
+    monkeypatch.setattr(worker_tasks, "OSNetEmbedder", _broken_embedder)
+
+    setup = {"reid_enable": True, "reid_fail_policy": "disable", "debug_timeline": True}
+    out = worker_tasks.track_presence(str(tmp_path / "dummy.mp4"), setup)
+
+    assert out["reid_disabled_due_to_error"] == "hub cache unavailable"
+    assert any(ev.get("event") == "reid_disabled_due_to_error" for ev in out["timeline"])
+    assert setup.get("_runtime_reid_disabled") is True
+
+
+def test_reid_init_failure_raises_when_policy_fail(tmp_path, monkeypatch):
+    from worker import tasks as worker_tasks
+
+    class _FakeCapture:
+        def __init__(self, _):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == worker_tasks.cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_COUNT:
+                return 0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_WIDTH:
+                return 1920
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_HEIGHT:
+                return 1080
+            return 0
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            return None
+
+    class _FakeYOLO:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    def _broken_embedder(*_args, **_kwargs):
+        raise RuntimeError("hub cache unavailable")
+
+    if worker_tasks.cv2 is None:
+        class _FakeCv2:
+            CAP_PROP_FPS = 5
+            CAP_PROP_FRAME_COUNT = 7
+            CAP_PROP_FRAME_WIDTH = 3
+            CAP_PROP_FRAME_HEIGHT = 4
+            VideoCapture = _FakeCapture
+
+        monkeypatch.setattr(worker_tasks, "cv2", _FakeCv2)
+    else:
+        monkeypatch.setattr(worker_tasks.cv2, "VideoCapture", _FakeCapture)
+    monkeypatch.setattr(worker_tasks, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cuda:0", 0))
+    monkeypatch.setattr(worker_tasks, "warm_easyocr_models", lambda *_: None)
+    monkeypatch.setattr(worker_tasks, "_build_ocr_reader", lambda *_: (None, False))
+    monkeypatch.setattr(worker_tasks, "_hex_to_hsv", lambda *_: (60, 80, 80))
+    monkeypatch.setattr(worker_tasks, "OSNetEmbedder", _broken_embedder)
+
+    try:
+        worker_tasks.track_presence(
+            str(tmp_path / "dummy.mp4"),
+            {"reid_enable": True, "reid_fail_policy": "fail", "debug_timeline": False},
+        )
+        assert False, "Expected ReID init failure to raise when reid_fail_policy=fail"
+    except RuntimeError as exc:
+        assert "hub cache unavailable" in str(exc)

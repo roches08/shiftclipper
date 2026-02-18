@@ -179,6 +179,8 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "use_bench_mask": bool(src.get("use_bench_mask", True)),
         "reid_enable": bool(src.get("reid_enable", src.get("use_reid", True))),
         "reid_model": str(src.get("reid_model") or "osnet_x0_25"),
+        "reid_fail_policy": str(src.get("reid_fail_policy") or "disable").lower(),
+        "reid_weights_path": str(src.get("reid_weights_path") or ""),
         "reid_weight": _as_float(src, "reid_weight", 0.45),
         "reid_min_sim": _as_float(src, "reid_min_sim", 0.50),
         "reid_crop_expand": _as_float(src, "reid_crop_expand", 0.15),
@@ -205,4 +207,6 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     }
     if setup["reid_model"] not in {"osnet_x0_25", "osnet_x1_0"}:
         setup["reid_model"] = "osnet_x0_25"
+    if setup["reid_fail_policy"] not in {"disable", "fail"}:
+        setup["reid_fail_policy"] = "disable"
     return setup
