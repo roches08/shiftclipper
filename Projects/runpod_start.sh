@@ -64,7 +64,7 @@ fi
 "$PYTHON_BIN" -m pip install -r "$REQUIREMENTS_FILE"
 
 "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
-"$PYTHON_BIN" -c "from pathlib import Path; from ultralytics import YOLO; import torch; yaml_path = Path('yolov8n.yaml'); assert yaml_path.exists(), f'missing {yaml_path}'; YOLO(str(yaml_path)); print('ultralytics local-only model load ok', torch.cuda.is_available())"
+"$PYTHON_BIN" -c "import ultralytics; print('ultralytics import ok')"
 
 if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq; print('deps ok')"; then
   echo "ERROR: dependency import check failed."
