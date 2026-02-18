@@ -124,3 +124,43 @@ curl -s -X POST "http://127.0.0.1:8000/jobs/cleanup?days=7&max_count=100"
 - CPU override (`SHIFTCLIPPER_DEVICE=cpu`) -> CPU wheels from `https://download.pytorch.org/whl/cpu`
 
 This ensures `torch.cuda.is_available()` can resolve true on GPU pods and Tracker v2 defaults to `cuda:0` unless overridden.
+
+## Tracker pipeline config upgrades (rink/bench + re-ID)
+
+`setup.json` now supports additional safety/lifecycle fields:
+
+- `use_rink_mask` (default `true`)
+- `use_bench_mask` (default `true`)
+- `use_reid` (default `true`)
+- `loss_timeout_sec` (default `1.5`)
+- `reacquire_max_sec` (default `2.0`)
+- `reacquire_confirm_frames` (default `5`)
+- `reid_sim_threshold` (default `0.35`)
+- `max_clip_len_sec` (default `90`)
+- `allow_bench_reacquire` (default `false`)
+- `rink_polygon` (list of `[x, y]`)
+- `bench_polygons` (list of polygons)
+- `penalty_polygons` (optional)
+- `polygon_coords_normalized` (`true` for 0..1 coords, `false` for pixels)
+
+Example setup payload snippet:
+
+```json
+{
+  "use_rink_mask": true,
+  "use_bench_mask": true,
+  "use_reid": true,
+  "loss_timeout_sec": 1.5,
+  "reacquire_max_sec": 2.0,
+  "reacquire_confirm_frames": 5,
+  "reid_sim_threshold": 0.35,
+  "max_clip_len_sec": 90,
+  "allow_bench_reacquire": false,
+  "polygon_coords_normalized": true,
+  "rink_polygon": [[0.03, 0.15], [0.97, 0.15], [0.99, 0.92], [0.01, 0.92]],
+  "bench_polygons": [
+    [[0.0, 0.0], [0.20, 0.0], [0.20, 0.20], [0.0, 0.20]],
+    [[0.80, 0.0], [1.0, 0.0], [1.0, 0.20], [0.80, 0.20]]
+  ]
+}
+```

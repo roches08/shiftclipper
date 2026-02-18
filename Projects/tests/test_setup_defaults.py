@@ -26,3 +26,12 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["score_lock_threshold"] == 0.50
     assert setup["score_unlock_threshold"] == 0.40
     assert setup["gap_merge_seconds"] == 1.5
+    assert setup["use_rink_mask"] is True
+    assert setup["use_bench_mask"] is True
+    assert setup["use_reid"] is True
+    assert setup["loss_timeout_sec"] == 1.5
+    assert setup["reacquire_max_sec"] == 2.0
+    assert setup["reacquire_confirm_frames"] == 5
+    assert setup["reid_sim_threshold"] == 0.35
+    assert setup["max_clip_len_sec"] == 90.0
+    assert setup["allow_bench_reacquire"] is False
