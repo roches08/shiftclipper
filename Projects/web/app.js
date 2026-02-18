@@ -310,6 +310,14 @@ function payload(){
     transcode_fps: $('transcodeFps').value ? Number($('transcodeFps').value) : null,
     transcode_deinterlace: $('transcodeDeinterlace').checked,
     transcode_denoise: $('transcodeDenoise').checked,
+    reid_enable: true,
+    reid_model: 'osnet_x0_25',
+    reid_every_n_frames: 5,
+    reid_weight: 0.4,
+    reid_min_sim: 0.45,
+    reid_crop_expand: 0.1,
+    reid_batch: 16,
+    reid_device: 'cuda:0',
     clicks: state.clicks,
   };
 }

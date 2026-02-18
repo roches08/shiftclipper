@@ -178,6 +178,13 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "use_rink_mask": bool(src.get("use_rink_mask", True)),
         "use_bench_mask": bool(src.get("use_bench_mask", True)),
         "use_reid": bool(src.get("use_reid", True)),
+        "reid_enable": bool(src.get("reid_enable", src.get("use_reid", True))),
+        "reid_model": str(src.get("reid_model") or "osnet_x0_25"),
+        "reid_weight": _as_float(src, "reid_weight", 0.40),
+        "reid_min_sim": _as_float(src, "reid_min_sim", 0.45),
+        "reid_crop_expand": _as_float(src, "reid_crop_expand", 0.10),
+        "reid_batch": max(1, _as_int(src, "reid_batch", 16)),
+        "reid_device": str(src.get("reid_device") or "cuda:0"),
         "loss_timeout_sec": _as_float(src, "loss_timeout_sec", _as_float(src, "LOSS_TIMEOUT_SEC", 1.5)),
         "reacquire_max_sec": _as_float(src, "reacquire_max_sec", _as_float(src, "REACQUIRE_MAX_SEC", 2.0)),
         "reacquire_confirm_frames": _as_int(src, "reacquire_confirm_frames", _as_int(src, "REACQUIRE_CONFIRM_FRAMES", 5)),
@@ -185,7 +192,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "max_clip_len_sec": _as_float(src, "max_clip_len_sec", 90.0),
         "allow_bench_reacquire": bool(src.get("allow_bench_reacquire", False)),
         "edge_margin_px": _as_float(src, "edge_margin_px", 2.0),
-        "reid_every_n_frames": max(1, _as_int(src, "reid_every_n_frames", 4)),
+        "reid_every_n_frames": max(1, _as_int(src, "reid_every_n_frames", 5)),
         "reid_max_candidates": max(1, _as_int(src, "reid_max_candidates", 5)),
         "reid_alpha": max(0.0, min(1.0, _as_float(src, "reid_alpha", 0.7))),
         "reid_min_px": max(1, _as_int(src, "reid_min_px", 24)),
@@ -197,4 +204,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "bench_polygons": src.get("bench_polygons") or [],
         "penalty_polygons": src.get("penalty_polygons") or [],
     }
+    if setup["reid_model"] not in {"osnet_x0_25", "osnet_x1_0"}:
+        setup["reid_model"] = "osnet_x0_25"
+    setup["use_reid"] = bool(setup["reid_enable"])
     return setup

@@ -23,6 +23,7 @@ easyocr==1.7.2
 # Optional but common
 Pillow==10.4.0
 pydantic==2.9.2
+torchreid==0.2.5
 
 # pkg_resources is provided by setuptools and required by deep-sort-realtime
 setuptools==75.1.0
