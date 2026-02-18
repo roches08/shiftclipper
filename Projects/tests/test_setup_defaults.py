@@ -31,7 +31,9 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["swap_guard_bonus"] == 0.1
     assert setup["reid_enable"] is True
     assert setup["reid_fail_policy"] == "disable"
-    assert setup["reid_weights_path"] == ""
+    assert setup["reid_weights_path"] == "/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth"
+    assert setup["reid_weights_url"].startswith("https://huggingface.co/kaiyangzhou/osnet/resolve/main/")
+    assert setup["reid_auto_download"] is True
     assert "use_reid" not in setup
     assert setup["reid_model"] == "osnet_x0_25"
     assert setup["reid_every_n_frames"] == 5

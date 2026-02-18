@@ -1,5 +1,9 @@
 from typing import Any, Dict, Tuple
 
+
+DEFAULT_REID_WEIGHTS_PATH = "/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth"
+DEFAULT_REID_WEIGHTS_URL = "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+
 CAMERA_PRESETS = {
     "broadcast": {
         "detect_stride": 2,
@@ -180,7 +184,9 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reid_enable": bool(src.get("reid_enable", src.get("use_reid", True))),
         "reid_model": str(src.get("reid_model") or "osnet_x0_25"),
         "reid_fail_policy": str(src.get("reid_fail_policy") or "disable").lower(),
-        "reid_weights_path": str(src.get("reid_weights_path") or ""),
+        "reid_weights_path": str(src.get("reid_weights_path") or DEFAULT_REID_WEIGHTS_PATH),
+        "reid_weights_url": str(src.get("reid_weights_url") or DEFAULT_REID_WEIGHTS_URL),
+        "reid_auto_download": bool(src.get("reid_auto_download", True)),
         "reid_weight": _as_float(src, "reid_weight", 0.45),
         "reid_min_sim": _as_float(src, "reid_min_sim", 0.50),
         "reid_crop_expand": _as_float(src, "reid_crop_expand", 0.15),
@@ -209,4 +215,8 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         setup["reid_model"] = "osnet_x0_25"
     if setup["reid_fail_policy"] not in {"disable", "fail"}:
         setup["reid_fail_policy"] = "disable"
+    if not setup["reid_weights_path"]:
+        setup["reid_weights_path"] = DEFAULT_REID_WEIGHTS_PATH
+    if not str(setup["reid_weights_url"]).startswith(("http://", "https://")):
+        setup["reid_weights_url"] = DEFAULT_REID_WEIGHTS_URL
     return setup

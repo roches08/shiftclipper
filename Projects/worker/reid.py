@@ -104,16 +104,16 @@ class OSNetEmbedder:
         use_gpu = str(cfg.device).startswith("cuda")
         weights_path = str(cfg.weights_path or "").strip()
         try:
-            if weights_path:
-                local_path = Path(weights_path)
-                if not local_path.exists():
-                    raise RuntimeError(f"Configured reid_weights_path does not exist: {local_path}")
-                model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
-                checkpoint = torch.load(str(local_path), map_location="cpu")
-                state_dict = _extract_state_dict(checkpoint)
-                model.load_state_dict(state_dict, strict=False)
-                return model
-            return torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=True, use_gpu=use_gpu)
+            if not weights_path:
+                raise RuntimeError("reid_weights_path is required for OSNetEmbedder")
+            local_path = Path(weights_path)
+            if not local_path.exists():
+                raise RuntimeError(f"Configured reid_weights_path does not exist: {local_path}")
+            model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
+            checkpoint = torch.load(str(local_path), map_location="cpu")
+            state_dict = _extract_state_dict(checkpoint)
+            model.load_state_dict(state_dict, strict=False)
+            return model
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to load OSNet model {cfg.model_name}: {exc}") from exc
 
