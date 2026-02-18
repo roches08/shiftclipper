@@ -698,6 +698,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     reid_init_timeline_events: List[Dict[str, Any]] = []
     reid_disabled_reason: Optional[str] = None
     reid_embedder = None
+    setup["_runtime_reid_active"] = False
     if params.reid_enable:
         reid_fail_policy = str(setup.get("reid_fail_policy", params.reid_fail_policy) or "disable").lower()
         if reid_fail_policy not in {"disable", "fail"}:
@@ -715,11 +716,21 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 use_fp16=is_cuda,
                 weights_path=reid_weights_path,
             ))
+            setup["_runtime_reid_active"] = True
+            reid_init_timeline_events.append({
+                "t": 0.0,
+                "event": "reid_ready",
+                "model": str(setup.get("reid_model", params.reid_model) or "osnet_x0_25"),
+                "weights_path": reid_weights_path,
+                "device": str(setup.get("reid_device", params.reid_device) or device),
+                "fp16": bool(is_cuda),
+            })
         except Exception as exc:
             if reid_fail_policy == "fail":
                 raise
             reid_embedder = None
             reid_disabled_reason = str(exc)
+            setup["_runtime_reid_active"] = False
             setup["_runtime_reid_disabled"] = True
             setup["_runtime_reid_disabled_reason"] = reid_disabled_reason
             log.warning("ReID initialization failed; continuing with ReID disabled: %s", exc)
@@ -1717,7 +1728,9 @@ def process_job(job_id: str) -> Dict[str, Any]:
             pct = int(min(70, 10 + (frame_idx / max(1, total)) * 60))
             extra = {"perf": perf} if perf else {}
             message = f"Tracking in progress ({t:.1f}s)"
-            if setup.get("_runtime_reid_disabled"):
+            if setup.get("_runtime_reid_active"):
+                message = f"Tracking (ReID active) ({t:.1f}s)"
+            elif setup.get("_runtime_reid_disabled"):
                 message = f"ReID disabled, continuing ({t:.1f}s)"
             write_status("processing", "tracking", pct, message, **extra)
 
