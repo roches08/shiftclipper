@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Tuple
 
 CAMERA_PRESETS = {
@@ -42,21 +41,11 @@ CAMERA_PRESETS = {
 
 
 def resolve_device() -> Tuple[str, int | str]:
-    override = os.getenv("SHIFTCLIPPER_DEVICE")
-    if override:
-        if override.startswith("cuda"):
-            return override, 0
-        return override, "cpu"
-    try:
-        import torch
+    import torch
 
-        if torch.cuda.is_available():
-            return "cuda:0", 0
-        raise RuntimeError("CUDA is required for ShiftClipper tracking, but no CUDA device is available.")
-    except RuntimeError:
-        raise
-    except Exception:
-        raise RuntimeError("CUDA is required for ShiftClipper tracking, but CUDA runtime is unavailable.")
+    if torch.cuda.is_available():
+        return "cuda:0", 0
+    raise RuntimeError("CUDA not available but GPU required")
 
 
 def _as_float(src: Dict[str, Any], key: str, default: float) -> float:
@@ -93,21 +82,14 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         tracking_mode = "clip"
 
     mode_defaults = {
-        "clip": {
-            "score_lock_threshold": 0.50,
-            "score_unlock_threshold": 0.33,
-            "lost_timeout": 4.0,
-            "reacquire_window_seconds": 8.0,
-            "reacquire_score_lock_threshold": 0.30,
-        },
-        "shift": {
-            "score_lock_threshold": 0.50,
-            "score_unlock_threshold": 0.33,
-            "lost_timeout": 4.0,
-            "reacquire_window_seconds": 8.0,
-            "reacquire_score_lock_threshold": 0.30,
-        },
-    }[tracking_mode]
+        "score_lock_threshold": 0.55,
+        "score_unlock_threshold": 0.33,
+        "lost_timeout": 4.0,
+        "reacquire_window_seconds": 8.0,
+        "reacquire_score_lock_threshold": 0.30,
+        "ocr_veto_conf": 0.92,
+        "ocr_veto_seconds": 1.0,
+    }
 
     tracker_type = str(src.get("tracker_type") or "bytetrack").lower()
     if tracker_type not in {"bytetrack", "iou", "deepsort"}:
@@ -182,8 +164,9 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "ocr_confirm_k": _as_int(src, "ocr_confirm_k", 5),
         "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", False)),
         "allow_seed_clips": bool(src.get("allow_seed_clips", True)),
-        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.92),
-        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 1.0),
+        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", mode_defaults["ocr_veto_conf"]),
+        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", mode_defaults["ocr_veto_seconds"]),
+        "normalize_video": bool(src.get("normalize_video", False)),
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
         "use_rink_mask": bool(src.get("use_rink_mask", True)),
         "use_bench_mask": bool(src.get("use_bench_mask", True)),

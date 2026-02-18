@@ -25,12 +25,12 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["reacquire_window_seconds"] == 8.0
     assert setup["lost_timeout"] == 4.0
     assert setup["reacquire_score_lock_threshold"] == 0.30
-    assert setup["score_lock_threshold"] == 0.50
+    assert setup["score_lock_threshold"] == 0.55
     assert setup["score_unlock_threshold"] == 0.33
     assert setup["gap_merge_seconds"] == 1.5
 
 
-def test_setup_overrides_persist_and_worker_consumes(tmp_path, monkeypatch):
+def test_setup_overrides_persist_and_worker_consumes_and_debug_reflects_values(tmp_path, monkeypatch):
     monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)
 
@@ -38,7 +38,7 @@ def test_setup_overrides_persist_and_worker_consumes(tmp_path, monkeypatch):
     job_dir = tmp_path / job_id
     (job_dir / "in.mp4").write_bytes(b"0")
 
-    api_main.setup_job(job_id, {"tracking_mode": "shift", "score_lock_threshold": 0.73, "lost_timeout": 2.7, "tracker_type": "bytetrack"})
+    api_main.setup_job(job_id, {"tracking_mode": "shift", "score_lock_threshold": 0.45, "lost_timeout": 10.0, "tracker_type": "bytetrack"})
 
     meta = json.loads((job_dir / "job.json").read_text())
     meta["video_path"] = str(job_dir / "in.mp4")
@@ -53,10 +53,29 @@ def test_setup_overrides_persist_and_worker_consumes(tmp_path, monkeypatch):
         return {"segments": [], "shifts": [], "timeline": [], "debug_overlay_path": None, "perf": {}, "target_embed_history": []}
 
     monkeypatch.setattr(worker_tasks, "track_presence", fake_track_presence)
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cuda:0", 0))
+    monkeypatch.setattr(worker_tasks, "video_probe", lambda _: {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "codec": "h264",
+        "bit_rate": 1000000,
+        "duration": 1.0,
+        "is_vfr": False,
+        "avg_frame_rate": "30/1",
+        "r_frame_rate": "30/1",
+    })
 
     result = worker_tasks.process_job(job_id)
 
+    job_json = json.loads((job_dir / "job.json").read_text())
+    debug_json = json.loads((job_dir / "debug.json").read_text())
+
     assert result["status"] == "done_no_shifts"
-    assert captured["score_lock_threshold"] == 0.73
-    assert captured["lost_timeout"] == 2.7
+    assert job_json["setup"]["score_lock_threshold"] == 0.45
+    assert job_json["setup"]["lost_timeout"] == 10.0
+    assert captured["score_lock_threshold"] == 0.45
+    assert captured["lost_timeout"] == 10.0
     assert captured["tracker_type"] == "bytetrack"
+    assert debug_json["setup"]["score_lock_threshold"] == 0.45
+    assert debug_json["setup"]["lost_timeout"] == 10.0
