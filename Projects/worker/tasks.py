@@ -45,6 +45,7 @@ except Exception:  # pragma: no cover
 
 from common.config import normalize_setup, resolve_device
 from worker.reid import OSNetEmbedder, ReIDConfig, cosine_similarity, expand_and_crop, normalize_vector
+from worker.reid_weights import ensure_reid_weights
 
 log = logging.getLogger("worker")
 DEBUG_MODE = os.getenv("WORKER_DEBUG", "0") == "1"
@@ -124,7 +125,9 @@ class TrackingParams:
     reid_enable: bool = True
     reid_model: str = "osnet_x0_25"
     reid_fail_policy: str = "disable"
-    reid_weights_path: str = ""
+    reid_weights_path: str = "/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth"
+    reid_weights_url: str = "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
+    reid_auto_download: bool = True
     reid_weight: float = 0.40
     reid_min_sim: float = 0.45
     reid_crop_expand: float = 0.10
@@ -699,13 +702,18 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         reid_fail_policy = str(setup.get("reid_fail_policy", params.reid_fail_policy) or "disable").lower()
         if reid_fail_policy not in {"disable", "fail"}:
             reid_fail_policy = "disable"
+        reid_weights_path = str(setup.get("reid_weights_path", params.reid_weights_path) or "").strip()
+        reid_weights_url = str(setup.get("reid_weights_url", params.reid_weights_url) or "").strip()
+        reid_auto_download = bool(setup.get("reid_auto_download", params.reid_auto_download))
         try:
+            if reid_auto_download and reid_weights_path and not Path(reid_weights_path).exists():
+                ensure_reid_weights(reid_weights_path, reid_weights_url)
             reid_embedder = OSNetEmbedder(ReIDConfig(
                 model_name=str(setup.get("reid_model", params.reid_model) or "osnet_x0_25"),
                 device=str(setup.get("reid_device", params.reid_device) or device),
                 batch_size=max(1, int(setup.get("reid_batch", params.reid_batch))),
                 use_fp16=is_cuda,
-                weights_path=str(setup.get("reid_weights_path", params.reid_weights_path) or ""),
+                weights_path=reid_weights_path,
             ))
         except Exception as exc:
             if reid_fail_policy == "fail":

@@ -37,5 +37,5 @@ def test_resolve_device_returns_cuda_when_available(monkeypatch):
 
 def test_resolve_device_raises_when_cuda_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", _TorchOff())
-    with pytest.raises(RuntimeError, match="CUDA not available but GPU required"):
+    with pytest.raises(RuntimeError, match="CUDA is required for ShiftClipper jobs"):
         cfg.resolve_device()

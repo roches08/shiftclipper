@@ -1,4 +1,11 @@
 (function initShiftClipperPresets(global) {
+  const REID_DEFAULTS = {
+    reid_fail_policy: 'disable',
+    reid_auto_download: true,
+    reid_weights_path: '/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth',
+    reid_weights_url: 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth',
+  };
+
   const ADVANCED_PRESETS = {
     balanced: {
       score_lock_threshold: 0.55,
@@ -34,6 +41,7 @@
       reid_crop_expand: 0.15,
       reid_batch: 16,
       reid_device: 'cuda:0',
+      ...REID_DEFAULTS,
       swap_guard_seconds: 2.5,
       swap_guard_bonus: 0.1,
     },
@@ -61,6 +69,7 @@
       reid_crop_expand: 0.15,
       reid_batch: 16,
       reid_device: 'cuda:0',
+      ...REID_DEFAULTS,
       swap_guard_seconds: 2.0,
       swap_guard_bonus: 0.08,
     },
@@ -86,6 +95,7 @@
       reid_crop_expand: 0.15,
       reid_batch: 16,
       reid_device: 'cuda:0',
+      ...REID_DEFAULTS,
       swap_guard_seconds: 3.0,
       swap_guard_bonus: 0.12,
     },

@@ -26,6 +26,10 @@ const CAMERA_DEFAULTS = {
 
 const { getAdvancedPreset } = window.ShiftClipperPresets;
 
+const REID_WEIGHTS_DEFAULT_PATH = '/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth';
+const REID_WEIGHTS_DEFAULT_URL = 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth';
+
+
 const STAGE_META = [
   { key: 'uploading', label: 'Uploading', icon: '⬆️' },
   { key: 'queued', label: 'Queued', icon: '🕒' },
@@ -270,6 +274,10 @@ function payload(){
     reid_crop_expand: toNumber('reidCropExpand'),
     reid_batch: toInt('reidBatch'),
     reid_device: $('reidDevice').value,
+    reid_fail_policy: 'disable',
+    reid_auto_download: true,
+    reid_weights_path: REID_WEIGHTS_DEFAULT_PATH,
+    reid_weights_url: REID_WEIGHTS_DEFAULT_URL,
     swap_guard_seconds: toNumber('swapGuardSeconds'),
     swap_guard_bonus: toNumber('swapGuardBonus'),
     clicks: state.clicks,
