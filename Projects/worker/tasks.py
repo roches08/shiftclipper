@@ -63,13 +63,7 @@ def _build_ocr_reader(device: str):
     if easyocr is None:
         return None, False
     use_gpu = device.startswith("cuda")
-    try:
-        return easyocr.Reader(["en"], gpu=use_gpu), use_gpu
-    except Exception as exc:
-        if use_gpu and _is_cuda_fork_error(exc):
-            log.warning("Falling back to CPU OCR due to CUDA fork constraint")
-            return easyocr.Reader(["en"], gpu=False), False
-        raise
+    return easyocr.Reader(["en"], gpu=use_gpu), use_gpu
 
 
 def warm_easyocr_models(device: str = "cpu") -> None:
@@ -174,6 +168,26 @@ def _color_score(frame: np.ndarray, box: Tuple[int, int, int, int], jersey_hsv: 
     upper = np.array([min(179, h + tol), min(255, s + 80), min(255, v + 80)], dtype=np.uint8)
     mask = cv2.inRange(hsv, lower, upper)
     return float(mask.mean() / 255.0)
+
+
+def _mean_hsv(frame: np.ndarray, box: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    x1, y1, x2, y2 = box
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    return hsv.reshape(-1, 3).mean(axis=0)
+
+
+def _hsv_distance(a: Optional[np.ndarray], b: Tuple[int, int, int]) -> float:
+    if a is None:
+        return 999.0
+    ah, as_, av = float(a[0]), float(a[1]), float(a[2])
+    bh, bs, bv = float(b[0]), float(b[1]), float(b[2])
+    dh = min(abs(ah - bh), 180.0 - abs(ah - bh)) / 180.0
+    ds = abs(as_ - bs) / 255.0
+    dv = abs(av - bv) / 255.0
+    return float(dh + 0.5 * ds + 0.25 * dv)
 
 
 def _parse_digits(txt: str) -> Optional[str]:
@@ -477,14 +491,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     warm_easyocr_models(device)
     ocr, ocr_gpu = _build_ocr_reader(device)
 
-    tracker_type = str(setup.get("tracker_type", "bytetrack")).lower()
-    tracker = None
-    if tracker_type == "deepsort":
-        if DeepSort is None:
-            raise RuntimeError("deepsort tracker requested but deep_sort_realtime unavailable")
-        tracker = DeepSort(max_age=40, n_init=2, embedder="mobilenet", embedder_gpu=is_cuda, bgr=True, half=is_cuda)
-    else:
-        tracker = LightweightIOUTracker(max_misses=max(3, int(params.lost_timeout * fps / max(1, params.detect_stride))))
+    tracker_type = str(setup.get("tracker_type", "bytetrack") or "bytetrack").lower()
+    if tracker_type != "bytetrack":
+        raise RuntimeError(f"Unsupported tracker_type={tracker_type}. ShiftClipper requires tracker_type=bytetrack")
+    tracker = LightweightIOUTracker(max_misses=max(3, int(params.lost_timeout * fps / max(1, params.detect_stride))))
 
     detect_stride = params.detect_stride
     ocr_every_n = max(1, int(params.ocr_every_n))
@@ -504,10 +514,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     )
 
     jersey_hsv = _hex_to_hsv(setup.get("jersey_color", "#203524"))
+    opponent_hsv = _hex_to_hsv(setup.get("opponent_color", "#ffffff"))
     player_num = re.sub(r"\D+", "", str(setup.get("player_number") or ""))
 
     state = "SEARCH"
-    lock_state = "UNLOCKED"
+    lock_state = "SEARCHING"
     lost_since = None
     locked_track_id = None
     last_box = None
@@ -516,13 +527,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     reacquire_until = 0.0
     clip_start_time: Optional[float] = None
     clip_last_seen_time: Optional[float] = None
+    gate_hold_start: Optional[float] = None
     clip_bench_enter_time: Optional[float] = None
     clip_end_reason: Optional[str] = None
     reacquire_hits: Dict[int, int] = {}
     target_embed: Optional[np.ndarray] = None
     target_embed_history: List[List[float]] = []
     embed_cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
-    vetoed_tracks: Dict[int, float] = {}
+    ocr_penalties: Dict[int, float] = {}
 
     seed_clicks = []
     for click in setup.get("clicks") or []:
@@ -702,8 +714,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if not tr.is_confirmed():
                     continue
                 box = _clip(tr.to_ltrb(), w, h)
-                if t < vetoed_tracks.get(tr.track_id, 0.0):
-                    continue
                 feet = _bbox_feet_point(box)
                 in_rink = True if not params.use_rink_mask or not rink_polygon else _poly_contains_with_margin(feet, rink_polygon, edge_margin_px)
                 in_bench = any(_poly_contains_with_margin(feet, poly, edge_margin_px) for poly in bench_polygons if poly)
@@ -712,10 +722,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if state in {"SEARCH", "LOST"} and params.use_bench_mask and in_bench and not bool(setup.get("allow_bench_reacquire", params.allow_bench_reacquire)):
                     continue
                 cscore = _color_score(frame, box, jersey_hsv, params.color_tolerance)
+                mean_hsv = _mean_hsv(frame, box)
+                target_dist = _hsv_distance(mean_hsv, jersey_hsv)
+                opponent_dist = _hsv_distance(mean_hsv, opponent_hsv)
+                opponent_penalty = 0.25 if opponent_dist <= target_dist + 0.03 else 0.0
                 motion = _iou(box, last_box) if last_box else 0.0
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
                 seed_bonus = seed_bonus_val if (seed_bonus_track_id is not None and tr.track_id == seed_bonus_track_id) else 0.0
-                score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus + seed_bonus
+                score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus + seed_bonus - opponent_penalty
                 emb = None
                 sim = -1.0
                 crop = frame[box[1]:box[3], box[0]:box[2]]
@@ -745,6 +759,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "embed": emb,
                     "sim": sim,
                     "sharpness": sharpness,
+                    "opponent_penalty": opponent_penalty,
+                    "target_dist": target_dist,
+                    "opponent_dist": opponent_dist,
                 })
 
             max_ocr_crops = max(1, int(setup.get("ocr_max_crops_per_frame", params.ocr_max_crops_per_frame)))
@@ -797,13 +814,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                                     })
                                     continue
                                 cand["ocr_veto"] = True
-                                vetoed_tracks[cand["track_id"]] = t + max(0.5, float(setup.get("ocr_veto_seconds", params.ocr_veto_seconds)))
-                                timeline.append({"t": t, "event": "ocr_veto", "track_id": cand["track_id"], "ocr_txt": d, "ocr_conf": cand["ocr_conf"]})
+                                penalty_sec = max(0.1, float(setup.get("ocr_veto_seconds", params.ocr_veto_seconds)))
+                                ocr_penalties[cand["track_id"]] = t + penalty_sec
+                                timeline.append({"t": t, "event": "ocr_veto", "track_id": cand["track_id"], "ocr_txt": d, "ocr_conf": cand["ocr_conf"], "penalty_seconds": penalty_sec})
                                 break
                     except Exception as exc:
                         if ocr_gpu and is_cuda and _is_cuda_fork_error(exc):
-                            ocr = easyocr.Reader(["en"], gpu=False)
-                            ocr_gpu = False
+                            raise RuntimeError("CUDA OCR initialization failed in worker process; CPU fallback is disabled") from exc
                     finally:
                         perf["ocr_ms"] += (time.perf_counter() - ocr_start) * 1000.0
 
@@ -813,9 +830,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 is_closeup = area_ratio >= float(setup.get("closeup_bbox_area_ratio", params.closeup_bbox_area_ratio))
                 strong_ocr_match = bool(player_num and cand.get("ocr_txt") == player_num and cand.get("ocr_conf", 0.0) >= ocr_veto_conf)
                 cand["closeup_blocked"] = bool(player_num) and is_closeup and not cand.get("seed_match") and not strong_ocr_match
-                if cand["ocr_veto"]:
-                    cand["score"] -= 1.0
-                elif cand["closeup_blocked"]:
+                penalty_active = t < ocr_penalties.get(cand["track_id"], 0.0)
+                if penalty_active:
+                    cand["score"] *= 0.65
+                if cand["closeup_blocked"]:
                     cand["score"] -= 0.75
                 cand["score"] += params.ocr_weight * cand["ocr_match"]
                 if params.use_reid and cand.get("sim", -1.0) >= 0:
@@ -846,6 +864,16 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 else:
                     state = "LOCKED"
                 if state == "LOCKED":
+                    if locked_track_id is not None and best["track_id"] != locked_track_id and best.get("motion", 0.0) < 0.15:
+                        timeline.append({
+                            "t": t,
+                            "event": "swap_suspicion",
+                            "from_track_id": locked_track_id,
+                            "to_track_id": best["track_id"],
+                            "motion_iou": best.get("motion", 0.0),
+                            "identity_score": best.get("score"),
+                            "frame_idx": current_idx,
+                        })
                     locked_track_id = best["track_id"]
                     last_seen = t
                     clip_last_seen_time = t
@@ -875,22 +903,64 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif state == "LOCKED":
                 if best and best["score"] >= unlock_threshold:
                     lost_since = None
-                elif lost_since is None:
-                    lost_since = t
-                    lost_start_time = t
-                    state = "LOST"
-                    reacquire_until = t + max(0.0, reacquire_max_sec)
-                    timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold", "score": best["score"] if best else None, "threshold": unlock_threshold})
+                else:
+                    if lost_since is None:
+                        lost_since = t
+                    if (t - lost_since) >= max(0.0, float(setup.get("lost_timeout", params.lost_timeout))):
+                        lost_start_time = t
+                        state = "LOST"
+                        reacquire_until = t + max(0.0, reacquire_max_sec)
+                        timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold_timeout", "score": best["score"] if best else None, "threshold": unlock_threshold, "lost_timeout": float(setup.get("lost_timeout", params.lost_timeout))})
             elif state in {"SEARCH", "LOST"}:
                 if lost_start_time is not None and t > reacquire_until:
                     clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
-            present = state == "LOCKED" and (allow_unconfirmed or not player_num or lock_state == "CONFIRMED")
+            clip_score_threshold = max(0.60, float(params.score_lock_threshold))
+            identity_score = float(best["score"]) if best else -1.0
+            base_gate = (
+                state == "LOCKED"
+                and lock_state in {"CONFIRMED", "PROVISIONAL"}
+                and identity_score >= clip_score_threshold
+            )
+            if base_gate and gate_hold_start is None:
+                gate_hold_start = t
+            elif not base_gate:
+                gate_hold_start = None
+            gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= float(setup.get("min_track_seconds", params.min_track_seconds)))
+            present = bool(
+                gate_held
+                and (
+                    lock_state == "CONFIRMED"
+                    or (lock_state == "PROVISIONAL" and allow_unconfirmed)
+                )
+            )
+            clip_reason = "allowed"
+            if lock_state == "SEARCHING":
+                clip_reason = "searching"
+            elif state != "LOCKED":
+                clip_reason = "state_not_locked"
+            elif lock_state == "PROVISIONAL" and not allow_unconfirmed:
+                clip_reason = "provisional_disallowed"
+            elif identity_score < clip_score_threshold:
+                clip_reason = "identity_below_threshold"
+            elif not gate_held:
+                clip_reason = "min_track_not_met"
+            timeline.append({
+                "t": t,
+                "event": "clip_allowed" if present else "clip_blocked",
+                "reason": clip_reason,
+                "identity_score": identity_score,
+                "lock_state": lock_state,
+                "allow_unconfirmed_clips": allow_unconfirmed,
+                "min_track_seconds": float(setup.get("min_track_seconds", params.min_track_seconds)),
+                "clip_score_threshold": clip_score_threshold,
+                "frame_idx": current_idx,
+            })
+
             if present and not present_prev:
                 seg_start = t
-                if clip_start_time is None:
-                    clip_start_time = t
+                clip_start_time = t
                 if shift_state == "OFF_ICE":
                     shift_state = "ON_ICE"
                     shift_start = t
@@ -902,7 +972,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 clip_bench_enter_time = None
 
             if present and clip_start_time is not None and (t - clip_start_time) > float(setup.get("max_clip_len_sec", params.max_clip_len_sec)):
-                clip_end_reason = ClipEndReason.MAX_LEN_GUARD.value
+                clip_end_reason = "safety_close_max_len"
 
             if clip_end_reason == ClipEndReason.LOST_TIMEOUT.value and clip_start_time is not None:
                 seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
@@ -911,12 +981,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif clip_end_reason == ClipEndReason.BENCH_ENTER.value and clip_start_time is not None:
                 _append_segment(segments, clip_start_time, t, ClipEndReason.BENCH_ENTER)
                 present = False
-            elif clip_end_reason == ClipEndReason.MAX_LEN_GUARD.value and clip_start_time is not None:
+            elif clip_end_reason == "safety_close_max_len" and clip_start_time is not None:
                 _append_segment(segments, clip_start_time, t, ClipEndReason.MAX_LEN_GUARD)
                 present = False
 
-            if (not present) and present_prev and clip_end_reason is None:
-                _append_segment(segments, seg_start, t, ClipEndReason.LOST_TIMEOUT)
+            if (not present) and present_prev and clip_end_reason is None and clip_start_time is not None:
+                _append_segment(segments, clip_start_time, t, ClipEndReason.LOST_TIMEOUT)
+                clip_end_reason = "clip_blocked"
 
             if (not present) and present_prev:
                 seg_end = t
@@ -924,14 +995,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     shifts.append((shift_start, seg_end))
                     shift_state = "OFF_ICE"
                     shift_start = None
-                if clip_end_reason is not None:
-                    timeline.append({"t": t, "event": "clip_end", "reason": clip_end_reason, "start_time": clip_start_time, "end_time": seg_end})
-                    lock_state = "UNLOCKED"
-                    state = "SEARCH"
-                    locked_track_id = None
-                    clip_start_time = None
-                    clip_end_reason = None
-                    lost_start_time = None
+                timeline.append({"t": t, "event": "clip_end", "reason": clip_end_reason or "clip_blocked", "start_time": clip_start_time, "end_time": seg_end})
+                clip_start_time = None
+                clip_end_reason = None
 
             if prev_state != state:
                 timeline.append({"t": t, "event": "state", "from": prev_state, "to": state})
@@ -1163,6 +1229,13 @@ def process_job(job_id: str) -> Dict[str, Any]:
             (job_dir / "debug_timeline.json").write_text(json.dumps(data["timeline"], indent=2))
             (job_dir / "debug.json").write_text(json.dumps(data["timeline"], indent=2))
 
+        hard_events = {"ocr_veto", "swap_suspicion", "reacquire", "lost"}
+        hard_packets = [e for e in data.get("timeline", []) if e.get("event") in hard_events]
+        dataset_dir = job_dir / "datasets" / "hard_moments"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        dataset_path = dataset_dir / "events.json"
+        dataset_path.write_text(json.dumps({"job_id": job_id, "events": hard_packets}, indent=2))
+
         shifts_json = []
         total_toi = 0.0
         for s, e in data["shifts"]:
@@ -1189,6 +1262,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "debug_timeline_url": f"/data/jobs/{job_id}/debug_timeline.json" if (job_dir / "debug_timeline.json").exists() else None,
             "debug_json_path": str(job_dir / "debug.json") if (job_dir / "debug.json").exists() else None,
             "debug_json_url": f"/data/jobs/{job_id}/debug.json" if (job_dir / "debug.json").exists() else None,
+            "hard_moments_dataset_path": str(dataset_path),
+            "hard_moments_dataset_url": f"/data/jobs/{job_id}/datasets/hard_moments/events.json",
         }
         artifacts["list"] = [
             {"type": "clip", "path": c["path"], "url": c["url"]} for c in clips

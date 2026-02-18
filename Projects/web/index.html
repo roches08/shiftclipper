@@ -60,6 +60,7 @@
   </div>
   <div class="hint" id="cameraHelp"></div>
   <div class="hint" id="trackingHelp"></div>
+  <div class="hint">Tracking tip: wide, stable, single-angle videos usually track best; broadcast cuts/zooms can reduce accuracy.</div>
 
   <div class="row" style="margin-top:8px;">
     <label>Jersey #</label><input id="playerNumber" style="width:70px" />
@@ -70,18 +71,38 @@
   </div>
 
   <details>
-    <summary>Advanced Tracking</summary>
+    <summary>Advanced Tracking Settings</summary>
+    <div class="row" style="margin:8px 0;">
+      <button id="presetBalanced" type="button">Balanced</button>
+      <button id="presetMoreClips" type="button">More Clips</button>
+      <button id="presetTrackQuality" type="button">Track Quality</button>
+    </div>
     <div class="row">
-      <label>Detect stride</label><input id="detectStride" type="number" value="1" />
-      <label>OCR min confidence</label><input id="ocrMinConf" type="number" step="0.01" value="0.22" />
-      <label>Lock after confirm</label><input id="lockSeconds" type="number" step="0.1" value="4.0" />
-      <label>Lost timeout</label><input id="lostTimeout" type="number" step="0.1" value="1.5" />
-      <label>Merge gap</label><input id="mergeGap" type="number" step="0.1" value="2.5" />
-      <label>Score lock threshold</label><input id="scoreLockThreshold" type="number" step="0.01" value="0.50" min="0" max="1" />
-      <label>Score unlock threshold</label><input id="scoreUnlockThreshold" type="number" step="0.01" value="0.40" min="0" max="1" />
-      <label>Reacquire window (s)</label><input id="reacquireWindowSeconds" type="number" step="0.1" value="4.0" min="0" />
+      <label>Score lock threshold</label><input id="scoreLockThreshold" type="number" step="0.01" value="0.55" min="0" max="1" />
+      <label>Score unlock threshold</label><input id="scoreUnlockThreshold" type="number" step="0.01" value="0.35" min="0" max="1" />
+      <label>Lost timeout</label><input id="lostTimeout" type="number" step="0.1" value="1.5" min="0" />
+      <label>Reacquire window (s)</label><input id="reacquireWindowSeconds" type="number" step="0.1" value="4" min="0" />
+      <label>Reacquire score lock threshold</label><input id="reacquireScoreLockThreshold" type="number" step="0.01" value="0.4" min="0" max="1" />
+      <label>Gap merge seconds</label><input id="mergeGap" type="number" step="0.1" value="2.5" min="0" />
+      <label>Lock seconds after confirm</label><input id="lockSeconds" type="number" step="0.1" value="4" min="0" />
+      <label>Min track seconds</label><input id="minTrack" type="number" step="0.05" value="0.75" min="0" />
+      <label>Min clip seconds</label><input id="minClipSeconds" type="number" step="0.05" value="1" min="0" />
       <label>Allow unconfirmed clips</label><input id="allowUnconfirmedClips" type="checkbox" />
-      <label>Min segment</label><input id="minTrack" type="number" step="0.1" value="0.75" />
+      <label>Allow seed clips</label><input id="allowSeedClips" type="checkbox" checked />
+      <label>Seed lock seconds</label><input id="seedLockSeconds" type="number" step="0.1" value="8" min="0" />
+      <label>Seed IOU min</label><input id="seedIouMin" type="number" step="0.01" value="0.12" min="0" max="1" />
+      <label>Seed dist max</label><input id="seedDistMax" type="number" step="0.01" value="0.16" min="0" max="1" />
+      <label>Seed bonus</label><input id="seedBonus" type="number" step="0.01" value="0.8" min="0" />
+      <label>Seed window s</label><input id="seedWindowS" type="number" step="0.1" value="3" min="0" />
+      <label>OCR disable</label><input id="ocrDisable" type="checkbox" />
+      <label>OCR every n frames</label><input id="ocrEveryNFrames" type="number" step="1" value="12" min="1" />
+      <label>OCR min confidence</label><input id="ocrMinConf" type="number" step="0.01" value="0.2" min="0" max="1" />
+      <label>OCR veto conf</label><input id="ocrVetoConf" type="number" step="0.01" value="0.85" min="0" max="1" />
+      <label>OCR veto seconds</label><input id="ocrVetoSeconds" type="number" step="0.1" value="2" min="0" />
+      <label>Detect stride</label><input id="detectStride" type="number" value="2" min="1" />
+      <label>YOLO imgsz</label><input id="yoloImgsz" type="number" value="512" min="256" max="1280" />
+      <label>YOLO batch</label><input id="yoloBatch" type="number" value="4" min="1" />
+      <label>Tracker type</label><input id="trackerType" type="text" value="bytetrack" />
       <span id="shiftOnly">
         <label>Bench zone ratio</label><input id="benchZone" type="number" step="0.01" value="0.80" />
       </span>
