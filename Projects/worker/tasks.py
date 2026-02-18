@@ -66,7 +66,7 @@ def _build_ocr_reader(device: str):
     return easyocr.Reader(["en"], gpu=use_gpu), use_gpu
 
 
-def warm_easyocr_models(device: str = "cpu") -> None:
+def warm_easyocr_models(device: str = "cuda:0") -> None:
     global _EASYOCR_WARMED
     if _EASYOCR_WARMED or easyocr is None:
         return
@@ -992,8 +992,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
-            clip_score_threshold = max(0.60, float(params.score_lock_threshold))
+            clip_score_threshold = max(0.60, float(setup.get("score_lock_threshold", params.score_lock_threshold)))
             identity_score = float(best["score"]) if best else -1.0
+            min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             base_gate = (
                 state == "LOCKED"
                 and lock_state in {"CONFIRMED", "PROVISIONAL"}
@@ -1003,7 +1004,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 gate_hold_start = t
             elif not base_gate:
                 gate_hold_start = None
-            gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= float(setup.get("min_track_seconds", params.min_track_seconds)))
+            gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= min_track_seconds)
             present = bool(
                 gate_held
                 and (
@@ -1012,7 +1013,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 )
             )
             clip_reason = "allowed"
-            if lock_state == "SEARCHING":
+            if state in {"SEARCH", "LOST"}:
                 clip_reason = "searching"
             elif state != "LOCKED":
                 clip_reason = "state_not_locked"
@@ -1026,11 +1027,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "t": t,
                 "event": "clip_allowed" if present else "clip_blocked",
                 "reason": clip_reason,
+                "state": state,
                 "identity_score": identity_score,
                 "lock_state": lock_state,
                 "allow_unconfirmed_clips": allow_unconfirmed,
-                "min_track_seconds": float(setup.get("min_track_seconds", params.min_track_seconds)),
+                "min_track_seconds": min_track_seconds,
                 "clip_score_threshold": clip_score_threshold,
+                "score_lock_threshold": float(setup.get("score_lock_threshold", params.score_lock_threshold)),
+                "score_unlock_threshold": float(setup.get("score_unlock_threshold", params.score_unlock_threshold)),
                 "frame_idx": current_idx,
             })
 
@@ -1442,7 +1446,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
             raise
         if stage["stalled"] or "stalled" in str(e).lower():
             err = f"Stalled in {stage['name']}"
-        is_cuda_error = "CUDA not available but GPU required" in str(e)
+        is_cuda_error = "CUDA is required" in str(e)
         meta.update({
             "status": "error" if is_cuda_error else "failed",
             "stage": "error" if is_cuda_error else "failed",

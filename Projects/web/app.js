@@ -27,9 +27,9 @@ const CAMERA_DEFAULTS = {
 const ADVANCED_PRESETS = {
   balanced: {
     score_lock_threshold: 0.55,
-    score_unlock_threshold: 0.35,
-    lost_timeout: 1.5,
-    reacquire_window_seconds: 4,
+    score_unlock_threshold: 0.33,
+    lost_timeout: 4.0,
+    reacquire_window_seconds: 8.0,
     reacquire_score_lock_threshold: 0.4,
     gap_merge_seconds: 2.5,
     lock_seconds_after_confirm: 4,
@@ -45,8 +45,8 @@ const ADVANCED_PRESETS = {
     ocr_disable: false,
     ocr_every_n_frames: 12,
     ocr_min_conf: 0.2,
-    ocr_veto_conf: 0.85,
-    ocr_veto_seconds: 2,
+    ocr_veto_conf: 0.92,
+    ocr_veto_seconds: 1.0,
     detect_stride: 2,
     yolo_imgsz: 512,
     yolo_batch: 4,

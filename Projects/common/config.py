@@ -45,7 +45,7 @@ def resolve_device() -> Tuple[str, int | str]:
 
     if torch.cuda.is_available():
         return "cuda:0", 0
-    raise RuntimeError("CUDA not available but GPU required")
+    raise RuntimeError("CUDA is required for ShiftClipper jobs, but no CUDA device is available")
 
 
 def _as_float(src: Dict[str, Any], key: str, default: float) -> float:
@@ -92,7 +92,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
     tracker_type = str(src.get("tracker_type") or "bytetrack").lower()
-    if tracker_type not in {"bytetrack", "iou", "deepsort"}:
+    if tracker_type != "bytetrack":
         tracker_type = "bytetrack"
 
     preset = CAMERA_PRESETS[camera_mode]

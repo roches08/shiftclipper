@@ -79,3 +79,43 @@ def test_setup_overrides_persist_and_worker_consumes_and_debug_reflects_values(t
     assert captured["tracker_type"] == "bytetrack"
     assert debug_json["setup"]["score_lock_threshold"] == 0.45
     assert debug_json["setup"]["lost_timeout"] == 10.0
+
+
+def test_non_bytetrack_tracker_is_normalized_to_bytetrack(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "tracker-normalize"})["job_id"]
+    api_main.setup_job(job_id, {"tracker_type": "deepsort"})
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["tracker_type"] == "bytetrack"
+
+
+def test_process_job_fails_fast_without_cuda(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+    monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "cuda-required"})["job_id"]
+    job_dir = tmp_path / job_id
+    (job_dir / "in.mp4").write_bytes(b"0")
+
+    api_main.setup_job(job_id, {"tracker_type": "bytetrack"})
+
+    meta = json.loads((job_dir / "job.json").read_text())
+    meta["video_path"] = str(job_dir / "in.mp4")
+    (job_dir / "job.json").write_text(json.dumps(meta))
+
+    def _raise_cuda_required():
+        raise RuntimeError("CUDA is required for ShiftClipper jobs, but no CUDA device is available")
+
+    monkeypatch.setattr(worker_tasks, "resolve_device", _raise_cuda_required)
+
+    try:
+        worker_tasks.process_job(job_id)
+        assert False, "process_job should raise when CUDA is unavailable"
+    except RuntimeError as exc:
+        assert "CUDA is required" in str(exc)
+
+    result = json.loads((job_dir / "job.json").read_text())
+    assert result["status"] == "error"
+    assert "CUDA is required" in result["message"]
