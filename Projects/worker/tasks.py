@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 from collections import deque
+from fractions import Fraction
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -379,7 +380,18 @@ def _run(cmd: List[str]) -> None:
         raise FFmpegError(cmd, p.returncode, err)
 
 
-def video_probe(video_path: str) -> Dict[str, Any]:
+def _parse_rate(value: Any) -> float:
+    txt = str(value or "0/1")
+    try:
+        return float(Fraction(txt))
+    except Exception:
+        try:
+            return float(txt)
+        except Exception:
+            return 0.0
+
+
+def analyze_video_quality(video_path: str) -> Dict[str, Any]:
     cmd = [
         "ffprobe",
         "-v",
@@ -398,61 +410,88 @@ def video_probe(video_path: str) -> Dict[str, Any]:
     payload = json.loads(p.stdout or "{}")
     streams = payload.get("streams") or []
     video_stream = next((st for st in streams if st.get("codec_type") == "video"), {})
-
-    def _parse_rate(val: str) -> float:
-        txt = str(val or "0/1")
-        if "/" in txt:
-            a, b = txt.split("/", 1)
-            num = float(a or 0.0)
-            den = float(b or 1.0)
-            return num / den if den else 0.0
-        return float(txt or 0.0)
+    fmt = payload.get("format") or {}
 
     avg_rate_raw = str(video_stream.get("avg_frame_rate") or "0/1")
     real_rate_raw = str(video_stream.get("r_frame_rate") or "0/1")
     avg_rate = _parse_rate(avg_rate_raw)
     real_rate = _parse_rate(real_rate_raw)
 
-    fmt = payload.get("format") or {}
     duration = video_stream.get("duration") or fmt.get("duration")
     bit_rate = video_stream.get("bit_rate") or fmt.get("bit_rate")
+    field_order = str(video_stream.get("field_order") or "").lower()
+    scan_type = str(video_stream.get("scan_type") or "").lower()
+    interlaced_frame = int(video_stream.get("interlaced_frame") or 0)
+    top_field_first = int(video_stream.get("top_field_first") or 0)
+    is_interlaced = field_order not in {"", "progressive", "unknown"} or scan_type == "interlaced" or interlaced_frame == 1 or top_field_first == 1
 
-    return {
+    info = {
+        "codec": video_stream.get("codec_name"),
+        "pix_fmt": video_stream.get("pix_fmt"),
         "width": int(video_stream.get("width") or 0),
         "height": int(video_stream.get("height") or 0),
-        "fps": avg_rate if avg_rate > 0 else real_rate,
-        "codec": video_stream.get("codec_name"),
-        "bit_rate": int(bit_rate) if bit_rate not in (None, "") else None,
-        "duration": float(duration) if duration not in (None, "") else None,
-        "is_vfr": abs(avg_rate - real_rate) > 0.01,
         "avg_frame_rate": avg_rate_raw,
         "r_frame_rate": real_rate_raw,
+        "fps": avg_rate if avg_rate > 0 else real_rate,
+        "duration": float(duration) if duration not in (None, "") else None,
+        "bit_rate": int(bit_rate) if bit_rate not in (None, "") else None,
+        "field_order": field_order or None,
+        "scan_type": scan_type or None,
+        "interlaced_frame": interlaced_frame,
+        "is_interlaced": is_interlaced,
+        "is_vfr_likely": abs(avg_rate - real_rate) > 0.01,
     }
+    return info
 
 
-def normalize_video_input(in_path: str, out_path: str, probe: Dict[str, Any]) -> None:
-    fps = float(probe.get("fps") or 30.0)
-    fps = 30.0 if fps <= 0 else fps
+def video_probe(video_path: str) -> Dict[str, Any]:
+    return analyze_video_quality(video_path)
+
+
+def transcode_for_tracking(in_path: str, out_path: str, probe: Dict[str, Any], setup: Dict[str, Any]) -> None:
     width = int(probe.get("width") or 0)
     height = int(probe.get("height") or 0)
+    scale_max = max(360, int(setup.get("transcode_scale_max") or 1080))
 
-    vf_parts = [f"fps={fps:.6f}"]
-    if max(width, height) > 1280:
+    vf_parts: List[str] = []
+    if bool(setup.get("transcode_deinterlace", True)) and bool(probe.get("is_interlaced")):
+        vf_parts.append("bwdif")
+    if bool(setup.get("transcode_denoise", False)):
+        vf_parts.append("hqdn3d=1.5:1.5:6:6")
+
+    if max(width, height) > scale_max:
         if width >= height:
-            vf_parts.append("scale=1280:-2")
+            vf_parts.append(f"scale={scale_max}:-2")
         else:
-            vf_parts.append("scale=-2:1280")
+            vf_parts.append(f"scale=-2:{scale_max}")
 
-    _run([
+    fps_override = setup.get("transcode_fps")
+    if fps_override not in (None, ""):
+        vf_parts.append(f"fps={int(fps_override)}")
+
+    cmd = [
         "ffmpeg", "-y", "-i", in_path,
-        "-vf", ",".join(vf_parts),
+        "-vsync", "cfr",
+    ]
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
+    if fps_override not in (None, ""):
+        cmd += ["-r", str(int(fps_override))]
+
+    cmd += [
         "-c:v", "libx264",
         "-preset", "fast",
-        "-crf", "20",
+        "-crf", str(int(setup.get("transcode_crf") or 20)),
         "-pix_fmt", "yuv420p",
+        "-g", "60",
+        "-keyint_min", "30",
+        "-sc_threshold", "0",
+        "-movflags", "+faststart",
         "-c:a", "aac",
+        "-b:a", "128k",
         out_path,
-    ])
+    ]
+    _run(cmd)
 
 
 def cut_clip(in_path: str, start: float, end: float, out_path: str) -> None:
@@ -1275,36 +1314,68 @@ def process_job(job_id: str) -> Dict[str, Any]:
             extra = {"perf": perf} if perf else {}
             write_status("processing", "tracking", pct, f"Tracking in progress ({t:.1f}s)", **extra)
 
-        probe = video_probe(in_path)
+        probe = analyze_video_quality(in_path)
         probe_path = job_dir / "probe.json"
         probe_path.write_text(json.dumps(probe, indent=2))
+        preflight_path = job_dir / "video_preflight.json"
+        preflight_path.write_text(json.dumps(probe, indent=2))
+        preflight_timeline = [{
+            "t": 0.0,
+            "event": "video_preflight",
+            "codec": probe.get("codec"),
+            "pix_fmt": probe.get("pix_fmt"),
+            "width": probe.get("width"),
+            "height": probe.get("height"),
+            "avg_frame_rate": probe.get("avg_frame_rate"),
+            "r_frame_rate": probe.get("r_frame_rate"),
+            "is_vfr_likely": probe.get("is_vfr_likely"),
+            "is_interlaced": probe.get("is_interlaced"),
+            "bit_rate": probe.get("bit_rate"),
+            "duration": probe.get("duration"),
+        }]
 
-        normalize_video = bool(setup.get("normalize_video", False))
+        transcode_enabled = bool(setup.get("transcode_enabled", False))
         tracking_input_path = in_path
-        if normalize_video:
-            tracking_input_path = str(job_dir / "normalized.mp4")
-            log.info(
-                "job_id=%s normalization enabled source=%s target=%s",
-                job_id,
-                in_path,
-                tracking_input_path,
-                extra={"job_id": job_id, "stage": "tracking"},
-            )
-            write_status("processing", "preflight", 11, "Normalizing video")
-            normalize_video_input(in_path, tracking_input_path, probe)
+        transcode_used = False
+        if transcode_enabled:
+            transcoded_path = str(job_dir / "transcoded.mp4")
+            preflight_timeline.append({"t": 0.0, "event": "transcode_started", "source": in_path, "target": transcoded_path})
+            write_status("processing", "preflight", 11, "Transcoding for tracking")
+            try:
+                transcode_for_tracking(in_path, transcoded_path, probe, setup)
+                output_probe = analyze_video_quality(transcoded_path)
+                preflight_timeline.append({
+                    "t": 0.0,
+                    "event": "transcode_completed",
+                    "output": transcoded_path,
+                    "codec": output_probe.get("codec"),
+                    "pix_fmt": output_probe.get("pix_fmt"),
+                    "width": output_probe.get("width"),
+                    "height": output_probe.get("height"),
+                    "avg_frame_rate": output_probe.get("avg_frame_rate"),
+                    "bit_rate": output_probe.get("bit_rate"),
+                })
+                tracking_input_path = transcoded_path
+                transcode_used = True
+            except Exception as exc:
+                stderr = exc.stderr if isinstance(exc, FFmpegError) else str(exc)
+                preflight_timeline.append({
+                    "t": 0.0,
+                    "event": "transcode_failed",
+                    "error": (stderr or "transcode failed")[:1000],
+                    "fallback_to_original": cuda_available,
+                })
+                if not cuda_available:
+                    raise
         else:
-            log.info(
-                "job_id=%s normalization disabled source=%s",
-                job_id,
-                in_path,
-                extra={"job_id": job_id, "stage": "tracking"},
-            )
+            preflight_timeline.append({"t": 0.0, "event": "transcode_skipped", "reason": "disabled"})
 
-        meta["transcode_used"] = normalize_video
+        meta["transcode_used"] = transcode_used
         meta_path.write_text(json.dumps(meta, indent=2))
 
         write_status("processing", "tracking", 12, "Tracking in progress")
         data = track_presence(tracking_input_path, setup, heartbeat=hb, cancel_check=cancel_check)
+        data["timeline"] = preflight_timeline + (data.get("timeline") or [])
 
         clips_dir = job_dir / "clips"
         clips_dir.mkdir(exist_ok=True)

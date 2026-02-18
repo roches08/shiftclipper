@@ -305,6 +305,11 @@ function payload(){
     bench_zone_ratio: Number($('benchZone').value),
     debug_overlay: $('debugOverlay').checked,
     debug_timeline: $('debugTimeline').checked,
+    transcode_enabled: $('transcodeEnabled').checked,
+    transcode_scale_max: Number($('transcodeScaleMax').value),
+    transcode_fps: $('transcodeFps').value ? Number($('transcodeFps').value) : null,
+    transcode_deinterlace: $('transcodeDeinterlace').checked,
+    transcode_denoise: $('transcodeDenoise').checked,
     clicks: state.clicks,
   };
 }
@@ -465,6 +470,11 @@ async function loadSetup(){
     setCheckedIfDefined('ocrDisable', setup.ocr_disable);
     setCheckedIfDefined('debugOverlay', setup.debug_overlay);
     setCheckedIfDefined('debugTimeline', setup.debug_timeline);
+    setCheckedIfDefined('transcodeEnabled', setup.transcode_enabled);
+    setValueIfDefined('transcodeScaleMax', setup.transcode_scale_max);
+    setValueIfDefined('transcodeFps', setup.transcode_fps);
+    setCheckedIfDefined('transcodeDeinterlace', setup.transcode_deinterlace);
+    setCheckedIfDefined('transcodeDenoise', setup.transcode_denoise);
     state.clicks = Array.isArray(setup.clicks) ? setup.clicks : [];
     setCheckedIfDefined('skipSeeding', setup.skip_seeding);
     drawClickMarkers();
