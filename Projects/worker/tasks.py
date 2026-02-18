@@ -10,6 +10,7 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -122,6 +123,30 @@ class TrackingParams:
     verify_mode: bool = False
     debug_overlay: bool = False
     debug_timeline: bool = True
+    use_rink_mask: bool = True
+    use_bench_mask: bool = True
+    use_reid: bool = True
+    loss_timeout_sec: float = 1.5
+    reacquire_max_sec: float = 2.0
+    reacquire_confirm_frames: int = 5
+    reid_sim_threshold: float = 0.35
+    max_clip_len_sec: float = 90.0
+    allow_bench_reacquire: bool = False
+    edge_margin_px: float = 2.0
+    reid_every_n_frames: int = 4
+    reid_max_candidates: int = 5
+    reid_alpha: float = 0.7
+    reid_min_px: int = 24
+    reid_sharpness_threshold: float = 15.0
+
+
+class ClipEndReason(str, Enum):
+    LOST_TIMEOUT = "lost_timeout"
+    BENCH_ENTER = "bench_enter"
+    PERIOD_END = "period_end"
+    VIDEO_END = "video_end"
+    MANUAL_STOP = "manual_stop"
+    MAX_LEN_GUARD = "max_len_guard"
 
 
 def _ensure_dirs() -> None:
@@ -185,6 +210,87 @@ def _expand_box(box: Tuple[int, int, int, int], scale: float, w: int, h: int) ->
     return _clip((cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0), w, h)
 
 
+
+
+def _point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
+    if len(polygon) < 3:
+        return False
+    x, y = point
+    inside = False
+    j = len(polygon) - 1
+    for i in range(len(polygon)):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        intersects = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / max(1e-9, (yj - yi)) + xi)
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _bbox_feet_point(box: Tuple[int, int, int, int]) -> Tuple[float, float]:
+    x1, _, x2, y2 = box
+    return ((x1 + x2) / 2.0, float(y2))
+
+
+def _normalize_polygon(poly: List[List[float]], width: int, height: int, normalized: bool) -> List[Tuple[float, float]]:
+    out = []
+    for pt in poly or []:
+        if len(pt) != 2:
+            continue
+        px, py = float(pt[0]), float(pt[1])
+        if normalized:
+            px *= width
+            py *= height
+        out.append((px, py))
+    return out
+
+
+def _poly_contains_with_margin(point: Tuple[float, float], polygon: List[Tuple[float, float]], margin: float) -> bool:
+    if _point_in_polygon(point, polygon):
+        return True
+    x, y = point
+    for px, py in polygon:
+        if abs(px - x) <= margin and abs(py - y) <= margin:
+            return True
+    return False
+
+
+def _crop_sharpness(crop: np.ndarray) -> float:
+    if crop.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _cosine_similarity(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float:
+    if a is None or b is None:
+        return -1.0
+    an = np.linalg.norm(a)
+    bn = np.linalg.norm(b)
+    if an < 1e-6 or bn < 1e-6:
+        return -1.0
+    return float(np.dot(a, b) / (an * bn))
+
+
+def _embed_crop(crop: np.ndarray) -> Optional[np.ndarray]:
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256]).astype(np.float32).flatten()
+    n = np.linalg.norm(hist)
+    if n < 1e-6:
+        return None
+    return hist / n
+
+
+def _compute_clip_end_for_loss(last_seen_time: float, loss_timeout: float, video_end_time: float) -> float:
+    return min(video_end_time, max(0.0, last_seen_time + max(0.0, loss_timeout)))
+
+
+def _append_segment(segments: List[Tuple[float, float, str]], start_time: float, end_time: float, reason: ClipEndReason) -> None:
+    if end_time > start_time:
+        segments.append((float(start_time), float(end_time), reason.value))
 def _merge_segments(
     segments: List[Tuple[float, float, str]],
     *,
@@ -400,13 +506,22 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     jersey_hsv = _hex_to_hsv(setup.get("jersey_color", "#203524"))
     player_num = re.sub(r"\D+", "", str(setup.get("player_number") or ""))
 
-    state = "SEARCHING"
+    state = "SEARCH"
     lock_state = "UNLOCKED"
     lost_since = None
     locked_track_id = None
     last_box = None
     last_seen = -1.0
+    lost_start_time = None
     reacquire_until = 0.0
+    clip_start_time: Optional[float] = None
+    clip_last_seen_time: Optional[float] = None
+    clip_bench_enter_time: Optional[float] = None
+    clip_end_reason: Optional[str] = None
+    reacquire_hits: Dict[int, int] = {}
+    target_embed: Optional[np.ndarray] = None
+    target_embed_history: List[List[float]] = []
+    embed_cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
     vetoed_tracks: Dict[int, float] = {}
 
     seed_clicks = []
@@ -429,6 +544,17 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     seed_bonus_val = float(setup.get("seed_bonus", params.seed_bonus))
     ocr_veto_conf = float(setup.get("ocr_veto_conf", params.ocr_veto_conf))
     ocr_veto_conf_seed_hard = 0.95
+    tracking_mode = str(setup.get("tracking_mode") or params.tracking_mode).lower()
+
+    polygon_normalized = bool(setup.get("polygon_coords_normalized", True))
+    rink_polygon = _normalize_polygon(setup.get("rink_polygon") or [], w, h, polygon_normalized)
+    bench_polygons = [_normalize_polygon(poly, w, h, polygon_normalized) for poly in (setup.get("bench_polygons") or [])]
+
+    loss_timeout_sec = float(setup.get("loss_timeout_sec", setup.get("LOSS_TIMEOUT_SEC", params.loss_timeout_sec)))
+    reacquire_max_sec = float(setup.get("reacquire_max_sec", setup.get("REACQUIRE_MAX_SEC", params.reacquire_max_sec)))
+    reacquire_confirm_frames = max(1, int(setup.get("reacquire_confirm_frames", setup.get("REACQUIRE_CONFIRM_FRAMES", params.reacquire_confirm_frames))))
+    reid_sim_threshold = float(setup.get("reid_sim_threshold", setup.get("REID_SIM_THRESHOLD", params.reid_sim_threshold)))
+    edge_margin_px = float(setup.get("edge_margin_px", params.edge_margin_px))
 
     segments, shifts = [], []
     shift_start = None
@@ -578,11 +704,29 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 box = _clip(tr.to_ltrb(), w, h)
                 if t < vetoed_tracks.get(tr.track_id, 0.0):
                     continue
+                feet = _bbox_feet_point(box)
+                in_rink = True if not params.use_rink_mask or not rink_polygon else _poly_contains_with_margin(feet, rink_polygon, edge_margin_px)
+                in_bench = any(_poly_contains_with_margin(feet, poly, edge_margin_px) for poly in bench_polygons if poly)
+                if params.use_rink_mask and rink_polygon and not in_rink:
+                    continue
+                if state in {"SEARCH", "LOST"} and params.use_bench_mask and in_bench and not bool(setup.get("allow_bench_reacquire", params.allow_bench_reacquire)):
+                    continue
                 cscore = _color_score(frame, box, jersey_hsv, params.color_tolerance)
                 motion = _iou(box, last_box) if last_box else 0.0
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
                 seed_bonus = seed_bonus_val if (seed_bonus_track_id is not None and tr.track_id == seed_bonus_track_id) else 0.0
                 score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus + seed_bonus
+                emb = None
+                sim = -1.0
+                crop = frame[box[1]:box[3], box[0]:box[2]]
+                sharpness = _crop_sharpness(crop) if crop.size else 0.0
+                if params.use_reid and crop.size and (box[2] - box[0]) >= params.reid_min_px and (box[3] - box[1]) >= params.reid_min_px and sharpness >= params.reid_sharpness_threshold:
+                    cache_key = (current_idx, tr.track_id)
+                    emb = embed_cache.get(cache_key)
+                    if emb is None:
+                        emb = _embed_crop(crop)
+                        embed_cache[cache_key] = emb
+                    sim = _cosine_similarity(target_embed, emb) if emb is not None else -1.0
                 candidates.append({
                     "track_id": tr.track_id,
                     "box": box,
@@ -596,6 +740,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "seed_match": seed_bonus > 0.0,
                     "seed_dist": nearest_seed_dist if tr.track_id == seed_bonus_track_id else None,
                     "seed_iou": nearest_seed_iou if tr.track_id == seed_bonus_track_id else None,
+                    "in_rink": in_rink,
+                    "in_bench": in_bench,
+                    "embed": emb,
+                    "sim": sim,
+                    "sharpness": sharpness,
                 })
 
             max_ocr_crops = max(1, int(setup.get("ocr_max_crops_per_frame", params.ocr_max_crops_per_frame)))
@@ -669,6 +818,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 elif cand["closeup_blocked"]:
                     cand["score"] -= 0.75
                 cand["score"] += params.ocr_weight * cand["ocr_match"]
+                if params.use_reid and cand.get("sim", -1.0) >= 0:
+                    cand["score"] += 0.5 * cand["sim"]
                 if best is None or cand["score"] > best["score"]:
                     best = cand
 
@@ -683,58 +834,121 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             if best:
                 last_box = best["box"]
 
-            if best and best["score"] >= lock_threshold and not best.get("closeup_blocked", False):
-                if state != "LOCKED":
-                    timeline.append({"t": t, "event": "lock", "reason": "score", "score": best["score"], "threshold": lock_threshold})
-                state = "LOCKED"
-                locked_track_id = best["track_id"]
-                last_seen = t
-                lost_since = None
-                if player_num and (best.get("ocr_match", 0.0) >= 1.0 or best.get("seed_match")):
-                    lock_state = "CONFIRMED"
-                elif player_num:
-                    lock_state = "PROVISIONAL"
+            sim_ok = bool(best and (not params.use_reid or best.get("sim", -1.0) >= reid_sim_threshold or state == "LOCKED"))
+            if best and sim_ok and best["score"] >= lock_threshold and not best.get("closeup_blocked", False):
+                if state in {"SEARCH", "LOST"}:
+                    reacquire_hits[best["track_id"]] = reacquire_hits.get(best["track_id"], 0) + 1
+                    if reacquire_hits[best["track_id"]] < reacquire_confirm_frames:
+                        state = "SEARCH"
+                    else:
+                        timeline.append({"t": t, "event": "reacquire", "reason": "confirm_frames", "hits": reacquire_hits[best["track_id"]], "track_id": best["track_id"]})
+                        state = "LOCKED"
                 else:
-                    lock_state = "CONFIRMED"
-                if t <= reacquire_until:
-                    timeline.append({"t": t, "event": "reacquire", "reason": "score_recovered", "score": best["score"]})
+                    state = "LOCKED"
+                if state == "LOCKED":
+                    locked_track_id = best["track_id"]
+                    last_seen = t
+                    clip_last_seen_time = t
+                    lost_since = None
+                    lost_start_time = None
                     reacquire_until = 0.0
+                    reacquire_hits.clear()
+                    if clip_start_time is None:
+                        clip_start_time = t
+                    if player_num and (best.get("ocr_match", 0.0) >= 1.0 or best.get("seed_match")):
+                        lock_state = "CONFIRMED"
+                    elif player_num:
+                        lock_state = "PROVISIONAL"
+                    else:
+                        lock_state = "CONFIRMED"
+                    if best.get("embed") is not None and (current_idx % max(1, int(setup.get("reid_every_n_frames", params.reid_every_n_frames))) == 0):
+                        if target_embed is None:
+                            target_embed = best["embed"]
+                        else:
+                            alpha = float(setup.get("reid_alpha", params.reid_alpha))
+                            target_embed = target_embed * alpha + best["embed"] * (1.0 - alpha)
+                            n = np.linalg.norm(target_embed)
+                            if n > 1e-6:
+                                target_embed = target_embed / n
+                        if target_embed is not None:
+                            target_embed_history.append(target_embed.tolist()[:16])
             elif state == "LOCKED":
                 if best and best["score"] >= unlock_threshold:
                     lost_since = None
                 elif lost_since is None:
                     lost_since = t
+                    lost_start_time = t
+                    state = "LOST"
+                    reacquire_until = t + max(0.0, reacquire_max_sec)
                     timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold", "score": best["score"] if best else None, "threshold": unlock_threshold})
-                elif (t - lost_since) > params.lost_timeout:
-                    state = "SEARCHING"
-                    lock_state = "UNLOCKED"
-                    locked_track_id = None
-                    reacquire_until = t + float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds))
-                    timeline.append({"t": t, "event": "unlock", "reason": "lost_timeout", "lost_for": t - lost_since, "score": best["score"] if best else None, "threshold": unlock_threshold})
-                    timeline.append({"t": t, "event": "reacquire", "reason": "window_open", "until": reacquire_until})
-            else:
-                if t > reacquire_until:
-                    lost_since = None
+            elif state in {"SEARCH", "LOST"}:
+                if lost_start_time is not None and t > reacquire_until:
+                    clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
             present = state == "LOCKED" and (allow_unconfirmed or not player_num or lock_state == "CONFIRMED")
             if present and not present_prev:
                 seg_start = t
+                if clip_start_time is None:
+                    clip_start_time = t
                 if shift_state == "OFF_ICE":
                     shift_state = "ON_ICE"
                     shift_start = t
+            if present and best and params.use_bench_mask and best.get("in_bench"):
+                clip_bench_enter_time = clip_bench_enter_time or t
+                if (t - clip_bench_enter_time) >= max(0.0, float(setup.get("bench_confirm_sec", 0.35))):
+                    clip_end_reason = ClipEndReason.BENCH_ENTER.value
+            else:
+                clip_bench_enter_time = None
+
+            if present and clip_start_time is not None and (t - clip_start_time) > float(setup.get("max_clip_len_sec", params.max_clip_len_sec)):
+                clip_end_reason = ClipEndReason.MAX_LEN_GUARD.value
+
+            if clip_end_reason == ClipEndReason.LOST_TIMEOUT.value and clip_start_time is not None:
+                seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
+                _append_segment(segments, clip_start_time, seg_end, ClipEndReason.LOST_TIMEOUT)
+                present = False
+            elif clip_end_reason == ClipEndReason.BENCH_ENTER.value and clip_start_time is not None:
+                _append_segment(segments, clip_start_time, t, ClipEndReason.BENCH_ENTER)
+                present = False
+            elif clip_end_reason == ClipEndReason.MAX_LEN_GUARD.value and clip_start_time is not None:
+                _append_segment(segments, clip_start_time, t, ClipEndReason.MAX_LEN_GUARD)
+                present = False
+
+            if (not present) and present_prev and clip_end_reason is None:
+                _append_segment(segments, seg_start, t, ClipEndReason.LOST_TIMEOUT)
+
             if (not present) and present_prev:
                 seg_end = t
-                segments.append((seg_start, seg_end, "unlock"))
                 if shift_state == "ON_ICE" and shift_start is not None:
                     shifts.append((shift_start, seg_end))
                     shift_state = "OFF_ICE"
                     shift_start = None
+                if clip_end_reason is not None:
+                    timeline.append({"t": t, "event": "clip_end", "reason": clip_end_reason, "start_time": clip_start_time, "end_time": seg_end})
+                    lock_state = "UNLOCKED"
+                    state = "SEARCH"
+                    locked_track_id = None
+                    clip_start_time = None
+                    clip_end_reason = None
+                    lost_start_time = None
 
             if prev_state != state:
                 timeline.append({"t": t, "event": "state", "from": prev_state, "to": state})
             if prev_lock_state != lock_state:
                 timeline.append({"t": t, "event": "lock_state", "from": prev_lock_state, "to": lock_state})
+
+            log.info(
+                "decision frame_time=%.3f status=%s candidates=%d chosen_id=%s sim=%.3f in_rink=%s in_bench=%s end_reason=%s",
+                t,
+                state,
+                len(candidates),
+                best.get("track_id") if best else None,
+                float(best.get("sim", -1.0)) if best else -1.0,
+                bool(best.get("in_rink", True)) if best else None,
+                bool(best.get("in_bench", False)) if best else None,
+                clip_end_reason,
+            )
 
             if writer is not None:
                 draw = frame.copy()
@@ -775,7 +989,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         writer.release()
     if present_prev:
         eof_t = frame_idx / max(fps, 1.0)
-        segments.append((seg_start, eof_t, "eof"))
+        _append_segment(segments, clip_start_time or seg_start, eof_t, ClipEndReason.VIDEO_END)
+        timeline.append({"t": eof_t, "event": "clip_end", "reason": ClipEndReason.VIDEO_END.value})
         if shift_state == "ON_ICE" and shift_start is not None:
             shifts.append((shift_start, eof_t))
 
@@ -822,6 +1037,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "debug_overlay_path": overlay_path,
         "fps": fps,
         "perf": perf_summary,
+        "target_embed_history": target_embed_history,
     }
 
 def process_job(job_id: str) -> Dict[str, Any]:
