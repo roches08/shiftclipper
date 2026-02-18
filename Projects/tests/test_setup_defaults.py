@@ -29,6 +29,14 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["score_unlock_threshold"] == 0.33
     assert setup["swap_guard_seconds"] == 2.0
     assert setup["swap_guard_bonus"] == 0.1
+    assert setup["reid_enable"] is True
+    assert setup["reid_model"] == "osnet_x0_25"
+    assert setup["reid_every_n_frames"] == 5
+    assert setup["reid_weight"] == 0.4
+    assert setup["reid_min_sim"] == 0.45
+    assert setup["reid_crop_expand"] == 0.10
+    assert setup["reid_batch"] == 16
+    assert setup["reid_device"] == "cuda:0"
     assert setup["gap_merge_seconds"] == 1.5
     assert setup["transcode_enabled"] is False
     assert setup["transcode_scale_max"] == 1080

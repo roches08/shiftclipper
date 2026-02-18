@@ -374,15 +374,23 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
 
     for nm in [
         "score_lock_threshold", "score_unlock_threshold", "reacquire_score_lock_threshold",
-        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf", "swap_guard_bonus",
+        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf", "swap_guard_bonus", "reid_weight", "reid_min_sim", "reid_crop_expand",
     ]:
         _check_01(nm)
 
     for nm in [
         "lost_timeout", "reacquire_window_seconds", "gap_merge_seconds", "lock_seconds_after_confirm",
         "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds",
+        "reid_every_n_frames",
     ]:
         _check_non_negative(nm)
+
+    if "reid_batch" in payload and int(payload["reid_batch"]) < 1:
+        raise HTTPException(status_code=400, detail="reid_batch must be >= 1")
+    if "reid_every_n_frames" in payload and int(payload["reid_every_n_frames"]) < 1:
+        raise HTTPException(status_code=400, detail="reid_every_n_frames must be >= 1")
+    if "reid_model" in payload and payload.get("reid_model") not in {"osnet_x0_25", "osnet_x1_0"}:
+        raise HTTPException(status_code=400, detail="reid_model must be one of: osnet_x0_25, osnet_x1_0")
 
     if "detect_stride" in payload and int(payload["detect_stride"]) < 1:
         raise HTTPException(status_code=400, detail="detect_stride must be >= 1")
