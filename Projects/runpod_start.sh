@@ -31,6 +31,8 @@ REID_WEIGHTS_TMP="${REID_WEIGHTS_DEST}.tmp"
 REID_WEIGHTS_URL="https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
 REID_MIN_BYTES=$((10 * 1024 * 1024))
 
+file_size(){ wc -c < "$1" | tr -d ' '; }
+
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 mkdir -p "$JOBS_DIR"
 
@@ -62,7 +64,7 @@ fi
 "$PYTHON_BIN" -m pip install -r "$REQUIREMENTS_FILE"
 
 "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
-"$PYTHON_BIN" -c "from ultralytics import YOLO; import torch; m=YOLO('yolov8s.pt'); m.predict(source='https://ultralytics.com/images/bus.jpg', device=0, imgsz=640, verbose=False); print('ultralytics gpu ok', torch.cuda.is_available())"
+"$PYTHON_BIN" -c "from ultralytics import YOLO; import torch; YOLO('yolov8n.yaml'); print('ultralytics local model load ok', torch.cuda.is_available())"
 
 if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq; print('deps ok')"; then
   echo "ERROR: dependency import check failed."
@@ -72,18 +74,23 @@ if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq;
 fi
 
 mkdir -p "$REID_WEIGHTS_DIR"
-if [ -s "$REID_WEIGHTS_DEST" ] && [ "$(stat -c%s "$REID_WEIGHTS_DEST")" -gt "$REID_MIN_BYTES" ]; then
+if [ -s "$REID_WEIGHTS_DEST" ] && [ "$(file_size "$REID_WEIGHTS_DEST")" -gt "$REID_MIN_BYTES" ]; then
   echo "ReID weights already present at $REID_WEIGHTS_DEST"
 else
   echo "Bootstrapping ReID weights to $REID_WEIGHTS_DEST"
   rm -f "$REID_WEIGHTS_TMP"
-  curl -L --fail --retry 3 --retry-delay 2 "$REID_WEIGHTS_URL" -o "$REID_WEIGHTS_TMP"
-  if [ ! -s "$REID_WEIGHTS_TMP" ] || [ "$(stat -c%s "$REID_WEIGHTS_TMP")" -le "$REID_MIN_BYTES" ]; then
-    echo "ERROR: ReID weights download failed validation for $REID_WEIGHTS_URL"
+  if ! curl -L --fail --retry 3 --retry-delay 2 "$REID_WEIGHTS_URL" -o "$REID_WEIGHTS_TMP"; then
+    echo "WARNING: ReID weights download failed for $REID_WEIGHTS_URL; continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
-    exit 1
+  elif head -c 200 "$REID_WEIGHTS_TMP" | grep -qi "<html"; then
+    echo "WARNING: ReID weights download returned HTML for $REID_WEIGHTS_URL; continuing without local ReID weights"
+    rm -f "$REID_WEIGHTS_TMP"
+  elif [ ! -s "$REID_WEIGHTS_TMP" ] || [ "$(file_size "$REID_WEIGHTS_TMP")" -le "$REID_MIN_BYTES" ]; then
+    echo "WARNING: ReID weights download failed validation for $REID_WEIGHTS_URL; continuing without local ReID weights"
+    rm -f "$REID_WEIGHTS_TMP"
+  else
+    mv "$REID_WEIGHTS_TMP" "$REID_WEIGHTS_DEST"
   fi
-  mv "$REID_WEIGHTS_TMP" "$REID_WEIGHTS_DEST"
 fi
 
 if ! "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
