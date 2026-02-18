@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover
     send_stop_job_command = None
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from pydantic import BaseModel, Field, ConfigDict
 from common.config import normalize_setup
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,6 +49,34 @@ app = FastAPI()
 if not WEB_DIR.exists():
     WEB_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+
+
+class SetupRequest(BaseModel):
+    score_lock_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    score_unlock_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    lost_timeout: Optional[float] = Field(default=None, ge=0)
+    reacquire_window_seconds: Optional[float] = Field(default=None, ge=0)
+    reacquire_score_lock_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    gap_merge_seconds: Optional[float] = Field(default=None, ge=0)
+    lock_seconds_after_confirm: Optional[float] = Field(default=None, ge=0)
+    min_track_seconds: Optional[float] = Field(default=None, ge=0)
+    min_clip_seconds: Optional[float] = Field(default=None, ge=0)
+    seed_lock_seconds: Optional[float] = Field(default=None, ge=0)
+    seed_iou_min: Optional[float] = Field(default=None, ge=0, le=1)
+    seed_dist_max: Optional[float] = Field(default=None, ge=0, le=1)
+    seed_bonus: Optional[float] = Field(default=None, ge=0)
+    seed_window_s: Optional[float] = Field(default=None, ge=0)
+    detect_stride: Optional[int] = Field(default=None, ge=1)
+    yolo_imgsz: Optional[int] = Field(default=None, ge=256, le=1280)
+    yolo_batch: Optional[int] = Field(default=None, ge=1)
+    ocr_every_n_frames: Optional[int] = Field(default=None, ge=1)
+    ocr_min_conf: Optional[float] = Field(default=None, ge=0, le=1)
+    ocr_veto_conf: Optional[float] = Field(default=None, ge=0, le=1)
+    ocr_veto_seconds: Optional[float] = Field(default=None, ge=0)
+
+    model_config = ConfigDict(extra="allow")
 
 
 def job_dir(job_id: str) -> Path:
@@ -362,11 +391,12 @@ async def upload_video(job_id: str, request: Request, file: UploadFile = File(..
 
 
 @app.put("/jobs/{job_id}/setup")
-def setup_job(job_id: str, payload: Dict[str, Any]):
+def setup_job(job_id: str, payload: SetupRequest):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    setup = normalize_setup(payload)
+    payload_data = payload.model_dump(exclude_none=True) if hasattr(payload, "model_dump") else payload.dict(exclude_none=True)
+    setup = normalize_setup(payload_data)
     write_json(jd / "setup.json", setup)
 
     set_status(

@@ -73,6 +73,24 @@ def _as_int(src: Dict[str, Any], key: str, default: int) -> int:
         return default
 
 
+def _clamp_float(src: Dict[str, Any], key: str, default: float, min_v: float | None = None, max_v: float | None = None) -> float:
+    v = _as_float(src, key, default)
+    if min_v is not None:
+        v = max(min_v, v)
+    if max_v is not None:
+        v = min(max_v, v)
+    return v
+
+
+def _clamp_int(src: Dict[str, Any], key: str, default: int, min_v: int | None = None, max_v: int | None = None) -> int:
+    v = _as_int(src, key, default)
+    if min_v is not None:
+        v = max(min_v, v)
+    if max_v is not None:
+        v = min(max_v, v)
+    return v
+
+
 def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
     c = (hex_color or "").strip().lstrip("#")
     if len(c) != 6:
@@ -92,18 +110,18 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
 
     mode_defaults = {
         "clip": {
-            "score_lock_threshold": 0.45,
-            "score_unlock_threshold": 0.25,
-            "lost_timeout": 3.0,
-            "reacquire_window_seconds": 10.0,
-            "reacquire_score_lock_threshold": 0.30,
+            "score_lock_threshold": 0.55,
+            "score_unlock_threshold": 0.35,
+            "lost_timeout": 1.5,
+            "reacquire_window_seconds": 4.0,
+            "reacquire_score_lock_threshold": 0.40,
         },
         "shift": {
-            "score_lock_threshold": 0.45,
-            "score_unlock_threshold": 0.25,
-            "lost_timeout": 3.0,
-            "reacquire_window_seconds": 10.0,
-            "reacquire_score_lock_threshold": 0.30,
+            "score_lock_threshold": 0.55,
+            "score_unlock_threshold": 0.35,
+            "lost_timeout": 1.5,
+            "reacquire_window_seconds": 4.0,
+            "reacquire_score_lock_threshold": 0.40,
         },
     }[tracking_mode]
 
@@ -144,44 +162,44 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "skip_seeding": bool(src.get("skip_seeding", False)),
         "clicks": clicks,
         "clicks_count": len(clicks),
-        "detect_stride": _as_int(src, "detect_stride", preset["detect_stride"]),
-        "yolo_imgsz": _as_int(src, "yolo_imgsz", preset["yolo_imgsz"]),
-        "ocr_every_n": _as_int(src, "ocr_every_n", preset["ocr_every_n"]),
-        "ocr_every_n_frames": _as_int(src, "ocr_every_n_frames", _as_int(src, "ocr_every_n", preset["ocr_every_n"])),
+        "detect_stride": _clamp_int(src, "detect_stride", preset["detect_stride"], min_v=1),
+        "yolo_imgsz": _clamp_int(src, "yolo_imgsz", preset["yolo_imgsz"], min_v=256, max_v=1280),
+        "ocr_every_n": _clamp_int(src, "ocr_every_n", preset["ocr_every_n"], min_v=1),
+        "ocr_every_n_frames": _clamp_int(src, "ocr_every_n_frames", _as_int(src, "ocr_every_n", preset["ocr_every_n"]), min_v=1),
         "ocr_max_crops_per_frame": _as_int(src, "ocr_max_crops_per_frame", preset.get("ocr_max_crops_per_frame", 1)),
         "ocr_disable": bool(src.get("ocr_disable", False)),
-        "yolo_batch": max(1, _as_int(src, "yolo_batch", 4)),
+        "yolo_batch": _clamp_int(src, "yolo_batch", 4, min_v=1),
         "tracker_type": tracker_type,
-        "ocr_min_conf": _as_float(src, "ocr_min_conf", preset["ocr_min_conf"]),
-        "lock_seconds_after_confirm": _as_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"]),
-        "gap_merge_seconds": _as_float(src, "gap_merge_seconds", 4.0),
-        "lost_timeout": _as_float(src, "lost_timeout", mode_defaults["lost_timeout"]),
-        "reacquire_window_seconds": _as_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"]),
-        "reacquire_score_lock_threshold": _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"]),
-        "min_track_seconds": _as_float(src, "min_track_seconds", preset["min_track_seconds"]),
-        "min_clip_seconds": _as_float(src, "min_clip_seconds", 1.0),
-        "score_lock_threshold": _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]),
-        "score_unlock_threshold": _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"]),
-        "seed_lock_seconds": _as_float(src, "seed_lock_seconds", 8.0),
-        "seed_iou_min": _as_float(src, "seed_iou_min", _as_float(src, "seed_min_iou", 0.12)),
-        "seed_dist_max": _as_float(src, "seed_dist_max", 0.16),
-        "seed_bonus": _as_float(src, "seed_bonus", 0.80),
-        "seed_window_s": _as_float(src, "seed_window_s", _as_float(src, "seed_search_window_seconds", 3.0)),
+        "ocr_min_conf": _clamp_float(src, "ocr_min_conf", preset["ocr_min_conf"], min_v=0.0, max_v=1.0),
+        "lock_seconds_after_confirm": _clamp_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"], min_v=0.0),
+        "gap_merge_seconds": _clamp_float(src, "gap_merge_seconds", 2.5, min_v=0.0),
+        "lost_timeout": _clamp_float(src, "lost_timeout", mode_defaults["lost_timeout"], min_v=0.0),
+        "reacquire_window_seconds": _clamp_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"], min_v=0.0),
+        "reacquire_score_lock_threshold": _clamp_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"], min_v=0.0, max_v=1.0),
+        "min_track_seconds": _clamp_float(src, "min_track_seconds", preset["min_track_seconds"], min_v=0.0),
+        "min_clip_seconds": _clamp_float(src, "min_clip_seconds", 1.0, min_v=0.0),
+        "score_lock_threshold": _clamp_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"], min_v=0.0, max_v=1.0),
+        "score_unlock_threshold": _clamp_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"], min_v=0.0, max_v=1.0),
+        "seed_lock_seconds": _clamp_float(src, "seed_lock_seconds", 8.0, min_v=0.0),
+        "seed_iou_min": _clamp_float(src, "seed_iou_min", _as_float(src, "seed_min_iou", 0.12), min_v=0.0, max_v=1.0),
+        "seed_dist_max": _clamp_float(src, "seed_dist_max", 0.16, min_v=0.0, max_v=1.0),
+        "seed_bonus": _clamp_float(src, "seed_bonus", 0.80, min_v=0.0),
+        "seed_window_s": _clamp_float(src, "seed_window_s", _as_float(src, "seed_search_window_seconds", 3.0), min_v=0.0),
         "color_weight": _as_float(src, "color_weight", preset["color_weight"]),
         "motion_weight": _as_float(src, "motion_weight", 0.3),
         "ocr_weight": _as_float(src, "ocr_weight", 0.35),
         "identity_weight": _as_float(src, "identity_weight", 0.5),
-        "color_tolerance": _as_int(src, "color_tolerance", 26),
-        "bench_zone_ratio": _as_float(src, "bench_zone_ratio", 0.8),
+        "color_tolerance": _clamp_int(src, "color_tolerance", 26, min_v=0),
+        "bench_zone_ratio": _clamp_float(src, "bench_zone_ratio", 0.8, min_v=0.0, max_v=1.0),
         "generate_combined": bool(src.get("generate_combined", True)),
         "debug_overlay": bool(src.get("debug_overlay", False)),
         "debug_timeline": bool(src.get("debug_timeline", True)),
         "ocr_confirm_m": _as_int(src, "ocr_confirm_m", 2),
         "ocr_confirm_k": _as_int(src, "ocr_confirm_k", 5),
-        "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", True)),
+        "allow_unconfirmed_clips": bool(src.get("allow_unconfirmed_clips", False)),
         "allow_seed_clips": bool(src.get("allow_seed_clips", True)),
-        "ocr_veto_conf": _as_float(src, "ocr_veto_conf", 0.995),
-        "ocr_veto_seconds": _as_float(src, "ocr_veto_seconds", 0.5),
+        "ocr_veto_conf": _clamp_float(src, "ocr_veto_conf", 0.85, min_v=0.0, max_v=1.0),
+        "ocr_veto_seconds": _clamp_float(src, "ocr_veto_seconds", 2.0, min_v=0.0),
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
     }
     return setup

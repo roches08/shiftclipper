@@ -69,16 +69,45 @@
   </div>
 
   <details>
-    <summary>Advanced Tracking</summary>
+    <summary>Advanced Tracking Settings</summary>
+    <div class="row" style="margin:8px 0;">
+      <button id="presetBalanced" type="button">Balanced (default)</button>
+      <button id="presetAggressive" type="button">More Clips (aggressive)</button>
+      <button id="presetStrict" type="button">Track Quality (strict)</button>
+    </div>
     <div class="row">
-      <label>Detect stride</label><input id="detectStride" type="number" value="1" />
-      <label>OCR min confidence</label><input id="ocrMinConf" type="number" step="0.01" value="0.22" />
-      <label>Lock after confirm</label><input id="lockSeconds" type="number" step="0.1" value="4.0" />
-      <label>Lost timeout</label><input id="lostTimeout" type="number" step="0.1" value="1.5" />
-      <label>Merge gap</label><input id="mergeGap" type="number" step="0.1" value="2.5" />
-      <label>Min segment</label><input id="minTrack" type="number" step="0.1" value="0.75" />
+      <label title="Confidence needed to lock onto a target track (0..1).">Score lock threshold</label><input id="scoreLockThreshold" type="number" step="0.01" min="0" max="1" value="0.55" />
+      <label title="Confidence threshold to release a lock (0..1).">Score unlock threshold</label><input id="scoreUnlockThreshold" type="number" step="0.01" min="0" max="1" value="0.35" />
+      <label title="Seconds to tolerate missing detections before dropping track.">Lost timeout</label><input id="lostTimeout" type="number" step="0.1" min="0" value="1.5" />
+      <label title="How long to allow reacquisition after loss.">Reacquire window (s)</label><input id="reacquireWindowSeconds" type="number" step="0.1" min="0" value="4" />
+      <label title="Score threshold used during reacquisition.">Reacquire score lock</label><input id="reacquireScoreLockThreshold" type="number" step="0.01" min="0" max="1" value="0.4" />
+      <label title="Merge nearby segments separated by up to this many seconds.">Gap merge (s)</label><input id="mergeGap" type="number" step="0.1" min="0" value="2.5" />
+      <label title="Keep lock for this long after a confirmed detection.">Lock after confirm (s)</label><input id="lockSeconds" type="number" step="0.1" min="0" value="4" />
+      <label title="Minimum tracked segment duration.">Min track (s)</label><input id="minTrack" type="number" step="0.05" min="0" value="0.75" />
+      <label title="Minimum clip duration after segment merge.">Min clip (s)</label><input id="minClipSeconds" type="number" step="0.05" min="0" value="1" />
+      <label title="Allow clips from unconfirmed tracks."><input id="allowUnconfirmedClips" type="checkbox" /> Allow unconfirmed clips</label>
+      <label title="Allow seed-based clips when confidence is low."><input id="allowSeedClips" type="checkbox" checked /> Allow seed clips</label>
+      <label title="Time to keep a seed lock active.">Seed lock (s)</label><input id="seedLockSeconds" type="number" step="0.1" min="0" value="8" />
+      <label title="Minimum IoU to match seed with detection.">Seed IoU min</label><input id="seedIouMin" type="number" step="0.01" min="0" max="1" value="0.12" />
+      <label title="Maximum normalized distance to match seed.">Seed distance max</label><input id="seedDistMax" type="number" step="0.01" min="0" max="1" value="0.16" />
+      <label title="Seed score bonus added during matching.">Seed bonus</label><input id="seedBonus" type="number" step="0.01" min="0" value="0.8" />
+      <label title="Seconds around seed click to prioritize matching.">Seed window (s)</label><input id="seedWindowS" type="number" step="0.1" min="0" value="3" />
+      <label title="Disable OCR influence entirely."><input id="ocrDisable" type="checkbox" /> Disable OCR</label>
+      <label title="Run OCR every N frames.">OCR every N frames</label><input id="ocrEveryNFrames" type="number" step="1" min="1" value="12" />
+      <label title="Minimum OCR confidence used for positive evidence.">OCR min conf</label><input id="ocrMinConf" type="number" step="0.01" min="0" max="1" value="0.2" />
+      <label title="OCR confidence that can veto a track.">OCR veto conf</label><input id="ocrVetoConf" type="number" step="0.01" min="0" max="1" value="0.85" />
+      <label title="How long OCR veto remains active.">OCR veto seconds</label><input id="ocrVetoSeconds" type="number" step="0.1" min="0" value="2" />
+      <label title="Run YOLO detection every Nth frame.">Detect stride</label><input id="detectStride" type="number" step="1" min="1" value="2" />
+      <label title="YOLO inference image size.">YOLO image size</label><input id="yoloImgsz" type="number" step="1" min="256" max="1280" value="512" />
+      <label title="YOLO batch size for detector.">YOLO batch</label><input id="yoloBatch" type="number" step="1" min="1" value="4" />
+      <label title="Tracker implementation used by worker.">Tracker type</label>
+      <select id="trackerType">
+        <option value="bytetrack">ByteTrack</option>
+        <option value="iou">IOU</option>
+        <option value="deepsort">DeepSort</option>
+      </select>
       <span id="shiftOnly">
-        <label>Bench zone ratio</label><input id="benchZone" type="number" step="0.01" value="0.80" />
+        <label title="Relative bench-zone boundary for shift mode.">Bench zone ratio</label><input id="benchZone" type="number" step="0.01" value="0.80" />
       </span>
     </div>
   </details>
