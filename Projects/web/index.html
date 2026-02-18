@@ -103,6 +103,11 @@
       <label>YOLO imgsz</label><input id="yoloImgsz" type="number" value="512" min="256" max="1280" />
       <label>YOLO batch</label><input id="yoloBatch" type="number" value="4" min="1" />
       <label>Tracker type</label><input id="trackerType" type="text" value="bytetrack" />
+      <label>Transcode for tracking (recommended for messy footage)</label><input id="transcodeEnabled" type="checkbox" />
+      <label>Max transcode resolution</label><input id="transcodeScaleMax" type="number" min="360" step="2" value="1080" />
+      <label>Force transcode FPS (optional)</label><input id="transcodeFps" type="number" min="1" step="1" placeholder="keep source" />
+      <label>Auto deinterlace</label><input id="transcodeDeinterlace" type="checkbox" checked />
+      <label>Denoise before tracking</label><input id="transcodeDenoise" type="checkbox" />
       <span id="shiftOnly">
         <label>Bench zone ratio</label><input id="benchZone" type="number" step="0.01" value="0.80" />
       </span>
