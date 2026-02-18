@@ -190,6 +190,8 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reid_alpha": max(0.0, min(1.0, _as_float(src, "reid_alpha", 0.7))),
         "reid_min_px": max(1, _as_int(src, "reid_min_px", 24)),
         "reid_sharpness_threshold": _as_float(src, "reid_sharpness_threshold", 15.0),
+        "swap_guard_seconds": _as_float(src, "swap_guard_seconds", 2.0),
+        "swap_guard_bonus": _as_float(src, "swap_guard_bonus", 0.1),
         "rink_polygon": src.get("rink_polygon") or [],
         "polygon_coords_normalized": bool(src.get("polygon_coords_normalized", True)),
         "bench_polygons": src.get("bench_polygons") or [],
