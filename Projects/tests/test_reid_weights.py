@@ -19,7 +19,7 @@ def test_ensure_reid_weights_creates_parent_and_renames_tmp(tmp_path, monkeypatc
 
     def fake_download(url, tmp_path_arg, timeout):
         called["tmp"] = Path(tmp_path_arg)
-        Path(tmp_path_arg).write_bytes(b"x" * (2 * 1024 * 1024))
+        Path(tmp_path_arg).write_bytes(b"x" * (11 * 1024 * 1024))
 
     monkeypatch.setattr(reid_weights, "_download_with_urllib", fake_download)
     monkeypatch.setattr(reid_weights, "_download_with_curl", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("curl should not be used")))
@@ -54,7 +54,7 @@ def test_ensure_reid_weights_rejects_html_payload(tmp_path, monkeypatch, no_slee
     monkeypatch.setattr(reid_weights, "_MAX_RETRIES", 1)
 
     def fake_download(url, tmp_path_arg, timeout):
-        payload = b"<html><body>redirect</body></html>" + (b"x" * (2 * 1024 * 1024))
+        payload = b"<html><body>redirect</body></html>" + (b"x" * (11 * 1024 * 1024))
         Path(tmp_path_arg).write_bytes(payload)
 
     monkeypatch.setattr(reid_weights, "_download_with_urllib", fake_download)
@@ -76,7 +76,7 @@ def test_ensure_reid_weights_retries_and_uses_curl_fallback(tmp_path, monkeypatc
 
     def good_curl(url, tmp_path_arg, timeout):
         calls["curl"] += 1
-        Path(tmp_path_arg).write_bytes(b"x" * (2 * 1024 * 1024))
+        Path(tmp_path_arg).write_bytes(b"x" * (11 * 1024 * 1024))
 
     monkeypatch.setattr(reid_weights, "_download_with_urllib", flaky_urllib)
     monkeypatch.setattr(reid_weights, "_download_with_curl", good_curl)
@@ -86,3 +86,16 @@ def test_ensure_reid_weights_retries_and_uses_curl_fallback(tmp_path, monkeypatc
     assert out == target
     assert calls["urllib"] == 1
     assert calls["curl"] == 1
+
+
+def test_ensure_reid_weights_uses_existing_valid_file(tmp_path, monkeypatch, no_sleep):
+    target = tmp_path / "weights.pth"
+    target.write_bytes(b"x" * (11 * 1024 * 1024))
+
+    monkeypatch.setattr(reid_weights, "_download_with_urllib", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("urllib should not be used")))
+    monkeypatch.setattr(reid_weights, "_download_with_curl", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("curl should not be used")))
+
+    out = reid_weights.ensure_reid_weights(str(target), "https://example.com/osnet.pth")
+
+    assert out == target
+

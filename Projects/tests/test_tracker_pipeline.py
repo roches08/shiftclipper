@@ -264,7 +264,7 @@ def test_reid_init_failure_raises_when_policy_fail(tmp_path, monkeypatch):
         assert "download failed" in str(exc)
 
 
-def test_reid_init_with_existing_weights_skips_download_and_initializes(tmp_path, monkeypatch):
+def test_reid_init_with_existing_weights_validates_and_initializes(tmp_path, monkeypatch):
     from worker import tasks as worker_tasks
 
     class _FakeCapture:
@@ -302,7 +302,7 @@ def test_reid_init_with_existing_weights_skips_download_and_initializes(tmp_path
             calls["embedder"] += 1
 
     weights_path = tmp_path / "existing.pth"
-    weights_path.write_bytes(b"x" * (2 * 1024 * 1024))
+    weights_path.write_bytes(b"x" * (11 * 1024 * 1024))
 
     if worker_tasks.cv2 is None:
         class _FakeCv2:
@@ -336,7 +336,7 @@ def test_reid_init_with_existing_weights_skips_download_and_initializes(tmp_path
     )
 
     assert calls["embedder"] == 1
-    assert calls["download"] == 0
+    assert calls["download"] == 1
     assert any(ev.get("event") == "reid_ready" for ev in out["timeline"])
 
 
@@ -401,7 +401,7 @@ def test_missing_weights_with_auto_download_disabled_disables_reid_and_continues
     }
     out = worker_tasks.track_presence(str(tmp_path / "dummy.mp4"), setup)
 
-    assert calls["download"] == 0
+    assert calls["download"] == 1
     assert setup.get("_runtime_reid_disabled") is True
     assert setup.get("_runtime_reid_active") is False
     assert out["reid_disabled_due_to_error"]

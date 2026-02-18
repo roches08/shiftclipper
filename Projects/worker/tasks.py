@@ -707,7 +707,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         reid_weights_url = str(setup.get("reid_weights_url", params.reid_weights_url) or "").strip()
         reid_auto_download = bool(setup.get("reid_auto_download", params.reid_auto_download))
         try:
-            if reid_auto_download and reid_weights_path and not Path(reid_weights_path).exists():
+            if reid_auto_download and reid_weights_path:
                 ensure_reid_weights(reid_weights_path, reid_weights_url)
             reid_embedder = OSNetEmbedder(ReIDConfig(
                 model_name=str(setup.get("reid_model", params.reid_model) or "osnet_x0_25"),
