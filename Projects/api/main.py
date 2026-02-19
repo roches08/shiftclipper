@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 import subprocess
@@ -43,6 +44,7 @@ print(f"API starting | redis={REDIS_URL} | queues={QUEUE_NAMES} | jobs_dir={JOBS
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI()
+logger = logging.getLogger("shiftclipper.api")
 
 # Static JS/CSS
 if not WEB_DIR.exists():
@@ -278,6 +280,7 @@ async def upload_video(job_id: str, request: Request, file: UploadFile = File(..
 
     # Always save to a single predictable filename so the worker/UI agree.
     in_path = str(jd / "in.mp4")
+    in_part_path = str(jd / "in.mp4.part")
     proxy_path = str(jd / "input_proxy.mp4")
 
     content_length = request.headers.get("content-length")
@@ -292,33 +295,85 @@ async def upload_video(job_id: str, request: Request, file: UploadFile = File(..
         job_id,
         "uploading",
         stage="uploading",
-        progress=1,
+        progress=0,
         message="Uploading...",
         proxy_ready=False,
         bytes_received=0,
         bytes_total=total_bytes,
     )
+    logger.info("upload.start job_id=%s filename=%s bytes_total=%s", job_id, file.filename, total_bytes)
 
     bytes_received = 0
-    with open(in_path, "wb") as f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-            bytes_received += len(chunk)
-            progress = 5
-            if total_bytes:
-                progress = min(100, max(1, int((bytes_received / total_bytes) * 100)))
-            set_status(
-                job_id,
-                "uploading",
-                stage="uploading",
-                progress=progress,
-                message="Uploading...",
-                bytes_received=bytes_received,
-                bytes_total=total_bytes,
-            )
+    log_interval_bytes = 100 * 1024 * 1024
+    next_log_bytes = log_interval_bytes
+    status_interval_bytes = 50 * 1024 * 1024
+    next_status_bytes = status_interval_bytes
+    try:
+        with open(in_part_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                bytes_received += len(chunk)
+
+                if bytes_received >= next_log_bytes:
+                    logger.info(
+                        "upload.progress job_id=%s bytes_received=%s bytes_total=%s",
+                        job_id,
+                        bytes_received,
+                        total_bytes,
+                    )
+                    next_log_bytes += log_interval_bytes
+
+                if bytes_received >= next_status_bytes:
+                    progress = 5
+                    if total_bytes:
+                        progress = min(10, max(0, int((bytes_received / total_bytes) * 10)))
+                    set_status(
+                        job_id,
+                        "uploading",
+                        stage="uploading",
+                        progress=progress,
+                        message="Uploading...",
+                        bytes_received=bytes_received,
+                        bytes_total=total_bytes,
+                    )
+                    next_status_bytes += status_interval_bytes
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(in_part_path, in_path)
+        logger.info("upload.complete job_id=%s bytes_received=%s path=%s", job_id, bytes_received, in_path)
+    except Exception as exc:
+        logger.exception("upload.failed job_id=%s", job_id)
+        try:
+            if os.path.exists(in_part_path):
+                os.remove(in_part_path)
+        except Exception:
+            logger.warning("upload.cleanup_failed job_id=%s path=%s", job_id, in_part_path)
+        set_status(
+            job_id,
+            "failed",
+            stage="upload_failed",
+            progress=0,
+            message=f"Upload failed: {exc}",
+            error=str(exc),
+            bytes_received=bytes_received,
+            bytes_total=total_bytes,
+        )
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}") from exc
+    finally:
+        await file.close()
+
+    set_status(
+        job_id,
+        "uploading",
+        stage="uploading",
+        progress=10,
+        message="Upload complete.",
+        bytes_received=bytes_received,
+        bytes_total=total_bytes,
+    )
 
     # Persist metadata for the worker (this was missing before)
     meta = read_json(meta_path(job_id), {})
