@@ -53,8 +53,6 @@ def expand_and_crop(frame: np.ndarray, box: Tuple[int, int, int, int], expand: f
     x1, y1, x2, y2 = [int(v) for v in box]
     bw = max(1, x2 - x1)
     bh = max(1, y2 - y1)
-    if min(bw, bh) < min_side_px:
-        return None
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
     scale = 1.0 + max(0.0, float(expand))
@@ -65,7 +63,7 @@ def expand_and_crop(frame: np.ndarray, box: Tuple[int, int, int, int], expand: f
     ey1 = max(0, min(h - 1, int(round(cy - nh / 2.0))))
     ey2 = max(ey1 + 1, min(h, int(round(cy + nh / 2.0))))
     crop = frame[ey1:ey2, ex1:ex2]
-    if crop.size == 0 or min(crop.shape[:2]) < min_side_px:
+    if crop.size == 0:
         return None
     return crop
 
