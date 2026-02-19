@@ -8,35 +8,25 @@ export REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
 export RQ_QUEUES="${RQ_QUEUES:-jobs}"
 export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 
-apt-get update -y
-apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git gnupg
-
-
-REPO_URL="https://github.com/roches08/shiftclipper.git"
-REPO_DIR="/workspace/shiftclipper"
-
-if [ ! -d "$REPO_DIR/.git" ]; then
-  rm -rf "$REPO_DIR"
-  git clone "$REPO_URL" "$REPO_DIR"
-else
-  git -C "$REPO_DIR" fetch --all --prune
-  git -C "$REPO_DIR" reset --hard origin/main
-fi
-
-PROJECTS_DIR="$REPO_DIR/Projects"
+PROJECTS_DIR="/workspace/shiftclipper/Projects"
 cd "$PROJECTS_DIR"
 
 ensure_ui_static() {
   local static_index="$PROJECTS_DIR/static/index.html"
   local static_app_js="$PROJECTS_DIR/static/app.js"
+  local static_presets_js="$PROJECTS_DIR/static/presets.js"
 
-  if [ ! -f "$static_index" ] || [ ! -f "$static_app_js" ]; then
+  if [ ! -f "$static_index" ] || [ ! -f "$static_app_js" ] || [ ! -f "$static_presets_js" ]; then
     echo "ERROR: Missing committed UI assets in $PROJECTS_DIR/static"
-    echo "Expected files: $static_index and $static_app_js"
+    echo "Expected files: $static_index, $static_app_js, $static_presets_js"
     exit 1
   fi
 
   echo "UI static ready: $PROJECTS_DIR/static"
+}
+
+file_size() {
+  wc -c < "$1" | tr -d ' '
 }
 
 REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
@@ -49,20 +39,17 @@ if [[ "$REID_WEIGHTS_URL" == https://huggingface.co/*/resolve/*.pth ]] && [[ "$R
   REID_WEIGHTS_URL="${REID_WEIGHTS_URL}?download=true"
 fi
 
-file_size(){ wc -c < "$1" | tr -d ' '; }
-
 export JOBS_DIR="${JOBS_DIR:-$PROJECTS_DIR/data/jobs}"
 mkdir -p "$JOBS_DIR"
 
 VENV_DIR="$PROJECTS_DIR/.venv"
-
 if [ ! -d "$VENV_DIR" ]; then
   python3 -m venv "$VENV_DIR"
 fi
+
 source "$VENV_DIR/bin/activate"
-# Non-negotiable: use only venv python/pip for every install/check in this script.
 PYTHON_BIN="$VENV_DIR/bin/python"
-PIP_BIN="$VENV_DIR/bin/pip"
+
 "$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel
 
 if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
@@ -72,29 +59,11 @@ else
 fi
 
 REQUIREMENTS_FILE="requirements.runpod_pro.txt"
-echo "Installing ShiftClipper requirements from $REQUIREMENTS_FILE"
-wc -l "$REQUIREMENTS_FILE"
-if [ "$(wc -l < "$REQUIREMENTS_FILE")" -lt 5 ]; then
-  echo "ERROR: requirements file malformed (no newlines). Fix in repo."
-  head -c 500 "$REQUIREMENTS_FILE"
-  exit 1
-fi
 "$PYTHON_BIN" -m pip install -r "$REQUIREMENTS_FILE"
 
 "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
 "$PYTHON_BIN" -c "import ultralytics; print('ultralytics import ok')"
-
-if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq; print('deps ok')"; then
-  echo "ERROR: dependency import check failed."
-  tail -n 120 "$API_LOG" || true
-  tail -n 120 "$WORKER_LOG" || true
-  exit 1
-fi
-
-if ! "$PYTHON_BIN" -c "import tensorboard; import torchreid; print('torchreid ok')"; then
-  echo "ERROR: tensorboard/torchreid sanity check failed."
-  exit 1
-fi
+"$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq, tensorboard, torchreid; print('dependency sanity checks ok')"
 
 ensure_ui_static
 
@@ -122,21 +91,11 @@ else
 fi
 
 if [ -s "$REID_WEIGHTS_DEST" ] && [ "$(file_size "$REID_WEIGHTS_DEST")" -gt "$REID_MIN_BYTES" ]; then
-  "$PYTHON_BIN" -c "from worker.reid import OSNetEmbedder, ReIDConfig; import torch; e=OSNetEmbedder(ReIDConfig(model_name='osnet_x0_25', device='cuda:0' if torch.cuda.is_available() else 'cpu', batch_size=1, use_fp16=torch.cuda.is_available(), weights_path='$REID_WEIGHTS_DEST')); print('reid ok')"
-fi
-
-if ! "$PYTHON_BIN" -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"; then
-  echo "ERROR: Torch import check failed."
-  tail -n 120 "$API_LOG" || true
-  tail -n 120 "$WORKER_LOG" || true
-  exit 1
-fi
-"$PYTHON_BIN" -c "import pkg_resources; print('pkg_resources', pkg_resources.__name__)"
-if [[ "$SHIFTCLIPPER_DEVICE" == cuda* ]]; then
-  "$PYTHON_BIN" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" || {
-    echo "ERROR: SHIFTCLIPPER_DEVICE=$SHIFTCLIPPER_DEVICE but torch.cuda.is_available() is False."
-    exit 1
-  }
+  if ! "$PYTHON_BIN" -c "from worker.reid import OSNetEmbedder, ReIDConfig; import torch; OSNetEmbedder(ReIDConfig(model_name='osnet_x0_25', device='cuda:0' if torch.cuda.is_available() else 'cpu', batch_size=1, use_fp16=torch.cuda.is_available(), weights_path='$REID_WEIGHTS_DEST')); print('reid ok')"; then
+    echo "ERROR: ReID bootstrap sanity check failed. UI/API will continue running."
+  fi
+else
+  echo "WARNING: ReID weights missing or invalid after bootstrap; UI/API will continue running."
 fi
 
 if ! redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
@@ -184,8 +143,12 @@ check_api() {
 
 check_api "http://127.0.0.1:8000/api/health"
 check_api "http://127.0.0.1:8000/"
-if [ -f "$PROJECTS_DIR/static/app.js" ]; then
-  check_api "http://127.0.0.1:8000/static/app.js"
+check_api "http://127.0.0.1:8000/static/app.js"
+
+if ! curl -fsS "http://127.0.0.1:8000/" | grep -q "ShiftClipper — Tracker v2"; then
+  echo "ERROR: UI root page did not contain expected application markup"
+  tail -n 250 "$API_LOG" || true
+  exit 1
 fi
 
 nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
