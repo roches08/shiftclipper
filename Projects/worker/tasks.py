@@ -100,9 +100,9 @@ class TrackingParams:
     score_unlock_threshold: float = 0.33
     seed_lock_seconds: float = 8.0
     seed_iou_min: float = 0.12
-    seed_dist_max: float = 0.16
+    seed_dist_max: float = 0.22
     seed_bonus: float = 0.80
-    seed_window_s: float = 3.0
+    seed_window_s: float = 6.0
     color_weight: float = 0.35
     motion_weight: float = 0.30
     ocr_weight: float = 0.35
@@ -1413,6 +1413,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     b = best["box"]
                     last_good_area_ratio = ((b[2] - b[0]) * (b[3] - b[1])) / max(1.0, float(w * h))
                     last_good_identity_time = t
+                    if params.reid_enable and reid_embedder is not None and best.get("embed") is None:
+                        lock_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
+                        lock_emb = reid_embedder.embed([lock_crop])[0] if lock_crop is not None else None
+                        if lock_emb is not None:
+                            best["embed"] = lock_emb
+                            track_embed_cache[best["track_id"]] = lock_emb
+                            if locked_reid_embedding is not None:
+                                best["sim"] = _cosine_similarity(locked_reid_embedding, lock_emb)
                     if best.get("embed") is not None:
                         if locked_reid_embedding is None:
                             locked_reid_embedding = normalize_vector(best["embed"])
@@ -1429,6 +1437,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             target_embed_history.append(locked_reid_embedding.tolist()[:16])
             elif state == "LOCKED":
                 forced_reid_loss = False
+                if best and params.reid_enable and locked_reid_embedding is not None and float(best.get("sim", -1.0)) < 0.0:
+                    cached_emb = track_embed_cache.get(best.get("track_id"))
+                    if cached_emb is not None:
+                        best["embed"] = cached_emb
+                        best["sim"] = _cosine_similarity(locked_reid_embedding, cached_emb)
                 if best and params.reid_enable and locked_reid_embedding is not None and (current_idx % reid_check_stride == 0):
                     if float(best.get("sim", -1.0)) < reid_min_sim:
                         reid_low_sim_streak += 1
@@ -1539,9 +1552,23 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     )
                 )
             )
-            reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST"})
-            reid_gate_ok = bool(best is not None and float(best.get("sim", -1.0)) >= reid_min_sim)
-            if reid_gate_required and not reid_gate_ok:
+            reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST", "LOCKED"})
+            reid_sim_value = float(best.get("sim", -1.0)) if best is not None else -1.0
+            if (
+                state == "LOCKED"
+                and params.reid_enable
+                and locked_reid_embedding is not None
+                and best is not None
+                and reid_sim_value < 0.0
+            ):
+                cached_emb = track_embed_cache.get(best.get("track_id"))
+                if cached_emb is not None:
+                    best["embed"] = cached_emb
+                    reid_sim_value = _cosine_similarity(locked_reid_embedding, cached_emb)
+                    best["sim"] = reid_sim_value
+            reid_gate_has_value = bool(reid_sim_value >= 0.0)
+            reid_gate_ok = bool(reid_gate_has_value and reid_sim_value >= reid_min_sim)
+            if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
                 present = False
             clip_reason = "allowed"
             if state in {"SEARCH", "LOST"}:

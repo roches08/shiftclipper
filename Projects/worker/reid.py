@@ -184,8 +184,9 @@ class OSNetEmbedder:
     def _preprocess(self, crop: np.ndarray):
         img = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (self.input_hw[1], self.input_hw[0]), interpolation=cv2.INTER_LINEAR)
-        ten = torch.from_numpy(img).to(self.device)
+        ten = torch.from_numpy(img)
         ten = ten.permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        ten = ten.to(self.device)
         ten = (ten - self.mean) / self.std
         return ten
 
@@ -200,6 +201,7 @@ class OSNetEmbedder:
             for start in range(0, len(valid), max(1, int(self.cfg.batch_size))):
                 chunk = valid[start:start + max(1, int(self.cfg.batch_size))]
                 batch = torch.cat([self._preprocess(c) for _, c in chunk], dim=0)
+                batch = batch.to(self.device)
                 if self.use_fp16 and self.device.type == "cuda":
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         feats = self.model(batch)
