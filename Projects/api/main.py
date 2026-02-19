@@ -32,7 +32,7 @@ ShiftClipper API (RunPod friendly)
 BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parents[1])).resolve()  # Projects/
 DATA_DIR = BASE_DIR / "data"
 JOBS_DIR = Path(os.getenv("JOBS_DIR", str(DATA_DIR / "jobs"))).resolve()
-WEB_DIR = BASE_DIR / "web"
+WEB_DIR = BASE_DIR / "static"
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_NAMES = [q.strip() for q in os.getenv("RQ_QUEUES", "jobs").split(",") if q.strip()]
@@ -151,7 +151,7 @@ def health():
 def home():
     index_path = WEB_DIR / "index.html"
     if not index_path.exists():
-        return HTMLResponse("<h1>ShiftClipper</h1><p>Missing Projects/web/index.html</p>", status_code=500)
+        return HTMLResponse("<h1>ShiftClipper</h1><p>Missing Projects/static/index.html</p>", status_code=500)
     return FileResponse(str(index_path), media_type="text/html")
 
 

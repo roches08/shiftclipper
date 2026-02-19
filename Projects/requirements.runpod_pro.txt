@@ -24,6 +24,7 @@ easyocr==1.7.2
 Pillow==10.4.0
 pydantic==2.9.2
 torchreid==0.2.5
+tensorboard==2.17.1
 yacs==0.1.8
 gdown==5.2.0
 

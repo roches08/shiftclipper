@@ -9,7 +9,7 @@ export RQ_QUEUES="${RQ_QUEUES:-jobs}"
 export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 
 apt-get update -y
-apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git
+apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git nodejs npm
 
 REPO_URL="https://github.com/roches08/shiftclipper.git"
 REPO_DIR="/workspace/shiftclipper"
@@ -27,9 +27,45 @@ cd "$PROJECTS_DIR"
 
 ensure_ui_static() {
   local static_js="$PROJECTS_DIR/static/app.js"
+  local static_index="$PROJECTS_DIR/static/index.html"
+
+  mkdir -p "$PROJECTS_DIR/static"
+
+  create_fallback_ui() {
+    cat > "$static_index" <<'EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShiftClipper</title>
+  </head>
+  <body>
+    <h1>ShiftClipper backend running</h1>
+    <pre id="health">Checking /api/health ...</pre>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+EOF
+
+    cat > "$static_js" <<'EOF'
+const healthEl = document.getElementById('health');
+
+fetch('/api/health')
+  .then((res) => res.json())
+  .then((data) => {
+    healthEl.textContent = `Health: ${JSON.stringify(data, null, 2)}`;
+  })
+  .catch((err) => {
+    healthEl.textContent = `Health check failed: ${err}`;
+  });
+EOF
+
+    echo "Fallback UI created at $PROJECTS_DIR/static"
+  }
 
   # If already present, do nothing
-  if [ -f "$static_js" ]; then
+  if [ -f "$static_js" ] && [ -f "$static_index" ]; then
     echo "UI static already present: $static_js"
     return 0
   fi
@@ -38,20 +74,15 @@ ensure_ui_static() {
 
   # Find package.json anywhere in repo
   local pkg
-  pkg="$(find "$REPO_DIR" -maxdepth 6 -name package.json | head -n 1 || true)"
+  pkg="$(find "$REPO_DIR" -maxdepth 4 -name package.json | head -n 1 || true)"
 
   if [ -z "$pkg" ]; then
-    echo "WARNING: No package.json found in repo. Skipping UI build."
-    echo "WARNING: Backend will start without UI."
+    echo "WARNING: No package.json found in repo. Creating fallback UI."
+    create_fallback_ui
     return 0
   fi
 
   echo "package.json found at: $pkg"
-  export DEBIAN_FRONTEND=noninteractive
-
-  apt-get update -y
-  apt-get install -y --no-install-recommends nodejs npm
-
   local ui_dir
   ui_dir="$(dirname "$pkg")"
 
@@ -61,21 +92,34 @@ ensure_ui_static() {
   else
     npm install
   fi
-  npm run build || echo "WARNING: UI build failed, continuing..."
+  npm run build || echo "WARNING: UI build failed; fallback UI will be created if needed."
   popd >/dev/null
 
-  mkdir -p "$PROJECTS_DIR/static"
-
   if [ -d "$ui_dir/dist" ]; then
-    cp -r "$ui_dir/dist/"* "$PROJECTS_DIR/static/" || true
+    cp -r "$ui_dir/dist/." "$PROJECTS_DIR/static/" || true
   elif [ -d "$ui_dir/build" ]; then
-    cp -r "$ui_dir/build/"* "$PROJECTS_DIR/static/" || true
+    cp -r "$ui_dir/build/." "$PROJECTS_DIR/static/" || true
   fi
 
   if [ ! -f "$static_js" ]; then
-    echo "WARNING: UI build completed but static/app.js still missing."
-    echo "WARNING: Backend will start without UI."
+    echo "WARNING: UI build completed but static/app.js still missing; creating fallback UI."
+    create_fallback_ui
   else
+    if [ ! -f "$static_index" ]; then
+      cat > "$static_index" <<'EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShiftClipper</title>
+  </head>
+  <body>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+EOF
+    fi
     echo "UI static ready: $static_js"
   fi
 }
@@ -84,7 +128,7 @@ REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
 REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
 REID_WEIGHTS_TMP="${REID_WEIGHTS_DEST}.tmp"
 REID_WEIGHTS_URL="https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
-REID_MIN_BYTES=$((50 * 1024 * 1024))
+REID_MIN_BYTES=$((5 * 1024 * 1024))
 
 if [[ "$REID_WEIGHTS_URL" == https://huggingface.co/*/resolve/*.pth ]] && [[ "$REID_WEIGHTS_URL" != *\?* ]]; then
   REID_WEIGHTS_URL="${REID_WEIGHTS_URL}?download=true"
@@ -134,6 +178,11 @@ fi
 
 if ! "$PYTHON_BIN" -c "import torchreid; import yacs; import gdown; print('torchreid ok')"; then
   echo "ERROR: torchreid dependency import check failed."
+  exit 1
+fi
+
+if ! "$PYTHON_BIN" -c "import tensorboard; import torchreid; print('torchreid ok')"; then
+  echo "ERROR: tensorboard/torchreid sanity check failed."
   exit 1
 fi
 
@@ -222,6 +271,9 @@ check_api() {
 
 check_api "http://127.0.0.1:8000/api/health"
 check_api "http://127.0.0.1:8000/"
+if [ -f "$PROJECTS_DIR/static/app.js" ]; then
+  check_api "http://127.0.0.1:8000/static/app.js"
+fi
 
 nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
