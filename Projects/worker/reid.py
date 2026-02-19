@@ -101,6 +101,16 @@ def _strip_prefixes(state_dict: object) -> object:
     return out
 
 
+def _drop_classifier(state_dict: object) -> object:
+    if not isinstance(state_dict, dict):
+        return state_dict
+    # remove classifier head weights (class-count differs between checkpoints)
+    for k in ("classifier.weight", "classifier.bias", "fc.weight", "fc.bias"):
+        if k in state_dict:
+            state_dict.pop(k, None)
+    return state_dict
+
+
 class OSNetEmbedder:
     def __init__(self, cfg: ReIDConfig):
         if torch is None:
@@ -113,6 +123,8 @@ class OSNetEmbedder:
         if torchreid_models is None:
             raise RuntimeError("torchreid is required for OSNet ReID model loading")
         self.model = self._build_model(cfg)
+        if hasattr(self.model, "classifier"):
+            self.model.classifier = torch.nn.Identity()
         self.device = torch.device(cfg.device)
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -133,13 +145,14 @@ class OSNetEmbedder:
             model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
             checkpoint = torch.load(str(local_path), map_location="cpu")
             state_dict = _strip_prefixes(_extract_state_dict(checkpoint))
+            state_dict = _drop_classifier(state_dict)
             try:
                 strict_result = model.load_state_dict(state_dict, strict=True)
                 missing_keys = list(getattr(strict_result, "missing_keys", []) or [])
                 unexpected_keys = list(getattr(strict_result, "unexpected_keys", []) or [])
-                loaded_keys = len(getattr(state_dict, "keys", lambda: [])()) if isinstance(state_dict, dict) else -1
+                loaded_keys = len(state_dict.keys()) if isinstance(state_dict, dict) else -1
                 log.info(
-                    "ReID OSNet weights loaded strict=True model=%s keys=%s missing=%d unexpected=%d",
+                    "ReID OSNet weights loaded (classifier dropped) model=%s keys=%s missing=%d unexpected=%d",
                     cfg.model_name,
                     loaded_keys,
                     len(missing_keys),
@@ -149,9 +162,9 @@ class OSNetEmbedder:
                 missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
                 missing_keys = list(missing_keys)
                 unexpected_keys = list(unexpected_keys)
-                loaded_keys = len(getattr(state_dict, "keys", lambda: [])()) if isinstance(state_dict, dict) else -1
+                loaded_keys = len(state_dict.keys()) if isinstance(state_dict, dict) else -1
                 log.warning(
-                    "ReID OSNet strict=True load failed (%s); continued with strict=False model=%s keys=%s missing=%d unexpected=%d missing_keys=%s unexpected_keys=%s",
+                    "ReID OSNet strict=True load failed after classifier drop (%s); continued with strict=False model=%s keys=%s missing=%d unexpected=%d missing_keys=%s unexpected_keys=%s",
                     strict_exc,
                     cfg.model_name,
                     loaded_keys,
