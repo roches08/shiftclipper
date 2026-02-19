@@ -4,6 +4,8 @@
     reid_auto_download: true,
     reid_weights_path: '/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth',
     reid_weights_url: 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth',
+    reid_min_px: 12,
+    reid_sharpness_threshold: 12,
   };
 
   const ADVANCED_PRESETS = {
@@ -21,15 +23,15 @@
       allow_seed_clips: true,
       seed_lock_seconds: 8,
       seed_iou_min: 0.12,
-      seed_dist_max: 0.16,
+      seed_dist_max: 0.22,
       seed_bonus: 0.8,
-      seed_window_s: 3,
+      seed_window_s: 6,
       ocr_disable: false,
       ocr_every_n_frames: 12,
       ocr_min_conf: 0.2,
       ocr_veto_conf: 0.92,
       ocr_veto_seconds: 1.0,
-      detect_stride: 2,
+      detect_stride: 1,
       yolo_imgsz: 512,
       yolo_batch: 4,
       tracker_type: 'bytetrack',

@@ -143,7 +143,7 @@ class TrackingParams:
     reid_every_n_frames: int = 5
     reid_max_candidates: int = 5
     reid_alpha: float = 0.7
-    reid_min_px: int = 24
+    reid_min_px: int = 12
     reid_sharpness_threshold: float = 15.0
     reid_low_sim_max_checks: int = 3
     reid_reacquire_hysteresis: float = 0.02
@@ -401,6 +401,64 @@ def _build_seed_reid_target(embeddings: List[np.ndarray]) -> Optional[np.ndarray
         return None
     mean_emb = np.mean(np.stack(normalized, axis=0), axis=0)
     return normalize_vector(mean_emb)
+
+
+def _emit_seed_clip_segment(
+    *,
+    seed: Dict[str, Any],
+    segments: List[Tuple[float, float, str]],
+    timeline: List[Dict[str, Any]],
+    seed_lock_seconds: float,
+    min_clip_seconds: float,
+    timeline_t: float,
+    video_duration: Optional[float] = None,
+) -> None:
+    if seed.get("seed_clip_emitted"):
+        return
+    click_t = float(seed.get("t", 0.0))
+    effective_video_duration = float(video_duration if video_duration is not None else click_t)
+    prior_segments = [
+        seg for seg in segments
+        if seg[1] <= click_t and seg[2] != ClipEndReason.VIDEO_END.value and seg[1] < (effective_video_duration - 1e-3)
+    ]
+    last_clip_end = max((seg[1] for seg in prior_segments), default=None)
+    seed_window = _compute_seed_clip_window(
+        click_t=click_t,
+        seed_lock_seconds=seed_lock_seconds,
+        min_clip_seconds=min_clip_seconds,
+        video_duration=effective_video_duration,
+        last_clip_end=last_clip_end,
+    )
+    clip_start = seed_window["final_start"]
+    clip_end = seed_window["final_end"]
+    seed["seed_clip_emitted"] = True
+    if clip_end <= clip_start:
+        return
+    if (
+        abs(seed_window["computed_start"] - clip_start) > 1e-6
+        or abs(seed_window["computed_end"] - clip_end) > 1e-6
+    ):
+        timeline.append({
+            "t": timeline_t,
+            "event": "seed_clip_clamped",
+            "click_t": click_t,
+            "computed_start": seed_window["computed_start"],
+            "computed_end": seed_window["computed_end"],
+            "final_start": clip_start,
+            "final_end": clip_end,
+            "last_clip_end": last_clip_end,
+            "video_duration": effective_video_duration,
+        })
+    segments.append((clip_start, clip_end, "seed_clip"))
+    timeline.append({
+        "t": timeline_t,
+        "event": "seed_clip_emitted",
+        "click_t": click_t,
+        "seed_lock_seconds": seed_lock_seconds,
+        "clip_start": clip_start,
+        "clip_end": clip_end,
+        "seed_acquired": bool(seed.get("acquired")),
+    })
 
 
 def _is_boundary_reason(reason: str) -> bool:
@@ -845,6 +903,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     reid_reacquire_hysteresis = max(0.0, float(setup.get("reid_reacquire_hysteresis", params.reid_reacquire_hysteresis)))
     reid_check_stride = max(1, int(setup.get("reid_every_n_frames", params.reid_every_n_frames)))
     reid_low_sim_streak = 0
+    reid_locked_missing_since: Optional[float] = None
+    reid_locked_missing_grace_s = max(0.5, float(setup.get("reid_missing_grace_s", 0.75)))
     edge_margin_px = float(setup.get("edge_margin_px", params.edge_margin_px))
 
     segments, shifts = [], []
@@ -936,6 +996,19 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             active_seed, click_dist = None, float("inf")
             for seed in seed_clicks:
                 dt = t - seed["t"]
+                if (
+                    bool(setup.get("allow_seed_clips", params.allow_seed_clips))
+                    and dt >= 0.0
+                    and not seed.get("seed_clip_emitted")
+                ):
+                    _emit_seed_clip_segment(
+                        seed=seed,
+                        segments=segments,
+                        timeline=timeline,
+                        seed_lock_seconds=float(setup.get("seed_lock_seconds", params.seed_lock_seconds)),
+                        min_clip_seconds=params.min_clip_seconds,
+                        timeline_t=t,
+                    )
                 if 0.0 <= dt <= seed_window_s and dt < click_dist:
                     active_seed = seed
                     click_dist = dt
@@ -1499,30 +1572,35 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     b = best["box"]
                     last_good_area_ratio = ((b[2] - b[0]) * (b[3] - b[1])) / max(1.0, float(w * h))
                     last_good_identity_time = t
-                    if params.reid_enable and reid_embedder is not None and best.get("embed") is None:
+                    if params.reid_enable and reid_embedder is not None:
                         lock_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
-                        lock_emb = reid_embedder.embed([lock_crop])[0] if lock_crop is not None else None
-                        if lock_emb is not None:
+                        crop_for_sharpness = lock_crop if lock_crop is not None else frame[best["box"][1]:best["box"][3], best["box"][0]:best["box"][2]]
+                        sharpness = _crop_sharpness(crop_for_sharpness) if crop_for_sharpness is not None and crop_for_sharpness.size else 0.0
+                        lock_emb = best.get("embed")
+                        if lock_emb is None:
+                            lock_emb = reid_embedder.embed([lock_crop])[0] if lock_crop is not None else None
+                        if lock_emb is None:
+                            timeline.append({
+                                "t": t,
+                                "event": "reid_embed_failed",
+                                "reason": "too_small_or_blurry",
+                                "track_id": best["track_id"],
+                                "box": [int(v) for v in best["box"]],
+                                "sharpness": float(sharpness),
+                                "min_px": int(params.reid_min_px),
+                            })
+                        else:
                             best["embed"] = lock_emb
                             track_embed_cache[best["track_id"]] = lock_emb
-                            if locked_reid_embedding is not None:
-                                best["sim"] = _cosine_similarity(locked_reid_embedding, lock_emb)
-                    if lock_transition_from_search and params.reid_enable and reid_embedder is not None:
-                        if best.get("embed") is None:
-                            force_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
-                            force_emb = reid_embedder.embed([force_crop])[0] if force_crop is not None else None
-                            if force_emb is not None:
-                                best["embed"] = force_emb
-                                track_embed_cache[best["track_id"]] = force_emb
-                        if best.get("embed") is not None:
-                            forced_target = normalize_vector(best["embed"])
+                            forced_target = normalize_vector(lock_emb)
                             if forced_target is not None:
                                 locked_reid_embedding = forced_target
-                                best["sim"] = _cosine_similarity(locked_reid_embedding, best["embed"])
+                                best["sim"] = _cosine_similarity(locked_reid_embedding, lock_emb)
                                 timeline.append({
                                     "t": t,
                                     "event": "reid_embedding_forced_on_lock",
                                     "track_id": best["track_id"],
+                                    "lock_transition_from_search": bool(lock_transition_from_search),
                                 })
                     if best.get("embed") is not None:
                         if locked_reid_embedding is None:
@@ -1591,7 +1669,34 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         best = None
                     else:
                         best["score"] -= float(setup.get("reid_locked_low_sim_penalty", 0.75))
-                if best and params.reid_enable and locked_reid_embedding is not None and (current_idx % reid_check_stride == 0):
+                if best and params.reid_enable and locked_reid_embedding is not None:
+                    sim_now = float(best.get("sim", -1.0))
+                    if sim_now < 0.0:
+                        if reid_locked_missing_since is None:
+                            reid_locked_missing_since = t
+                        if (t - reid_locked_missing_since) >= reid_locked_missing_grace_s:
+                            timeline.append({
+                                "t": t,
+                                "event": "reid_missing_gate_triggered",
+                                "track_id": best.get("track_id"),
+                                "missing_seconds": t - reid_locked_missing_since,
+                                "missing_grace_seconds": reid_locked_missing_grace_s,
+                            })
+                            if clip_start_time is not None:
+                                seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
+                                segments.append((float(clip_start_time), float(seg_end), "lock_lost"))
+                                clip_end_reason = "lock_lost"
+                                clip_start_time = None
+                            state = "LOST"
+                            lock_state = "SEARCHING"
+                            lost_start_time = t
+                            lost_since = t
+                            reacquire_until = t + max(0.0, reacquire_window_seconds)
+                            forced_reid_loss = True
+                    else:
+                        reid_locked_missing_since = None
+
+                if (not forced_reid_loss) and best and params.reid_enable and locked_reid_embedding is not None and (current_idx % reid_check_stride == 0):
                     if float(best.get("sim", -1.0)) < reid_min_sim:
                         reid_low_sim_streak += 1
                     elif float(best.get("sim", -1.0)) >= (reid_min_sim + reid_reacquire_hysteresis):
@@ -1725,13 +1830,26 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         best["sim"] = reid_sim_value
             reid_gate_has_value = bool(reid_sim_value >= 0.0)
             reid_gate_ok = bool(reid_gate_has_value and reid_sim_value >= reid_min_sim)
+            reid_missing_grace_active = bool(
+                state == "LOCKED"
+                and reid_gate_required
+                and not reid_gate_has_value
+                and reid_locked_missing_since is not None
+                and (t - reid_locked_missing_since) < reid_locked_missing_grace_s
+            )
             if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
+                present = False
+            if state == "LOCKED" and reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:
                 present = False
             clip_reason = "allowed"
             if state in {"SEARCH", "LOST"}:
                 clip_reason = "reid_gate_search" if reid_gate_required and not reid_gate_ok else "searching"
             elif state != "LOCKED":
                 clip_reason = "state_not_locked"
+            elif reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:
+                clip_reason = "reid_unavailable"
+            elif reid_gate_required and reid_gate_has_value and not reid_gate_ok:
+                clip_reason = "reid_mismatch"
             elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_score_threshold:
                 clip_reason = "provisional_disallowed"
             elif identity_score < unlock_threshold:
@@ -1862,52 +1980,19 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     if bool(setup.get("allow_seed_clips", params.allow_seed_clips)):
         seed_lock_seconds = float(setup.get("seed_lock_seconds", params.seed_lock_seconds))
         ordered_seeds = sorted(
-            [seed for seed in seed_clicks if seed.get("acquired") and not seed.get("seed_clip_emitted")],
+            [seed for seed in seed_clicks if not seed.get("seed_clip_emitted")],
             key=lambda seed: float(seed.get("t", 0.0)),
         )
         for seed in ordered_seeds:
-            click_t = float(seed["t"])
-            prior_segments = [
-                seg for seg in segments
-                if seg[1] <= click_t and seg[2] != ClipEndReason.VIDEO_END.value and seg[1] < (video_duration - 1e-3)
-            ]
-            last_clip_end = max((seg[1] for seg in prior_segments), default=None)
-            seed_window = _compute_seed_clip_window(
-                click_t=click_t,
+            _emit_seed_clip_segment(
+                seed=seed,
+                segments=segments,
+                timeline=timeline,
                 seed_lock_seconds=seed_lock_seconds,
                 min_clip_seconds=params.min_clip_seconds,
+                timeline_t=min(float(seed.get("t", 0.0)), video_duration),
                 video_duration=video_duration,
-                last_clip_end=last_clip_end,
             )
-            clip_start = seed_window["final_start"]
-            clip_end = seed_window["final_end"]
-            seed["seed_clip_emitted"] = True
-            if clip_end <= clip_start:
-                continue
-            if (
-                abs(seed_window["computed_start"] - clip_start) > 1e-6
-                or abs(seed_window["computed_end"] - clip_end) > 1e-6
-            ):
-                timeline.append({
-                    "t": min(click_t, video_duration),
-                    "event": "seed_clip_clamped",
-                    "click_t": click_t,
-                    "computed_start": seed_window["computed_start"],
-                    "computed_end": seed_window["computed_end"],
-                    "final_start": clip_start,
-                    "final_end": clip_end,
-                    "last_clip_end": last_clip_end,
-                    "video_duration": video_duration,
-                })
-            segments.append((clip_start, clip_end, "seed_clip"))
-            timeline.append({
-                "t": min(click_t, video_duration),
-                "event": "seed_clip_emitted",
-                "click_t": click_t,
-                "seed_lock_seconds": seed_lock_seconds,
-                "clip_start": clip_start,
-                "clip_end": clip_end,
-            })
 
     clamped_segments: List[Tuple[float, float, str]] = []
     for seg_start_t, seg_end_t, reason in segments:
