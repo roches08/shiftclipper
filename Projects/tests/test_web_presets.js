@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { ADVANCED_PRESETS, getAdvancedPreset } = require('../web/presets.js');
+const { ADVANCED_PRESETS, getAdvancedPreset } = require('../static/presets.js');
 
 test('editing applied preset does not mutate source preset', () => {
   const applied = getAdvancedPreset('balanced');

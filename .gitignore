@@ -1,5 +1,40 @@
+# OS / editor
 .DS_Store
-Projects/data/jobs/
-Projects/.venv/
+Thumbs.db
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+Projects/.venv/
+
+# Node / frontend
+node_modules/
+.next/
+out/
+
+# Build / test outputs
+dist/
+build/
+coverage/
+
+# Runtime logs
+*.log
+api.log
+worker.log
+
+# Runtime data
+Projects/data/jobs/
+Projects/models/
+
+# Model weights
+*.pt
+*.pth
+
+# Keep committed static UI; ignore only generated trash in static dirs
+Projects/static/.DS_Store
