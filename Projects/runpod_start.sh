@@ -84,7 +84,11 @@ REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
 REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
 REID_WEIGHTS_TMP="${REID_WEIGHTS_DEST}.tmp"
 REID_WEIGHTS_URL="https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
-REID_MIN_BYTES=$((5 * 1024 * 1024))
+REID_MIN_BYTES=$((50 * 1024 * 1024))
+
+if [[ "$REID_WEIGHTS_URL" == https://huggingface.co/*/resolve/*.pth ]] && [[ "$REID_WEIGHTS_URL" != *\?* ]]; then
+  REID_WEIGHTS_URL="${REID_WEIGHTS_URL}?download=true"
+fi
 
 file_size(){ wc -c < "$1" | tr -d ' '; }
 
@@ -128,6 +132,11 @@ if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq;
   exit 1
 fi
 
+if ! "$PYTHON_BIN" -c "import torchreid; import yacs; import gdown; print('torchreid ok')"; then
+  echo "ERROR: torchreid dependency import check failed."
+  exit 1
+fi
+
 ensure_ui_static
 
 mkdir -p "$REID_WEIGHTS_DIR"
@@ -140,10 +149,10 @@ else
     echo "WARNING: ReID weights download failed for $REID_WEIGHTS_URL; continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
   elif head -c 200 "$REID_WEIGHTS_TMP" | grep -qi "<html"; then
-    echo "WARNING: ReID weights download returned HTML for $REID_WEIGHTS_URL; continuing without local ReID weights"
+    echo "WARNING: ReID weights download returned HTML for $REID_WEIGHTS_URL; header=$(head -c 200 "$REID_WEIGHTS_TMP" | tr '\n' ' '); continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
   elif [ ! -s "$REID_WEIGHTS_TMP" ] || [ "$(file_size "$REID_WEIGHTS_TMP")" -le "$REID_MIN_BYTES" ]; then
-    echo "WARNING: ReID weights download failed validation for $REID_WEIGHTS_URL; continuing without local ReID weights"
+    echo "WARNING: ReID weights download failed validation for $REID_WEIGHTS_URL; size=$(file_size "$REID_WEIGHTS_TMP" 2>/dev/null || echo 0) header=$(head -c 200 "$REID_WEIGHTS_TMP" 2>/dev/null | tr '\n' ' '); continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
   else
     mv "$REID_WEIGHTS_TMP" "$REID_WEIGHTS_DEST"

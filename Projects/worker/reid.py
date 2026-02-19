@@ -7,6 +7,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+log = logging.getLogger("worker")
+
 try:
     import cv2
 except Exception:  # pragma: no cover
@@ -19,11 +21,11 @@ except Exception:  # pragma: no cover
 
 try:
     from torchreid import models as torchreid_models
-except Exception:  # pragma: no cover
+except Exception as e:  # pragma: no cover
     torchreid_models = None
+    log.exception("torchreid import failed (ReID will be unavailable): %s", e)
 
 
-log = logging.getLogger("worker")
 _MAX_MISSING_KEYS = 50
 
 
