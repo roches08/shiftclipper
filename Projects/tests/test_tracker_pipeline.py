@@ -6,6 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from worker.tasks import (
+    _build_seed_reid_target,
     _clamp_segment_window,
     _compute_clip_end_for_loss,
     _compute_seed_clip_window,
@@ -41,6 +42,16 @@ def test_compute_seed_clip_window_does_not_push_seed_after_click():
 def test_clamp_segment_window_caps_to_video_duration():
     clamped = _clamp_segment_window(417.788, 418.788, 417.63)
     assert clamped is None
+
+
+def test_build_seed_reid_target_normalizes_mean_embedding():
+    target = _build_seed_reid_target([
+        np.array([1.0, 0.0], dtype=np.float32),
+        np.array([0.0, 1.0], dtype=np.float32),
+    ])
+    assert target is not None
+    assert np.isclose(np.linalg.norm(target), 1.0)
+    assert target[0] > 0.0 and target[1] > 0.0
 
 
 def test_reacquire_rejects_low_reid_even_with_mid_identity_score():
