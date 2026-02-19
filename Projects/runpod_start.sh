@@ -28,36 +28,32 @@ cd "$PROJECTS_DIR"
 ensure_ui_static() {
   local static_js="$PROJECTS_DIR/static/app.js"
 
+  # If already present, do nothing
   if [ -f "$static_js" ]; then
     echo "UI static already present: $static_js"
     return 0
   fi
 
-  echo "UI static missing; building UI..."
+  echo "UI static missing; attempting to build UI..."
+
+  # Find package.json anywhere in repo
+  local pkg
+  pkg="$(find "$REPO_DIR" -maxdepth 6 -name package.json | head -n 1 || true)"
+
+  if [ -z "$pkg" ]; then
+    echo "WARNING: No package.json found in repo. Skipping UI build."
+    echo "WARNING: Backend will start without UI."
+    return 0
+  fi
+
+  echo "package.json found at: $pkg"
+  export DEBIAN_FRONTEND=noninteractive
 
   apt-get update -y
-  apt-get install -y nodejs npm
-
-  local pkg=""
-  for p in "$PROJECTS_DIR/ui/package.json" "$PROJECTS_DIR/web/package.json" "$PROJECTS_DIR/frontend/package.json"; do
-    if [ -f "$p" ]; then
-      pkg="$p"
-      break
-    fi
-  done
-
-  if [ -z "$pkg" ]; then
-    pkg="$(find "$PROJECTS_DIR" -maxdepth 4 -name package.json | head -n 1 || true)"
-  fi
-
-  if [ -z "$pkg" ]; then
-    echo "ERROR: package.json not found; cannot build UI"
-    return 1
-  fi
+  apt-get install -y --no-install-recommends nodejs npm
 
   local ui_dir
   ui_dir="$(dirname "$pkg")"
-  echo "Building UI in $ui_dir"
 
   pushd "$ui_dir" >/dev/null
   if [ -f package-lock.json ]; then
@@ -65,33 +61,24 @@ ensure_ui_static() {
   else
     npm install
   fi
-  npm run build
+  npm run build || echo "WARNING: UI build failed, continuing..."
   popd >/dev/null
 
   mkdir -p "$PROJECTS_DIR/static"
-  if [ -f "$ui_dir/dist/app.js" ]; then
-    cp -r "$ui_dir/dist/"* "$PROJECTS_DIR/static/"
-  elif [ -f "$ui_dir/build/app.js" ]; then
-    cp -r "$ui_dir/build/"* "$PROJECTS_DIR/static/"
-  else
-    local dist_dir
-    dist_dir="$(find "$ui_dir" -maxdepth 2 -type d -name dist | head -n 1 || true)"
-    if [ -n "$dist_dir" ]; then
-      cp -r "$dist_dir/"* "$PROJECTS_DIR/static/"
-    fi
+
+  if [ -d "$ui_dir/dist" ]; then
+    cp -r "$ui_dir/dist/"* "$PROJECTS_DIR/static/" || true
+  elif [ -d "$ui_dir/build" ]; then
+    cp -r "$ui_dir/build/"* "$PROJECTS_DIR/static/" || true
   fi
 
   if [ ! -f "$static_js" ]; then
-    echo "ERROR: UI build completed but $static_js still missing."
-    echo "Static dir contents:"
-    ls -lah "$PROJECTS_DIR/static" || true
-    return 1
+    echo "WARNING: UI build completed but static/app.js still missing."
+    echo "WARNING: Backend will start without UI."
+  else
+    echo "UI static ready: $static_js"
   fi
-
-  echo "UI static ready: $static_js"
 }
-
-ensure_ui_static
 
 REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
 REID_WEIGHTS_DEST="$REID_WEIGHTS_DIR/osnet_x0_25_msmt17.pth"
@@ -140,6 +127,8 @@ if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq;
   tail -n 120 "$WORKER_LOG" || true
   exit 1
 fi
+
+ensure_ui_static
 
 mkdir -p "$REID_WEIGHTS_DIR"
 if [ -s "$REID_WEIGHTS_DEST" ] && [ "$(file_size "$REID_WEIGHTS_DEST")" -gt "$REID_MIN_BYTES" ]; then
@@ -224,7 +213,6 @@ check_api() {
 
 check_api "http://127.0.0.1:8000/api/health"
 check_api "http://127.0.0.1:8000/"
-check_api "http://127.0.0.1:8000/static/app.js"
 
 nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
