@@ -49,6 +49,8 @@ def cosine_similarity(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float
 
 
 def expand_and_crop(frame: np.ndarray, box: Tuple[int, int, int, int], expand: float, min_side_px: int) -> Optional[np.ndarray]:
+    # Keep min_side_px for API compatibility; we no longer reject small crops.
+    _ = min_side_px
     h, w = frame.shape[:2]
     x1, y1, x2, y2 = [int(v) for v in box]
     bw = max(1, x2 - x1)
