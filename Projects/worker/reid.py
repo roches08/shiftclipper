@@ -101,14 +101,16 @@ def _strip_prefixes(state_dict: object) -> object:
     return out
 
 
-def _drop_classifier(state_dict: object) -> object:
+def _drop_classifier(state_dict: dict) -> tuple[dict, bool]:
+    """Drop classifier weights if present (we only need embeddings)."""
     if not isinstance(state_dict, dict):
-        return state_dict
-    # remove classifier head weights (class-count differs between checkpoints)
-    for k in ("classifier.weight", "classifier.bias", "fc.weight", "fc.bias"):
+        return state_dict, False
+    removed = False
+    for k in ["classifier.weight", "classifier.bias"]:
         if k in state_dict:
             state_dict.pop(k, None)
-    return state_dict
+            removed = True
+    return state_dict, removed
 
 
 class OSNetEmbedder:
@@ -123,6 +125,7 @@ class OSNetEmbedder:
         if torchreid_models is None:
             raise RuntimeError("torchreid is required for OSNet ReID model loading")
         self.model = self._build_model(cfg)
+        # Remove classifier head so model outputs embeddings only
         if hasattr(self.model, "classifier"):
             self.model.classifier = torch.nn.Identity()
         self.device = torch.device(cfg.device)
@@ -142,41 +145,37 @@ class OSNetEmbedder:
             local_path = Path(weights_path)
             if not local_path.exists():
                 raise RuntimeError(f"Missing ReID weights at {local_path}")
-            model = torchreid_models.build_model(name=cfg.model_name, num_classes=1000, pretrained=False, use_gpu=use_gpu)
             checkpoint = torch.load(str(local_path), map_location="cpu")
             state_dict = _strip_prefixes(_extract_state_dict(checkpoint))
-            state_dict = _drop_classifier(state_dict)
-            try:
-                strict_result = model.load_state_dict(state_dict, strict=True)
-                missing_keys = list(getattr(strict_result, "missing_keys", []) or [])
-                unexpected_keys = list(getattr(strict_result, "unexpected_keys", []) or [])
-                loaded_keys = len(state_dict.keys()) if isinstance(state_dict, dict) else -1
-                log.info(
-                    "ReID OSNet weights loaded (classifier dropped) model=%s keys=%s missing=%d unexpected=%d",
-                    cfg.model_name,
-                    loaded_keys,
-                    len(missing_keys),
-                    len(unexpected_keys),
+
+            # We only need backbone embeddings for tracking.
+            # Many checkpoints (e.g. MSMT17 combineall) have classifier shapes that don't match.
+            state_dict, dropped = _drop_classifier(state_dict)
+
+            model = torchreid_models.build_model(
+                name=cfg.model_name,
+                num_classes=1000,  # arbitrary since classifier head is unused
+                pretrained=False,
+                use_gpu=use_gpu,
+            )
+
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+            missing_keys = list(missing_keys) if missing_keys is not None else []
+            unexpected_keys = list(unexpected_keys) if unexpected_keys is not None else []
+
+            log.info(
+                "ReID OSNet weights loaded (strict=False) model=%s dropped_classifier=%s missing=%d unexpected=%d",
+                cfg.model_name,
+                dropped,
+                len(missing_keys),
+                len(unexpected_keys),
+            )
+
+            if len(missing_keys) > _MAX_MISSING_KEYS:
+                raise RuntimeError(
+                    f"too many missing keys; wrong checkpoint/model mismatch (missing={len(missing_keys)} threshold={_MAX_MISSING_KEYS})"
                 )
-            except RuntimeError as strict_exc:
-                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-                missing_keys = list(missing_keys)
-                unexpected_keys = list(unexpected_keys)
-                loaded_keys = len(state_dict.keys()) if isinstance(state_dict, dict) else -1
-                log.warning(
-                    "ReID OSNet strict=True load failed after classifier drop (%s); continued with strict=False model=%s keys=%s missing=%d unexpected=%d missing_keys=%s unexpected_keys=%s",
-                    strict_exc,
-                    cfg.model_name,
-                    loaded_keys,
-                    len(missing_keys),
-                    len(unexpected_keys),
-                    missing_keys,
-                    unexpected_keys,
-                )
-                if len(missing_keys) > _MAX_MISSING_KEYS:
-                    raise RuntimeError(
-                        f"too many missing keys; wrong checkpoint/model mismatch (missing={len(missing_keys)} threshold={_MAX_MISSING_KEYS})"
-                    ) from strict_exc
             log.info("timeline event=reid_ready model=%s weights_path=%s", cfg.model_name, str(local_path))
             return model
         except Exception as exc:  # pragma: no cover
