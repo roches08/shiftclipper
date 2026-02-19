@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShiftClipper</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+      .row { margin: 0.75rem 0; }
+      button { margin-right: 0.5rem; }
+      pre { background: #f5f5f5; border: 1px solid #ddd; padding: 0.75rem; overflow: auto; }
+      #status { min-height: 8rem; }
+      input[type="text"] { width: 22rem; }
+    </style>
+  </head>
+  <body>
+    <h1>ShiftClipper RunPod UI</h1>
+    <div class="row">
+      <strong>/api/health:</strong>
+      <pre id="health">Loading…</pre>
+    </div>
+
+    <div class="row">
+      <label for="jobName">Job name:</label>
+      <input id="jobName" type="text" value="runpod-job" />
+      <button id="createJob">Create Job</button>
+    </div>
+
+    <div class="row">
+      <label for="videoFile">Upload video:</label>
+      <input id="videoFile" type="file" accept="video/*" />
+      <button id="uploadFile">Upload</button>
+    </div>
+
+    <div class="row">
+      <button id="runJob">Run Job</button>
+      <button id="pollStatus">Check Status</button>
+    </div>
+
+    <div class="row">
+      <strong>Current job id:</strong> <code id="jobId">(none)</code>
+    </div>
+
+    <div class="row">
+      <strong>Status:</strong>
+      <pre id="status">No job yet.</pre>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
