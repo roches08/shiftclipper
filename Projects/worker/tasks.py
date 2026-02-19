@@ -80,7 +80,7 @@ def warm_easyocr_models(device: str = "cuda:0") -> None:
 
 @dataclass
 class TrackingParams:
-    detect_stride: int = 2
+    detect_stride: int = 1
     yolo_imgsz: int = 512
     ocr_every_n: int = 8
     ocr_max_crops_per_frame: int = 1
@@ -973,6 +973,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "dist": nearest_seed_dist,
                     "iou": nearest_seed_iou,
                     "bonus_applied": True,
+                    "dist_ok": nearest_seed_dist <= seed_dist_max,
+                    "iou_ok": nearest_seed_iou >= seed_iou_min,
+                    "seed_dist_max": seed_dist_max,
+                    "seed_iou_min": seed_iou_min,
                     "in_seed_window": in_seed_window,
                 })
             elif active_seed is not None:
@@ -984,6 +988,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "dist": nearest_seed_dist if nearest_seed_track_id is not None else None,
                     "iou": nearest_seed_iou if nearest_seed_track_id is not None else None,
                     "bonus_applied": False,
+                    "dist_ok": bool(nearest_seed_track_id is not None and nearest_seed_dist <= seed_dist_max),
+                    "iou_ok": bool(nearest_seed_track_id is not None and nearest_seed_iou >= seed_iou_min),
+                    "seed_dist_max": seed_dist_max,
+                    "seed_iou_min": seed_iou_min,
+                    "reason": "no_candidate" if nearest_seed_track_id is None else "threshold_miss",
                     "in_seed_window": in_seed_window,
                 })
 
@@ -1285,6 +1294,43 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         "reid_min_sim": reid_min_sim,
                     })
                     sim_ok = False
+            if (
+                best is not None
+                and state == "LOCKED"
+                and locked_track_id is not None
+                and best.get("track_id") != locked_track_id
+                and params.reid_enable
+                and reid_embedder is not None
+                and locked_reid_embedding is not None
+            ):
+                if float(best.get("sim", -1.0)) < 0.0:
+                    cached_emb = track_embed_cache.get(best["track_id"])
+                    if cached_emb is not None:
+                        best["embed"] = cached_emb
+                        best["sim"] = _cosine_similarity(locked_reid_embedding, cached_emb)
+                if float(best.get("sim", -1.0)) < 0.0:
+                    swap_crop = expand_and_crop(
+                        frame,
+                        best["box"],
+                        float(setup.get("reid_crop_expand", params.reid_crop_expand)),
+                        int(params.reid_min_px),
+                    )
+                    swap_emb = reid_embedder.embed([swap_crop])[0] if swap_crop is not None else None
+                    if swap_emb is not None:
+                        best["embed"] = swap_emb
+                        track_embed_cache[best["track_id"]] = swap_emb
+                        best["sim"] = _cosine_similarity(locked_reid_embedding, swap_emb)
+                if float(best.get("sim", -1.0)) < reid_min_sim:
+                    timeline.append({
+                        "t": t,
+                        "event": "locked_swap_rejected",
+                        "from_track_id": locked_track_id,
+                        "to_track_id": best.get("track_id"),
+                        "reid_sim": float(best.get("sim", -1.0)),
+                        "reid_min_sim": reid_min_sim,
+                    })
+                    best = None
+                    sim_ok = False
             best_seed_stable = bool(best and best.get("seed_match") and seconds_held >= float(setup.get("min_track_seconds", params.min_track_seconds)))
             score_ready = bool(best and best["score"] >= threshold_used)
             reacquire_ready = bool(best and reacquire_mode and seconds_held >= float(setup.get("min_track_seconds", params.min_track_seconds)) and (best.get("reacquire_identity_score", -1.0) >= threshold_used or best["score"] >= threshold_used))
@@ -1331,10 +1377,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     score_ready = False
                     reacquire_ready = False
 
+            lock_transition_from_search = False
             if best and sim_ok and not best.get("closeup_blocked", False) and (best["score"] >= lock_threshold or promote_from_seed or promote_from_reacquire):
                 if state in {"SEARCH", "LOST"}:
                     if promote_from_seed or promote_from_reacquire:
                         state = "LOCKED"
+                        lock_transition_from_search = True
                     else:
                         reacquire_hits[best["track_id"]] = reacquire_hits.get(best["track_id"], 0) + 1
                         if reacquire_hits[best["track_id"]] < reacquire_confirm_frames:
@@ -1342,6 +1390,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         else:
                             timeline.append({"t": t, "event": "reacquire", "reason": "confirm_frames", "hits": reacquire_hits[best["track_id"]], "track_id": best["track_id"]})
                             state = "LOCKED"
+                            lock_transition_from_search = True
                 else:
                     state = "LOCKED"
                 if state == "LOCKED":
@@ -1421,6 +1470,23 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             track_embed_cache[best["track_id"]] = lock_emb
                             if locked_reid_embedding is not None:
                                 best["sim"] = _cosine_similarity(locked_reid_embedding, lock_emb)
+                    if lock_transition_from_search and params.reid_enable and reid_embedder is not None:
+                        if best.get("embed") is None:
+                            force_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
+                            force_emb = reid_embedder.embed([force_crop])[0] if force_crop is not None else None
+                            if force_emb is not None:
+                                best["embed"] = force_emb
+                                track_embed_cache[best["track_id"]] = force_emb
+                        if best.get("embed") is not None:
+                            forced_target = normalize_vector(best["embed"])
+                            if forced_target is not None:
+                                locked_reid_embedding = forced_target
+                                best["sim"] = _cosine_similarity(locked_reid_embedding, best["embed"])
+                                timeline.append({
+                                    "t": t,
+                                    "event": "reid_embedding_forced_on_lock",
+                                    "track_id": best["track_id"],
+                                })
                     if best.get("embed") is not None:
                         if locked_reid_embedding is None:
                             locked_reid_embedding = normalize_vector(best["embed"])
