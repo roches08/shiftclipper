@@ -9,7 +9,31 @@ export RQ_QUEUES="${RQ_QUEUES:-jobs}"
 export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 
 apt-get update -y
-apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git nodejs npm
+apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git gnupg
+
+ensure_node() {
+  local node_major=""
+  if command -v node >/dev/null 2>&1; then
+    node_major="$(node -v | sed -E 's/^v([0-9]+).*/\1/')"
+  fi
+
+  if [ -n "$node_major" ] && [ "$node_major" -ge 18 ]; then
+    echo "Node $(node -v) already installed"
+    return 0
+  fi
+
+  echo "Installing Node.js 20.x (required for UI build)"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  apt-get install -y nodejs
+
+  node_major="$(node -v | sed -E 's/^v([0-9]+).*/\1/')"
+  if [ "$node_major" -lt 18 ]; then
+    echo "ERROR: Node.js >=18 required, found $(node -v)"
+    exit 1
+  fi
+}
+
+ensure_node
 
 REPO_URL="https://github.com/roches08/shiftclipper.git"
 REPO_DIR="/workspace/shiftclipper"
@@ -26,7 +50,6 @@ PROJECTS_DIR="$REPO_DIR/Projects"
 cd "$PROJECTS_DIR"
 
 ensure_ui_static() {
-  local static_js="$PROJECTS_DIR/static/app.js"
   local static_index="$PROJECTS_DIR/static/index.html"
 
   mkdir -p "$PROJECTS_DIR/static"
@@ -48,7 +71,7 @@ ensure_ui_static() {
 </html>
 EOF
 
-    cat > "$static_js" <<'EOF'
+    cat > "$PROJECTS_DIR/static/app.js" <<'EOF'
 const healthEl = document.getElementById('health');
 
 fetch('/api/health')
@@ -64,9 +87,14 @@ EOF
     echo "Fallback UI created at $PROJECTS_DIR/static"
   }
 
+  local has_js=0
+  if [ -f "$static_index" ] && find "$PROJECTS_DIR/static" -type f -name '*.js' | head -n 1 | grep -q .; then
+    has_js=1
+  fi
+
   # If already present, do nothing
-  if [ -f "$static_js" ] && [ -f "$static_index" ]; then
-    echo "UI static already present: $static_js"
+  if [ "$has_js" -eq 1 ]; then
+    echo "UI static already present: $PROJECTS_DIR/static"
     return 0
   fi
 
@@ -101,26 +129,11 @@ EOF
     cp -r "$ui_dir/build/." "$PROJECTS_DIR/static/" || true
   fi
 
-  if [ ! -f "$static_js" ]; then
-    echo "WARNING: UI build completed but static/app.js still missing; creating fallback UI."
-    create_fallback_ui
+  if [ -f "$static_index" ] && find "$PROJECTS_DIR/static" -type f -name '*.js' | head -n 1 | grep -q .; then
+    echo "UI static ready: $PROJECTS_DIR/static"
   else
-    if [ ! -f "$static_index" ]; then
-      cat > "$static_index" <<'EOF'
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ShiftClipper</title>
-  </head>
-  <body>
-    <script src="/static/app.js"></script>
-  </body>
-</html>
-EOF
-    fi
-    echo "UI static ready: $static_js"
+    echo "WARNING: UI build completed but static assets are incomplete; creating fallback UI."
+    create_fallback_ui
   fi
 }
 
@@ -176,11 +189,6 @@ if ! "$PYTHON_BIN" -c "import torch, pkg_resources, ultralytics, cv2, redis, rq;
   exit 1
 fi
 
-if ! "$PYTHON_BIN" -c "import torchreid; import yacs; import gdown; print('torchreid ok')"; then
-  echo "ERROR: torchreid dependency import check failed."
-  exit 1
-fi
-
 if ! "$PYTHON_BIN" -c "import tensorboard; import torchreid; print('torchreid ok')"; then
   echo "ERROR: tensorboard/torchreid sanity check failed."
   exit 1
@@ -198,10 +206,13 @@ else
     echo "WARNING: ReID weights download failed for $REID_WEIGHTS_URL; continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
   elif head -c 200 "$REID_WEIGHTS_TMP" | grep -qi "<html"; then
-    echo "WARNING: ReID weights download returned HTML for $REID_WEIGHTS_URL; header=$(head -c 200 "$REID_WEIGHTS_TMP" | tr '\n' ' '); continuing without local ReID weights"
+    header="$(head -c 200 "$REID_WEIGHTS_TMP" | tr '\n' ' ')"
+    echo "WARNING: ReID weights download returned HTML for $REID_WEIGHTS_URL; header=$header; continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
   elif [ ! -s "$REID_WEIGHTS_TMP" ] || [ "$(file_size "$REID_WEIGHTS_TMP")" -le "$REID_MIN_BYTES" ]; then
-    echo "WARNING: ReID weights download failed validation for $REID_WEIGHTS_URL; size=$(file_size "$REID_WEIGHTS_TMP" 2>/dev/null || echo 0) header=$(head -c 200 "$REID_WEIGHTS_TMP" 2>/dev/null | tr '\n' ' '); continuing without local ReID weights"
+    size="$(file_size "$REID_WEIGHTS_TMP" 2>/dev/null || echo 0)"
+    header="$(head -c 200 "$REID_WEIGHTS_TMP" 2>/dev/null | tr '\n' ' ')"
+    echo "WARNING: ReID weights download failed validation for $REID_WEIGHTS_URL; size=$size header=$header; continuing without local ReID weights"
     rm -f "$REID_WEIGHTS_TMP"
   else
     mv "$REID_WEIGHTS_TMP" "$REID_WEIGHTS_DEST"
@@ -271,8 +282,8 @@ check_api() {
 
 check_api "http://127.0.0.1:8000/api/health"
 check_api "http://127.0.0.1:8000/"
-if [ -f "$PROJECTS_DIR/static/app.js" ]; then
-  check_api "http://127.0.0.1:8000/static/app.js"
+if [ -f "$PROJECTS_DIR/static/index.html" ]; then
+  check_api "http://127.0.0.1:8000/static/index.html"
 fi
 
 nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
