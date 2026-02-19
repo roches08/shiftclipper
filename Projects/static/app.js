@@ -122,6 +122,8 @@ function applyAdvancedPreset(name){
   $('reidWeight').value = p.reid_weight;
   $('reidMinSim').value = p.reid_min_sim;
   $('reidCropExpand').value = p.reid_crop_expand;
+  $('reidMinPx').value = p.reid_min_px;
+  $('reidSharpnessThreshold').value = p.reid_sharpness_threshold;
   $('reidBatch').value = p.reid_batch;
   $('reidDevice').value = p.reid_device;
   $('swapGuardSeconds').value = p.swap_guard_seconds;
@@ -272,6 +274,8 @@ function payload(){
     reid_weight: toNumber('reidWeight'),
     reid_min_sim: toNumber('reidMinSim'),
     reid_crop_expand: toNumber('reidCropExpand'),
+    reid_min_px: toInt('reidMinPx'),
+    reid_sharpness_threshold: toNumber('reidSharpnessThreshold'),
     reid_batch: toInt('reidBatch'),
     reid_device: $('reidDevice').value,
     reid_fail_policy: 'disable',
@@ -440,6 +444,8 @@ async function loadSetup(){
     setValueIfDefined('reidWeight', setup.reid_weight);
     setValueIfDefined('reidMinSim', setup.reid_min_sim);
     setValueIfDefined('reidCropExpand', setup.reid_crop_expand);
+    setValueIfDefined('reidMinPx', setup.reid_min_px);
+    setValueIfDefined('reidSharpnessThreshold', setup.reid_sharpness_threshold);
     setValueIfDefined('reidBatch', setup.reid_batch);
     setValueIfDefined('reidDevice', setup.reid_device);
     setValueIfDefined('swapGuardSeconds', setup.swap_guard_seconds);

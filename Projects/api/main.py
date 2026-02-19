@@ -436,7 +436,7 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
     for nm in [
         "lost_timeout", "reacquire_window_seconds", "gap_merge_seconds", "lock_seconds_after_confirm",
         "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds",
-        "reid_every_n_frames",
+        "reid_every_n_frames", "reid_sharpness_threshold",
     ]:
         _check_non_negative(nm)
 
@@ -444,6 +444,8 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="reid_batch must be >= 1")
     if "reid_every_n_frames" in payload and int(payload["reid_every_n_frames"]) < 1:
         raise HTTPException(status_code=400, detail="reid_every_n_frames must be >= 1")
+    if "reid_min_px" in payload and int(payload["reid_min_px"]) < 1:
+        raise HTTPException(status_code=400, detail="reid_min_px must be >= 1")
     if "reid_model" in payload and payload.get("reid_model") not in {"osnet_x0_25", "osnet_x1_0"}:
         raise HTTPException(status_code=400, detail="reid_model must be one of: osnet_x0_25, osnet_x1_0")
 
