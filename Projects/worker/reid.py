@@ -187,8 +187,6 @@ class OSNetEmbedder:
         ten = torch.from_numpy(img).to(self.device)
         ten = ten.permute(2, 0, 1).unsqueeze(0).float() / 255.0
         ten = (ten - self.mean) / self.std
-        if self.use_fp16:
-            ten = ten.half()
         return ten
 
     def embed(self, crops: Sequence[Optional[np.ndarray]]) -> List[Optional[np.ndarray]]:
@@ -202,7 +200,11 @@ class OSNetEmbedder:
             for start in range(0, len(valid), max(1, int(self.cfg.batch_size))):
                 chunk = valid[start:start + max(1, int(self.cfg.batch_size))]
                 batch = torch.cat([self._preprocess(c) for _, c in chunk], dim=0)
-                feats = self.model(batch)
+                if self.use_fp16 and self.device.type == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        feats = self.model(batch)
+                else:
+                    feats = self.model(batch)
                 feats = feats.float()
                 feats = torch.nn.functional.normalize(feats, dim=1)
                 arr = feats.detach().cpu().numpy().astype(np.float32)
