@@ -852,6 +852,15 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     shift_state = "OFF_ICE"
     present_prev = False
     timeline = list(reid_init_timeline_events)
+    for seed in seed_clicks:
+        timeline.append({
+            "t": float(seed.get("t", 0.0)),
+            "event": "seed_click_registered",
+        })
+        timeline.append({
+            "t": float(seed.get("t", 0.0)),
+            "event": "seed_clip_planned",
+        })
     overlay_path = None
     writer = None
     if params.debug_overlay:
@@ -1083,6 +1092,27 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         cand["embed"] = previous_emb
                         cand["sim"] = _cosine_similarity(locked_reid_embedding, previous_emb)
 
+            if reid_enabled and seed_match_active and active_seed is not None:
+                matched_track = active_seed.get("matched_track_id")
+                matched_cand = next((cand for cand in candidates if cand.get("track_id") == matched_track), None)
+                if matched_cand is not None:
+                    forced_emb = matched_cand.get("embed")
+                    if forced_emb is None:
+                        forced_crop = expand_and_crop(frame, matched_cand["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
+                        forced_emb = reid_embedder.embed([forced_crop])[0] if forced_crop is not None else None
+                        if forced_emb is not None:
+                            matched_cand["embed"] = forced_emb
+                            track_embed_cache[matched_track] = forced_emb
+                    if forced_emb is not None:
+                        active_seed["seed_reid_embeddings"].append(forced_emb)
+                        timeline.append({
+                            "t": t,
+                            "event": "seed_reid_embedding_captured",
+                            "click_t": float(active_seed.get("t", 0.0)),
+                            "track_id": matched_track,
+                            "count": len(active_seed["seed_reid_embeddings"]),
+                        })
+
             if reid_enabled and any(seed for seed in seed_clicks if not seed.get("seed_reid_gallery_built")):
                 seed_lock_seconds = float(setup.get("seed_lock_seconds", params.seed_lock_seconds))
                 for seed in seed_clicks:
@@ -1109,6 +1139,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         sample_count = len(seed.get("seed_reid_embeddings", []))
                         if target_emb is not None:
                             locked_reid_embedding = target_emb
+                            timeline.append({
+                                "t": t,
+                                "event": "reid_target_set",
+                                "reason": "seed_gallery",
+                                "click_t": float(seed.get("t", 0.0)),
+                                "count": sample_count,
+                            })
                         sims = []
                         if target_emb is not None:
                             for emb in seed.get("seed_reid_embeddings", []):
@@ -1490,6 +1527,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     if best.get("embed") is not None:
                         if locked_reid_embedding is None:
                             locked_reid_embedding = normalize_vector(best["embed"])
+                            if locked_reid_embedding is not None:
+                                timeline.append({
+                                    "t": t,
+                                    "event": "reid_target_set",
+                                    "track_id": best["track_id"],
+                                    "reason": "first_lock",
+                                })
                         elif lock_state == "CONFIRMED" or seconds_held >= float(setup.get("lock_seconds_after_confirm", params.lock_seconds_after_confirm)):
                             refreshed = normalize_vector(0.8 * locked_reid_embedding + 0.2 * best["embed"])
                             if refreshed is not None:
@@ -1510,6 +1554,18 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         if cached_emb is not None:
                             best["embed"] = cached_emb
                             best["sim"] = _cosine_similarity(locked_reid_embedding, cached_emb)
+                    if (
+                        params.reid_enable
+                        and reid_embedder is not None
+                        and locked_reid_embedding is not None
+                        and float(best.get("sim", -1.0)) < 0.0
+                    ):
+                        lock_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
+                        lock_emb = reid_embedder.embed([lock_crop])[0] if lock_crop is not None else None
+                        if lock_emb is not None:
+                            best["embed"] = lock_emb
+                            track_embed_cache[best["track_id"]] = lock_emb
+                            best["sim"] = _cosine_similarity(locked_reid_embedding, lock_emb)
                     timeline.append({
                         "t": t,
                         "event": "lock_acquired",
@@ -1659,6 +1715,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     best["embed"] = cached_emb
                     reid_sim_value = _cosine_similarity(locked_reid_embedding, cached_emb)
                     best["sim"] = reid_sim_value
+                elif reid_embedder is not None:
+                    gate_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
+                    gate_emb = reid_embedder.embed([gate_crop])[0] if gate_crop is not None else None
+                    if gate_emb is not None:
+                        best["embed"] = gate_emb
+                        track_embed_cache[best.get("track_id")] = gate_emb
+                        reid_sim_value = _cosine_similarity(locked_reid_embedding, gate_emb)
+                        best["sim"] = reid_sim_value
             reid_gate_has_value = bool(reid_sim_value >= 0.0)
             reid_gate_ok = bool(reid_gate_has_value and reid_sim_value >= reid_min_sim)
             if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
