@@ -130,6 +130,7 @@ class OSNetEmbedder:
             self.model.classifier = torch.nn.Identity()
         self.device = torch.device(cfg.device)
         self.model = self.model.to(self.device)
+        self.model.float()
         self.model.eval()
         self.use_fp16 = bool(cfg.use_fp16 and self.device.type == "cuda")
         self.input_hw = (256, 128)
