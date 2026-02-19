@@ -1197,6 +1197,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 cand["score"] += params.ocr_weight * cand["ocr_match"]
                 if params.reid_enable and cand.get("sim", -1.0) >= 0:
                     cand["score"] += float(setup.get("reid_weight", params.reid_weight)) * cand["sim"]
+                if (
+                    state == "LOCKED"
+                    and params.reid_enable
+                    and locked_reid_embedding is not None
+                    and cand.get("sim", -1.0) >= 0
+                    and float(cand.get("sim", -1.0)) < reid_min_sim
+                ):
+                    cand["score"] -= float(setup.get("reid_locked_low_sim_penalty", 0.75))
                 if best is None or cand["score"] > best["score"]:
                     best = cand
 
@@ -1444,14 +1452,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             "threshold_used": threshold_used,
                             "time_since_loss": (t - lock_recovered_from_loss) if lock_recovered_from_loss is not None else 0.0,
                         })
-                    timeline.append({
-                        "t": t,
-                        "event": "lock_acquired",
-                        "track_id": best["track_id"],
-                        "identity_score": float(best.get("score", -1.0)),
-                        "reid_sim_used": float(best.get("sim", -1.0)) if (params.reid_enable and locked_reid_embedding is not None) else None,
-                    })
-
                     if player_num and best.get("ocr_match", 0.0) >= 1.0:
                         lock_state = "CONFIRMED"
                     elif player_num:
@@ -1501,6 +1501,22 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                                 })
                         if locked_reid_embedding is not None:
                             target_embed_history.append(locked_reid_embedding.tolist()[:16])
+                    if (
+                        params.reid_enable
+                        and locked_reid_embedding is not None
+                        and float(best.get("sim", -1.0)) < 0.0
+                    ):
+                        cached_emb = track_embed_cache.get(best["track_id"])
+                        if cached_emb is not None:
+                            best["embed"] = cached_emb
+                            best["sim"] = _cosine_similarity(locked_reid_embedding, cached_emb)
+                    timeline.append({
+                        "t": t,
+                        "event": "lock_acquired",
+                        "track_id": best["track_id"],
+                        "identity_score": float(best.get("score", -1.0)),
+                        "reid_sim_used": float(best.get("sim", -1.0)) if (params.reid_enable and locked_reid_embedding is not None and float(best.get("sim", -1.0)) >= 0.0) else None,
+                    })
             elif state == "LOCKED":
                 forced_reid_loss = False
                 if best and params.reid_enable and locked_reid_embedding is not None and float(best.get("sim", -1.0)) < 0.0:
@@ -1508,6 +1524,17 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     if cached_emb is not None:
                         best["embed"] = cached_emb
                         best["sim"] = _cosine_similarity(locked_reid_embedding, cached_emb)
+                if (
+                    best
+                    and params.reid_enable
+                    and locked_reid_embedding is not None
+                    and float(best.get("sim", -1.0)) >= 0.0
+                    and float(best.get("sim", -1.0)) < reid_min_sim
+                ):
+                    if best.get("track_id") != locked_track_id:
+                        best = None
+                    else:
+                        best["score"] -= float(setup.get("reid_locked_low_sim_penalty", 0.75))
                 if best and params.reid_enable and locked_reid_embedding is not None and (current_idx % reid_check_stride == 0):
                     if float(best.get("sim", -1.0)) < reid_min_sim:
                         reid_low_sim_streak += 1
