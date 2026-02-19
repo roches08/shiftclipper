@@ -11,29 +11,6 @@ export SHIFTCLIPPER_DEVICE="${SHIFTCLIPPER_DEVICE:-cuda:0}"
 apt-get update -y
 apt-get install -y ffmpeg redis-server python3-venv python3-pip curl git gnupg
 
-ensure_node() {
-  local node_major=""
-  if command -v node >/dev/null 2>&1; then
-    node_major="$(node -v | sed -E 's/^v([0-9]+).*/\1/')"
-  fi
-
-  if [ -n "$node_major" ] && [ "$node_major" -ge 18 ]; then
-    echo "Node $(node -v) already installed"
-    return 0
-  fi
-
-  echo "Installing Node.js 20.x (required for UI build)"
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  apt-get install -y nodejs
-
-  node_major="$(node -v | sed -E 's/^v([0-9]+).*/\1/')"
-  if [ "$node_major" -lt 18 ]; then
-    echo "ERROR: Node.js >=18 required, found $(node -v)"
-    exit 1
-  fi
-}
-
-ensure_node
 
 REPO_URL="https://github.com/roches08/shiftclipper.git"
 REPO_DIR="/workspace/shiftclipper"
@@ -51,90 +28,15 @@ cd "$PROJECTS_DIR"
 
 ensure_ui_static() {
   local static_index="$PROJECTS_DIR/static/index.html"
+  local static_app_js="$PROJECTS_DIR/static/app.js"
 
-  mkdir -p "$PROJECTS_DIR/static"
-
-  create_fallback_ui() {
-    cat > "$static_index" <<'EOF'
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ShiftClipper</title>
-  </head>
-  <body>
-    <h1>ShiftClipper backend running</h1>
-    <pre id="health">Checking /api/health ...</pre>
-    <script src="/static/app.js"></script>
-  </body>
-</html>
-EOF
-
-    cat > "$PROJECTS_DIR/static/app.js" <<'EOF'
-const healthEl = document.getElementById('health');
-
-fetch('/api/health')
-  .then((res) => res.json())
-  .then((data) => {
-    healthEl.textContent = `Health: ${JSON.stringify(data, null, 2)}`;
-  })
-  .catch((err) => {
-    healthEl.textContent = `Health check failed: ${err}`;
-  });
-EOF
-
-    echo "Fallback UI created at $PROJECTS_DIR/static"
-  }
-
-  local has_js=0
-  if [ -f "$static_index" ] && find "$PROJECTS_DIR/static" -type f -name '*.js' | head -n 1 | grep -q .; then
-    has_js=1
+  if [ ! -f "$static_index" ] || [ ! -f "$static_app_js" ]; then
+    echo "ERROR: Missing committed UI assets in $PROJECTS_DIR/static"
+    echo "Expected files: $static_index and $static_app_js"
+    exit 1
   fi
 
-  # If already present, do nothing
-  if [ "$has_js" -eq 1 ]; then
-    echo "UI static already present: $PROJECTS_DIR/static"
-    return 0
-  fi
-
-  echo "UI static missing; attempting to build UI..."
-
-  # Find package.json anywhere in repo
-  local pkg
-  pkg="$(find "$REPO_DIR" -maxdepth 4 -name package.json | head -n 1 || true)"
-
-  if [ -z "$pkg" ]; then
-    echo "WARNING: No package.json found in repo. Creating fallback UI."
-    create_fallback_ui
-    return 0
-  fi
-
-  echo "package.json found at: $pkg"
-  local ui_dir
-  ui_dir="$(dirname "$pkg")"
-
-  pushd "$ui_dir" >/dev/null
-  if [ -f package-lock.json ]; then
-    npm ci
-  else
-    npm install
-  fi
-  npm run build || echo "WARNING: UI build failed; fallback UI will be created if needed."
-  popd >/dev/null
-
-  if [ -d "$ui_dir/dist" ]; then
-    cp -r "$ui_dir/dist/." "$PROJECTS_DIR/static/" || true
-  elif [ -d "$ui_dir/build" ]; then
-    cp -r "$ui_dir/build/." "$PROJECTS_DIR/static/" || true
-  fi
-
-  if [ -f "$static_index" ] && find "$PROJECTS_DIR/static" -type f -name '*.js' | head -n 1 | grep -q .; then
-    echo "UI static ready: $PROJECTS_DIR/static"
-  else
-    echo "WARNING: UI build completed but static assets are incomplete; creating fallback UI."
-    create_fallback_ui
-  fi
+  echo "UI static ready: $PROJECTS_DIR/static"
 }
 
 REID_WEIGHTS_DIR="$PROJECTS_DIR/models/reid"
@@ -282,8 +184,8 @@ check_api() {
 
 check_api "http://127.0.0.1:8000/api/health"
 check_api "http://127.0.0.1:8000/"
-if [ -f "$PROJECTS_DIR/static/index.html" ]; then
-  check_api "http://127.0.0.1:8000/static/index.html"
+if [ -f "$PROJECTS_DIR/static/app.js" ]; then
+  check_api "http://127.0.0.1:8000/static/app.js"
 fi
 
 nohup "$VENV_DIR/bin/python" -m worker.main > "$WORKER_LOG" 2>&1 &
