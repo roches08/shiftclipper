@@ -6,23 +6,34 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 log = logging.getLogger("worker")
 
-_MIN_WEIGHTS_BYTES = 5 * 1024 * 1024
+_MIN_WEIGHTS_BYTES = 50 * 1024 * 1024
 _MAX_RETRIES = 3
+
+
+def _normalize_weights_url(url: str) -> str:
+    parsed = urlparse(url)
+    is_huggingface_resolve = parsed.netloc.endswith("huggingface.co") and "/resolve/" in parsed.path and parsed.path.endswith(".pth")
+    if is_huggingface_resolve and not parsed.query:
+        return f"{url}?download=true"
+    return url
 
 
 def _validate_weights_file(path: Path, min_bytes: int = _MIN_WEIGHTS_BYTES) -> int:
     if not path.exists():
         raise RuntimeError(f"Downloaded ReID weights missing at {path}")
     size = path.stat().st_size
-    if size <= min_bytes:
-        raise RuntimeError(f"Downloaded ReID weights too small ({size} bytes)")
     with path.open("rb") as f:
-        header = f.read(200).lower()
-    if b"<html" in header:
-        raise RuntimeError("Downloaded ReID weights appear to be HTML, likely a failed redirect/auth response")
+        header = f.read(200)
+    if size <= min_bytes:
+        raise RuntimeError(
+            f"Downloaded ReID weights too small ({size} bytes). Header preview: {header!r}"
+        )
+    if b"<html" in header.lower():
+        raise RuntimeError(f"Downloaded ReID weights appear to be HTML, likely a failed redirect/auth response. Header preview: {header!r}")
     return size
 
 
@@ -62,6 +73,7 @@ def ensure_reid_weights(weights_path: str, weights_url: str, timeout_sec: float 
     url = str(weights_url or "").strip()
     if not url:
         raise RuntimeError("reid_weights_url is required")
+    url = _normalize_weights_url(url)
 
     if target.exists():
         _validate_weights_file(target)
