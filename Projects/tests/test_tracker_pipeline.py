@@ -9,6 +9,7 @@ from worker.tasks import (
     _build_seed_reid_target,
     _clamp_segment_window,
     _compute_clip_end_for_loss,
+    _compute_clip_end_time,
     _compute_seed_clip_window,
     _locked_clip_continuity_active,
     _point_in_polygon,
@@ -26,6 +27,32 @@ def test_point_in_polygon_basic_square():
 def test_lost_timeout_clip_end_guard_uses_last_seen_not_video_end():
     end = _compute_clip_end_for_loss(last_seen_time=12.0, loss_timeout=1.5, video_end_time=100.0)
     assert end == 13.5
+
+
+def test_compute_clip_end_time_prefers_last_good_lock_with_post_roll():
+    end = _compute_clip_end_time(
+        video_duration=40.0,
+        t=22.0,
+        last_good_lock_t=20.0,
+        last_seen_time=21.0,
+        post_roll=2.0,
+        lost_timeout=4.0,
+        reason="score_dropout",
+    )
+    assert end == 22.0
+
+
+def test_compute_clip_end_time_uses_lost_timeout_for_lock_loss():
+    end = _compute_clip_end_time(
+        video_duration=40.0,
+        t=22.0,
+        last_good_lock_t=20.0,
+        last_seen_time=21.0,
+        post_roll=1.0,
+        lost_timeout=4.0,
+        reason="lock_lost",
+    )
+    assert end == 25.0
 
 
 def test_compute_seed_clip_window_does_not_push_seed_after_click():
