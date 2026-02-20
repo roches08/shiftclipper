@@ -1996,10 +1996,20 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             identity_score = _clamp01(float(best["score"])) if best else 0.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             chosen_id = best.get("track_id") if best else None
-            track_present = bool(
+            if best and state == "LOCKED":
+                last_seen = t
+                clip_last_seen_time = t
+            t_minus_last_seen = None if clip_last_seen_time is None else max(0.0, t - clip_last_seen_time)
+            lost_timeout_window = max(0.0, float(setup.get("lost_timeout", params.lost_timeout)))
+            locked_recent_seen = bool(
                 state == "LOCKED"
-                and chosen_id is not None
-                and identity_score >= unlock_threshold
+                and clip_last_seen_time is not None
+                and t_minus_last_seen is not None
+                and t_minus_last_seen < lost_timeout_window
+            )
+            track_present = bool(
+                (state == "LOCKED" and identity_score >= unlock_threshold)
+                or locked_recent_seen
             )
             clip_emit_allowed = bool(
                 state == "LOCKED"
@@ -2027,8 +2037,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 lost_since=lost_since,
                 lost_timeout=float(setup.get("lost_timeout", params.lost_timeout)),
             )
-            lost_timeout_window = max(0.0, float(setup.get("lost_timeout", params.lost_timeout)))
-            continuity_allowed = bool(track_present or (state == "LOST" and lost_since is not None and (t - lost_since) < lost_timeout_window))
+            continuity_allowed = bool(
+                keep_continuity
+                or locked_recent_seen
+                or (state == "LOST" and lost_since is not None and (t - lost_since) < lost_timeout_window)
+            )
             present = can_start_clip or bool(present_prev and continuity_allowed)
             reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST", "LOCKED"})
             reid_sim_value = float(best.get("sim", -1.0)) if best is not None else -1.0
@@ -2176,6 +2189,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "track_present": track_present,
                 "clip_emit_allowed": clip_emit_allowed,
                 "chosen_id": chosen_id,
+                "best_is_none": best is None,
+                "t_minus_last_seen": t_minus_last_seen,
                 "allow_unconfirmed_clips": allow_unconfirmed,
                 "min_track_seconds": min_track_seconds,
                 "clip_score_threshold": clip_score_threshold,
@@ -2192,11 +2207,25 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if shift_state == "OFF_ICE":
                     shift_state = "ON_ICE"
                     shift_start = t
-            clip_bench_enter_time = None
+            if present and best and params.use_bench_mask and best.get("in_bench"):
+                clip_bench_enter_time = clip_bench_enter_time or t
+                if (t - clip_bench_enter_time) >= max(0.0, float(setup.get("bench_confirm_sec", 0.35))):
+                    clip_end_reason = ClipEndReason.BENCH_ENTER.value
+            elif not present or not best or not best.get("in_bench"):
+                clip_bench_enter_time = None
+
+            if present and clip_start_time is not None and (t - clip_start_time) > float(setup.get("max_clip_len_sec", params.max_clip_len_sec)):
+                clip_end_reason = "safety_close_max_len"
 
             if clip_end_reason == ClipEndReason.LOST_TIMEOUT.value and clip_start_time is not None:
                 seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
                 _append_segment(segments, clip_start_time, seg_end, ClipEndReason.LOST_TIMEOUT)
+                present = False
+            elif clip_end_reason == ClipEndReason.BENCH_ENTER.value and clip_start_time is not None:
+                _append_segment(segments, clip_start_time, t, ClipEndReason.BENCH_ENTER)
+                present = False
+            elif clip_end_reason == "safety_close_max_len" and clip_start_time is not None:
+                _append_segment(segments, clip_start_time, t, ClipEndReason.MAX_LEN_GUARD)
                 present = False
             if (not present) and present_prev and clip_end_reason is None and clip_start_time is not None:
                 clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
