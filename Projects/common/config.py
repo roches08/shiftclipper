@@ -208,6 +208,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reid_reacquire_hysteresis": max(0.0, _as_float(src, "reid_reacquire_hysteresis", 0.02)),
         "swap_guard_seconds": _as_float(src, "swap_guard_seconds", 2.5),
         "swap_guard_bonus": _as_float(src, "swap_guard_bonus", 0.1),
+        "locked_grace_seconds": _as_float(src, "locked_grace_seconds", 0.75),
         "rink_polygon": src.get("rink_polygon") or [],
         "polygon_coords_normalized": bool(src.get("polygon_coords_normalized", True)),
         "bench_polygons": src.get("bench_polygons") or [],

@@ -10,6 +10,7 @@ from worker.tasks import (
     _clamp_segment_window,
     _compute_clip_end_for_loss,
     _compute_seed_clip_window,
+    _locked_clip_continuity_active,
     _point_in_polygon,
     _should_reject_for_reid,
     _swap_guard_allows_transition,
@@ -417,3 +418,62 @@ def test_missing_weights_with_auto_download_disabled_disables_reid_and_continues
     assert setup.get("_runtime_reid_active") is False
     assert out["reid_disabled_due_to_error"]
     assert any(ev.get("event") == "reid_disabled_due_to_error" for ev in out["timeline"])
+
+
+def test_locked_provisional_disallowed_does_not_end_active_clip():
+    # Regression for debug timeline dip (~52.486s): keep the clip open while still LOCKED.
+    frame_times = [52.400, 52.486, 52.560, 52.640]
+    identity_scores = [0.61, 0.31, 0.30, 0.57]
+    unlock_threshold = 0.33
+    clip_score_threshold = 0.55
+    lost_timeout = 4.0
+
+    present_prev = True
+    lost_since = None
+    locked_grace_start = None
+    clip_end_events = 0
+
+    for t, score in zip(frame_times, identity_scores):
+        if score >= unlock_threshold:
+            lost_since = None
+        elif lost_since is None:
+            lost_since = t
+
+        keep_continuity, locked_grace_start, _ = _locked_clip_continuity_active(
+            state="LOCKED",
+            lock_state="PROVISIONAL",
+            identity_score=score,
+            unlock_threshold=unlock_threshold,
+            t=t,
+            locked_grace_start=locked_grace_start,
+            locked_grace_seconds=0.75,
+            lost_since=lost_since,
+            lost_timeout=lost_timeout,
+        )
+        can_start_clip = score >= clip_score_threshold
+        present = can_start_clip or (present_prev and keep_continuity)
+
+        if (not present) and present_prev:
+            clip_end_events += 1
+        present_prev = present
+
+    assert clip_end_events == 0
+    assert present_prev is True
+
+
+def test_locked_continuity_uses_grace_when_lost_timeout_disabled():
+    keep, grace_start, grace_active = _locked_clip_continuity_active(
+        state="LOCKED",
+        lock_state="CONFIRMED",
+        identity_score=0.2,
+        unlock_threshold=0.33,
+        t=10.0,
+        locked_grace_start=None,
+        locked_grace_seconds=0.75,
+        lost_since=None,
+        lost_timeout=0.0,
+    )
+
+    assert keep is True
+    assert grace_start == 10.0
+    assert grace_active is True
