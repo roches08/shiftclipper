@@ -150,6 +150,8 @@ class TrackingParams:
     swap_guard_seconds: float = 2.0
     swap_guard_bonus: float = 0.1
     locked_grace_seconds: float = 0.75
+    clip_grace_seconds: float = 3.0
+    reid_reacquire_confirm_frames: int = 3
 
 
 class ClipEndReason(str, Enum):
@@ -888,6 +890,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     last_good_mean_hsv: Optional[np.ndarray] = None
     last_good_area_ratio: Optional[float] = None
     last_good_identity_time: Optional[float] = None
+    last_good_lock_t: Optional[float] = None
+    last_reid_ok_t: Optional[float] = None
     embed_cache: Dict[Tuple[int, int], Optional[np.ndarray]] = {}
     track_embed_cache: Dict[int, np.ndarray] = {}
     ocr_penalties: Dict[int, float] = {}
@@ -940,6 +944,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     reid_locked_missing_grace_s = max(0.5, float(setup.get("reid_missing_grace_s", 0.75)))
     locked_grace_seconds = max(0.0, float(setup.get("locked_grace_seconds", params.locked_grace_seconds)))
     edge_margin_px = float(setup.get("edge_margin_px", params.edge_margin_px))
+    clip_grace_seconds = max(0.0, float(setup.get("clip_grace_seconds", setup.get("lost_timeout", params.clip_grace_seconds))))
+    reid_reacquire_confirm_frames = max(1, int(setup.get("reid_reacquire_confirm_frames", params.reid_reacquire_confirm_frames)))
 
     segments, shifts = [], []
     shift_start = None
@@ -1488,7 +1494,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     color_similarity = max(0.0, 1.0 - (_hsv_distance(mean_hsv, (int(last_good_mean_hsv[0]), int(last_good_mean_hsv[1]), int(last_good_mean_hsv[2]))) / 2.0))
                 proximity_score = float((color_similarity + area_similarity) / 2.0)
                 reid_similarity = float(best.get("sim", -1.0) or -1.0)
-                identity_score = float(best.get("score", -1.0))
+                identity_score = _clamp01(float(best.get("score", -1.0)))
                 best["reid_sim"] = reid_similarity if reid_similarity >= 0 else None
                 best["reacquire_identity_score"] = _reacquire_combined_score(
                     identity_score=identity_score,
@@ -1519,7 +1525,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "motion": float(best.get("motion", 0.0)),
                     "ocr": float(best.get("ocr_match", 0.0)),
                     "reid": float(max(0.0, best.get("sim", 0.0))) if float(best.get("sim", -1.0)) >= 0.0 else None,
-                    "combined": float(best.get("score", -1.0)),
+                    "combined": _clamp01(float(best.get("score", -1.0))),
                     "reid_sim_used": float(max(0.0, best.get("sim", 0.0))) if float(best.get("sim", -1.0)) >= 0.0 else None,
                 })
 
@@ -1530,7 +1536,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     locked_emb=locked_reid_embedding,
                     reid_sim=float(best.get("sim", -1.0)),
                     reid_min_sim=reid_min_sim,
-                    identity_score=float(best.get("score", -1.0)),
+                    identity_score=_clamp01(float(best.get("score", -1.0))),
                     proximity_score=prox_score,
                 ):
                     timeline.append({
@@ -1593,29 +1599,57 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             promote_from_reacquire = False
             lock_transition_from_search = False
             should_lock_now = False
+            reacquire_confirm_count = 0
             if state in {"SEARCH", "LOST"}:
-                if best and float(best.get("score", -1.0)) >= score_lock_threshold:
-                    track_id = int(best["track_id"])
-                    reacquire_hits[track_id] = reacquire_hits.get(track_id, 0) + 1
-                    for hit_track in list(reacquire_hits.keys()):
-                        if hit_track != track_id:
-                            reacquire_hits[hit_track] = 0
-                    confirm_frames = reacquire_hits[track_id]
-                    if confirm_frames >= reacquire_confirm_frames:
-                        state = "LOCKED"
-                        lock_transition_from_search = True
-                        should_lock_now = True
-                        timeline.append({
-                            "t": t,
-                            "event": "lock_acquired",
-                            "reason": "threshold",
-                            "track_id": track_id,
-                        })
+                strong_reid_reacquire = False
+                reacquire_reason = "threshold"
+                if best and sim_ok and not best.get("closeup_blocked", False):
+                    score_for_lock = _clamp01(float(best.get("score", -1.0)))
+                    sim_for_lock = float(best.get("sim", -1.0))
+                    bbox_sane = True
+                    if last_good_area_ratio and last_good_area_ratio > 1e-6:
+                        b = best["box"]
+                        area_ratio = ((b[2] - b[0]) * (b[3] - b[1])) / max(1.0, float(w * h))
+                        area_scale = area_ratio / max(last_good_area_ratio, 1e-6)
+                        bbox_sane = 0.25 <= area_scale <= 4.0
+                    strong_reid_reacquire = bool(
+                        params.reid_enable
+                        and locked_reid_embedding is not None
+                        and sim_for_lock >= reid_min_sim
+                        and bbox_sane
+                    )
+                    reacquire_ready = bool(score_for_lock >= score_lock_threshold or strong_reid_reacquire)
+                    if reacquire_ready:
+                        track_id = int(best["track_id"])
+                        reacquire_hits[track_id] = reacquire_hits.get(track_id, 0) + 1
+                        for hit_track in list(reacquire_hits.keys()):
+                            if hit_track != track_id:
+                                reacquire_hits[hit_track] = 0
+                        confirm_frames = reacquire_hits[track_id]
+                        required_frames = reid_reacquire_confirm_frames if strong_reid_reacquire and score_for_lock < score_lock_threshold else reacquire_confirm_frames
+                        if strong_reid_reacquire and score_for_lock < score_lock_threshold:
+                            reacquire_reason = "reid_confirmed"
+                        if confirm_frames >= required_frames:
+                            state = "LOCKED"
+                            lock_transition_from_search = True
+                            should_lock_now = True
+                            reacquire_confirm_count = confirm_frames
+                            promote_from_reacquire = bool(lost_start_time is not None)
+                            timeline.append({
+                                "t": t,
+                                "event": "lock_acquired",
+                                "reason": reacquire_reason,
+                                "track_id": track_id,
+                            })
+                    else:
+                        confirm_frames = 0
+                        reacquire_hits.clear()
+                        state = "SEARCH"
                 else:
                     confirm_frames = 0
                     reacquire_hits.clear()
                     state = "SEARCH"
-            elif best and sim_ok and not best.get("closeup_blocked", False) and best["score"] >= lock_threshold:
+            elif best and sim_ok and not best.get("closeup_blocked", False) and _clamp01(float(best.get("score", -1.0))) >= lock_threshold:
                 state = "LOCKED"
                 should_lock_now = True
 
@@ -1662,13 +1696,17 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             "reacquire_mode": reacquire_mode,
                         })
                     if promote_from_reacquire:
+                        track_id = int(best["track_id"])
                         timeline.append({
                             "t": t,
                             "event": "reacquire_success",
                             "best_candidate_track_id": best["track_id"],
-                            "best_score": float(best.get("score", -1.0)),
+                            "best_score": _clamp01(float(best.get("score", -1.0))),
+                            "reid_sim": float(best.get("sim", -1.0)) if float(best.get("sim", -1.0)) >= 0.0 else None,
+                            "confirm_frames": int(reacquire_confirm_count),
                             "threshold_used": threshold_used,
                             "time_since_loss": (t - lock_recovered_from_loss) if lock_recovered_from_loss is not None else 0.0,
+                            "time_since_last_lock": (t - last_good_lock_t) if last_good_lock_t is not None else None,
                         })
                     if player_num and best.get("ocr_match", 0.0) >= 1.0:
                         lock_state = "CONFIRMED"
@@ -1799,10 +1837,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         best["score"] -= float(setup.get("reid_locked_low_sim_penalty", 0.75))
                 if best and params.reid_enable and locked_reid_embedding is not None:
                     sim_now = float(best.get("sim", -1.0))
+                    if sim_now >= reid_min_sim:
+                        last_reid_ok_t = t
                     if sim_now < 0.0:
                         if reid_locked_missing_since is None:
                             reid_locked_missing_since = t
-                        if (t - reid_locked_missing_since) >= reid_locked_missing_grace_s:
+                        reid_recent_ok = bool(last_reid_ok_t is not None and (t - last_reid_ok_t) <= clip_grace_seconds)
+                        if (t - reid_locked_missing_since) >= reid_locked_missing_grace_s and not reid_recent_ok:
                             timeline.append({
                                 "t": t,
                                 "event": "reid_missing_gate_triggered",
@@ -1850,7 +1891,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
                         forced_reid_loss = True
 
-                if (not forced_reid_loss) and best and best["score"] >= unlock_threshold:
+                if (not forced_reid_loss) and best and _clamp01(float(best.get("score", -1.0))) >= unlock_threshold:
                     lost_since = None
                 elif not forced_reid_loss:
                     if lost_since is None:
@@ -1861,7 +1902,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             "t": t,
                             "event": "lock_lost",
                             "lost_frames": lock_lost_frames,
-                            "last_identity_score": float(best.get("score", -1.0)) if best else -1.0,
+                            "last_identity_score": _clamp01(float(best.get("score", -1.0))) if best else -1.0,
                             "unlock_threshold": unlock_threshold,
                         })
                         if clip_start_time is not None:
@@ -1884,7 +1925,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         state = "LOST"
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
                         reacquire_failed_logged = False
-                        timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold_timeout", "score": best["score"] if best else None, "threshold": unlock_threshold, "lost_timeout": float(setup.get("lost_timeout", params.lost_timeout))})
+                        timeline.append({"t": t, "event": "lost", "reason": "score_below_threshold_timeout", "score": _clamp01(float(best.get("score", -1.0))) if best else None, "threshold": unlock_threshold, "lost_timeout": float(setup.get("lost_timeout", params.lost_timeout))})
             elif state in {"SEARCH", "LOST"}:
                 if lost_start_time is not None and t > reacquire_until:
                     if not reacquire_failed_logged:
@@ -1898,7 +1939,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             "t": t,
                             "event": "reacquire_failed",
                             "best_candidate_track_id": best.get("track_id") if best else None,
-                            "best_score": float(best.get("score", -1.0)) if best else -1.0,
+                            "best_score": _clamp01(float(best.get("score", -1.0))) if best else -1.0,
                             "threshold_used": reacquire_threshold,
                             "time_since_loss": t - lost_start_time,
                         })
@@ -1909,7 +1950,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
             clip_score_threshold = threshold_used if lock_state == "PROVISIONAL" else float(setup.get("score_lock_threshold", params.score_lock_threshold))
-            identity_score = float(best["score"]) if best else -1.0
+            identity_score = _clamp01(float(best["score"])) if best else 0.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             base_gate = (
                 state == "LOCKED"
@@ -1980,13 +2021,21 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         best["sim"] = reid_sim_value
             reid_gate_has_value = bool(reid_sim_value >= 0.0)
             reid_gate_ok = bool(reid_gate_has_value and reid_sim_value >= reid_min_sim)
+            if reid_gate_ok:
+                last_reid_ok_t = t
+            reid_recent_ok = bool(last_reid_ok_t is not None and (t - last_reid_ok_t) <= clip_grace_seconds)
             reid_missing_grace_active = bool(
                 state == "LOCKED"
                 and reid_gate_required
                 and not reid_gate_has_value
-                and reid_locked_missing_since is not None
-                and (t - reid_locked_missing_since) < reid_locked_missing_grace_s
+                and (
+                    (reid_locked_missing_since is not None and (t - reid_locked_missing_since) < reid_locked_missing_grace_s)
+                    or reid_recent_ok
+                )
             )
+            if state == "LOCKED" and lock_state in {"CONFIRMED", "PROVISIONAL"} and identity_score >= clip_score_threshold and (not reid_gate_required or reid_gate_ok or (not reid_gate_has_value and reid_recent_ok)):
+                last_good_lock_t = t
+            clip_is_active = bool(clip_start_time is not None or present_prev)
             if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
                 present = False
             if state == "LOCKED" and reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:
@@ -2008,6 +2057,36 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 clip_reason = "identity_below_threshold"
             elif not gate_held:
                 clip_reason = "min_track_not_met"
+
+            time_since_last_good_lock = (t - last_good_lock_t) if last_good_lock_t is not None else None
+            grace_window_active = bool(
+                clip_is_active
+                and time_since_last_good_lock is not None
+                and time_since_last_good_lock <= clip_grace_seconds
+            )
+            if clip_is_active and not present and grace_window_active:
+                grace_reasons = {
+                    "searching",
+                    "reid_gate_search",
+                    "state_not_locked",
+                    "provisional_disallowed",
+                    "identity_below_unlock_threshold",
+                    "identity_below_threshold",
+                    "min_track_not_met",
+                    "reid_unavailable",
+                }
+                if clip_reason in grace_reasons and (clip_reason != "reid_unavailable" or reid_recent_ok):
+                    reason_prev = clip_reason
+                    present = True
+                    clip_reason = "clip_grace_active"
+                    timeline.append({
+                        "t": t,
+                        "event": "clip_grace_active",
+                        "state": state,
+                        "lock_state": lock_state,
+                        "time_since_last_good_lock": float(time_since_last_good_lock),
+                        "reason_prev": reason_prev,
+                    })
             timeline.append({
                 "t": t,
                 "event": "clip_allowed" if present else "clip_blocked",
