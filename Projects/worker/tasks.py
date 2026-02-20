@@ -156,6 +156,9 @@ class TrackingParams:
 
 class ClipEndReason(str, Enum):
     LOST_TIMEOUT = "lost_timeout"
+    LOCK_LOST = "lock_lost"
+    REID_GATE = "reid_gate"
+    SCORE_DROPOUT = "score_dropout"
     BENCH_ENTER = "bench_enter"
     PERIOD_END = "period_end"
     VIDEO_END = "video_end"
@@ -351,6 +354,30 @@ def _embed_crop(crop: np.ndarray) -> Optional[np.ndarray]:
 
 def _compute_clip_end_for_loss(last_seen_time: float, loss_timeout: float, video_end_time: float) -> float:
     return min(video_end_time, max(0.0, last_seen_time + max(0.0, loss_timeout)))
+
+
+def _compute_clip_end_time(
+    *,
+    video_duration: float,
+    t: float,
+    last_good_lock_t: Optional[float],
+    last_seen_time: Optional[float],
+    post_roll: float,
+    lost_timeout: float,
+    reason: Optional[str],
+) -> float:
+    anchor_t = last_good_lock_t if last_good_lock_t is not None else (last_seen_time if last_seen_time is not None else t)
+    tail = max(0.0, float(post_roll))
+    if reason in {
+        ClipEndReason.LOST_TIMEOUT.value,
+        ClipEndReason.LOCK_LOST.value,
+        "lock_lost",
+        ClipEndReason.REID_GATE.value,
+        "reid_mismatch",
+    } and last_seen_time is not None:
+        anchor_t = float(last_seen_time)
+        tail = max(tail, max(0.0, float(lost_timeout)))
+    return min(float(video_duration), float(anchor_t) + tail)
 
 
 def _append_segment(segments: List[Tuple[float, float, str]], start_time: float, end_time: float, reason: ClipEndReason) -> None:
@@ -1851,15 +1878,18 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                                 "missing_seconds": t - reid_locked_missing_since,
                                 "missing_grace_seconds": reid_locked_missing_grace_s,
                             })
-                            if clip_start_time is not None:
-                                seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
-                                segments.append((float(clip_start_time), float(seg_end), "lock_lost"))
-                                clip_end_reason = "lock_lost"
-                                clip_start_time = None
+                            timeline.append({
+                                "t": t,
+                                "event": "reid_gate_transition",
+                                "reason": "reid_missing",
+                                "from_state": state,
+                                "to_state": "LOST",
+                                "track_id": best.get("track_id"),
+                            })
                             state = "LOST"
                             lock_state = "SEARCHING"
                             lost_start_time = t
-                            lost_since = t
+                            lost_since = lost_since if lost_since is not None else t
                             reacquire_until = t + max(0.0, reacquire_window_seconds)
                             forced_reid_loss = True
                     else:
@@ -1879,15 +1909,20 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             "reid_min_sim": reid_min_sim,
                             "checks": reid_low_sim_streak,
                         })
-                        if clip_start_time is not None:
-                            seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
-                            segments.append((float(clip_start_time), float(seg_end), "lock_lost"))
-                            clip_end_reason = "lock_lost"
-                            clip_start_time = None
+                        timeline.append({
+                            "t": t,
+                            "event": "reid_gate_transition",
+                            "reason": "reid_low_sim",
+                            "from_state": state,
+                            "to_state": "LOST",
+                            "track_id": best.get("track_id"),
+                            "reid_sim": float(best.get("sim", -1.0)),
+                            "reid_min_sim": reid_min_sim,
+                        })
                         state = "LOST"
                         lock_state = "SEARCHING"
                         lost_start_time = t
-                        lost_since = t
+                        lost_since = lost_since if lost_since is not None else t
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
                         forced_reid_loss = True
 
@@ -2037,9 +2072,41 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 last_good_lock_t = t
             clip_is_active = bool(clip_start_time is not None or present_prev)
             if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
-                present = False
+                if clip_is_active and state == "LOCKED":
+                    timeline.append({
+                        "t": t,
+                        "event": "reid_gate_transition",
+                        "reason": "reid_mismatch",
+                        "from_state": state,
+                        "to_state": "LOST",
+                        "track_id": best.get("track_id") if best else None,
+                        "reid_sim": reid_sim_value,
+                        "reid_min_sim": reid_min_sim,
+                    })
+                    state = "LOST"
+                    lock_state = "SEARCHING"
+                    lost_start_time = lost_start_time if lost_start_time is not None else t
+                    lost_since = lost_since if lost_since is not None else t
+                    reacquire_until = t + max(0.0, reacquire_window_seconds)
+                elif not clip_is_active:
+                    present = False
             if state == "LOCKED" and reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:
-                present = False
+                if clip_is_active:
+                    timeline.append({
+                        "t": t,
+                        "event": "reid_gate_transition",
+                        "reason": "reid_unavailable",
+                        "from_state": state,
+                        "to_state": "LOST",
+                        "track_id": best.get("track_id") if best else None,
+                    })
+                    state = "LOST"
+                    lock_state = "SEARCHING"
+                    lost_start_time = lost_start_time if lost_start_time is not None else t
+                    lost_since = lost_since if lost_since is not None else t
+                    reacquire_until = t + max(0.0, reacquire_window_seconds)
+                else:
+                    present = False
             clip_reason = "allowed"
             if state in {"SEARCH", "LOST"}:
                 clip_reason = "reid_gate_search" if reid_gate_required and not reid_gate_ok else "searching"
@@ -2087,6 +2154,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         "time_since_last_good_lock": float(time_since_last_good_lock),
                         "reason_prev": reason_prev,
                     })
+            if clip_is_active and state == "LOST" and lost_since is not None and (t - lost_since) < max(0.0, float(setup.get("lost_timeout", params.lost_timeout))):
+                present = True
+                if clip_reason in {"reid_mismatch", "reid_unavailable", "searching", "reid_gate_search"}:
+                    clip_reason = "lost_timeout_grace"
             timeline.append({
                 "t": t,
                 "event": "clip_allowed" if present else "clip_blocked",
@@ -2132,16 +2203,50 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 present = False
 
             if (not present) and present_prev and clip_end_reason is None and clip_start_time is not None:
-                _append_segment(segments, clip_start_time, t, ClipEndReason.LOST_TIMEOUT)
-                clip_end_reason = "clip_blocked"
+                if clip_reason == "reid_mismatch":
+                    clip_end_reason = ClipEndReason.REID_GATE.value
+                elif clip_reason in {"identity_below_unlock_threshold", "identity_below_threshold"}:
+                    clip_end_reason = ClipEndReason.SCORE_DROPOUT.value
+                elif state == "LOST":
+                    clip_end_reason = ClipEndReason.LOCK_LOST.value
+                else:
+                    clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
+                seg_end = _compute_clip_end_time(
+                    video_duration=video_duration,
+                    t=t,
+                    last_good_lock_t=last_good_lock_t,
+                    last_seen_time=clip_last_seen_time if clip_last_seen_time is not None else (last_seen if last_seen >= 0.0 else None),
+                    post_roll=float(setup.get("post_roll", params.post_roll)),
+                    lost_timeout=float(setup.get("lost_timeout", params.lost_timeout)),
+                    reason=clip_end_reason,
+                )
+                if seg_end > clip_start_time:
+                    segments.append((float(clip_start_time), float(seg_end), clip_end_reason))
 
             if (not present) and present_prev:
-                seg_end = t
+                seg_end = _compute_clip_end_time(
+                    video_duration=video_duration,
+                    t=t,
+                    last_good_lock_t=last_good_lock_t,
+                    last_seen_time=clip_last_seen_time if clip_last_seen_time is not None else (last_seen if last_seen >= 0.0 else None),
+                    post_roll=float(setup.get("post_roll", params.post_roll)),
+                    lost_timeout=float(setup.get("lost_timeout", params.lost_timeout)),
+                    reason=clip_end_reason,
+                )
                 if shift_state == "ON_ICE" and shift_start is not None:
                     shifts.append((shift_start, seg_end))
                     shift_state = "OFF_ICE"
                     shift_start = None
-                timeline.append({"t": t, "event": "clip_end", "reason": clip_end_reason or "clip_blocked", "start_time": clip_start_time, "end_time": seg_end})
+                timeline.append({
+                    "t": t,
+                    "event": "clip_end",
+                    "reason": clip_end_reason or ClipEndReason.LOST_TIMEOUT.value,
+                    "start_time": clip_start_time,
+                    "end_time": seg_end,
+                    "last_good_lock_t": last_good_lock_t,
+                    "last_reid_ok_t": last_reid_ok_t,
+                    "lost_since": lost_since,
+                })
                 clip_start_time = None
                 clip_end_reason = None
 
@@ -2204,7 +2309,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     video_duration = max(0.0, frame_idx / max(fps, 1.0))
     if present_prev:
         _append_segment(segments, clip_start_time or seg_start, video_duration, ClipEndReason.VIDEO_END)
-        timeline.append({"t": video_duration, "event": "clip_end", "reason": ClipEndReason.VIDEO_END.value})
+        timeline.append({"t": video_duration, "event": "clip_end", "reason": ClipEndReason.VIDEO_END.value, "end_time": video_duration, "last_good_lock_t": last_good_lock_t, "last_reid_ok_t": last_reid_ok_t, "lost_since": lost_since})
         if shift_state == "ON_ICE" and shift_start is not None:
             shifts.append((shift_start, video_duration))
 
