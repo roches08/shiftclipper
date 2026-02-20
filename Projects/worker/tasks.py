@@ -135,6 +135,8 @@ class TrackingParams:
     reid_device: str = "cuda:0"
     loss_timeout_sec: float = 1.5
     reacquire_max_sec: float = 2.0
+    provisional_timeout_sec: float = 1.8
+    provisional_clip_threshold: float = 0.49
     reacquire_confirm_frames: int = 5
     reid_sim_threshold: float = 0.35
     max_clip_len_sec: float = 0.0
@@ -921,6 +923,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     clip_bench_enter_time: Optional[float] = None
     clip_end_reason: Optional[str] = None
     reacquire_hits: Dict[int, int] = {}
+    provisional_since: Optional[float] = None
     locked_reid_embedding: Optional[np.ndarray] = None
     target_embed_history: List[List[float]] = []
     last_good_mean_hsv: Optional[np.ndarray] = None
@@ -1771,10 +1774,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         })
                     if player_num and best.get("ocr_match", 0.0) >= 1.0:
                         lock_state = "CONFIRMED"
+                        provisional_since = None
                     elif player_num:
                         lock_state = "PROVISIONAL"
+                        provisional_since = t
                     else:
                         lock_state = "CONFIRMED"
+                        provisional_since = None
                     last_good_mean_hsv = _mean_hsv(frame, best["box"])
                     b = best["box"]
                     last_good_area_ratio = ((b[2] - b[0]) * (b[3] - b[1])) / max(1.0, float(w * h))
@@ -1922,6 +1928,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                             })
                             state = "LOST"
                             lock_state = "SEARCHING"
+                            provisional_since = None
                             lost_start_time = t
                             lost_since = lost_since if lost_since is not None else t
                             reacquire_until = t + max(0.0, reacquire_window_seconds)
@@ -1955,6 +1962,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         })
                         state = "LOST"
                         lock_state = "SEARCHING"
+                        provisional_since = None
                         lost_start_time = t
                         lost_since = lost_since if lost_since is not None else t
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
@@ -2022,12 +2030,68 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
                     state = "SEARCH"
                     lock_state = "SEARCHING"
+                    provisional_since = None
+
+            provisional_timeout_sec = max(0.0, float(setup.get("provisional_timeout_sec", params.provisional_timeout_sec)))
+            provisional_clip_threshold = _clamp01(float(setup.get("provisional_clip_threshold", params.provisional_clip_threshold)))
+
+            if (
+                state == "LOCKED"
+                and lock_state == "PROVISIONAL"
+                and player_num
+                and best is not None
+            ):
+                ocr_locked_match = bool(best.get("ocr_match", 0.0) >= 1.0)
+                score_locked_match = _clamp01(float(best.get("score", -1.0))) >= score_lock_threshold
+                if ocr_locked_match or score_locked_match:
+                    lock_state = "CONFIRMED"
+                    timeline.append({
+                        "t": t,
+                        "event": "lock_state_transition",
+                        "from": "PROVISIONAL",
+                        "to": "CONFIRMED",
+                        "reason": "ocr_match" if ocr_locked_match else "score_lock_threshold_met",
+                        "track_id": best.get("track_id"),
+                    })
+                    provisional_since = None
+
+            if state == "LOCKED" and lock_state == "PROVISIONAL" and player_num and provisional_since is not None:
+                provisional_age = max(0.0, t - provisional_since)
+                provisional_timeout_limit = max(provisional_timeout_sec, float(setup.get("reacquire_max_sec", params.reacquire_max_sec)))
+                if provisional_age >= provisional_timeout_limit:
+                    timeline.append({
+                        "t": t,
+                        "event": "lock_state_transition",
+                        "from": "PROVISIONAL",
+                        "to": "SEARCHING",
+                        "reason": "provisional_timeout",
+                        "timeout_seconds": provisional_timeout_limit,
+                        "track_id": locked_track_id,
+                    })
+                    state = "LOST"
+                    lock_state = "SEARCHING"
+                    locked_track_id = None
+                    best = None
+                    provisional_since = None
+                    lost_start_time = t
+                    lost_since = lost_since if lost_since is not None else t
+                    reacquire_until = t + max(0.0, reacquire_window_seconds)
+                    reacquire_hits.clear()
+                    reacquire_failed_logged = False
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
             clip_score_threshold = threshold_used if lock_state == "PROVISIONAL" else float(setup.get("score_lock_threshold", params.score_lock_threshold))
             identity_score = _clamp01(float(best["score"])) if best else 0.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             chosen_id = best.get("track_id") if best else None
+            provisional_age = max(0.0, t - provisional_since) if provisional_since is not None else 0.0
+            provisional_clip_ready = bool(
+                state == "LOCKED"
+                and lock_state == "PROVISIONAL"
+                and chosen_id is not None
+                and identity_score >= provisional_clip_threshold
+                and provisional_age >= min_track_seconds
+            )
             if best and state == "LOCKED":
                 last_seen = t
                 clip_last_seen_time = t
@@ -2040,10 +2104,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             or locked_recent_seen
             )
             clip_emit_allowed = bool(
-                state == "LOCKED"
-                and chosen_id is not None
-                and identity_score >= clip_score_threshold
-                and (lock_state == "CONFIRMED" or allow_unconfirmed)
+                (
+                    state == "LOCKED"
+                    and chosen_id is not None
+                    and identity_score >= clip_score_threshold
+                    and (lock_state == "CONFIRMED" or allow_unconfirmed)
+                )
+                or provisional_clip_ready
             )
             base_gate = (
                 clip_emit_allowed
@@ -2053,6 +2120,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif not base_gate:
                 gate_hold_start = None
             gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= min_track_seconds)
+            if provisional_clip_ready:
+                gate_held = True
             can_start_clip = bool(gate_held)
             keep_continuity, locked_grace_start, locked_grace_active = _locked_clip_continuity_active(
                 state=state,
@@ -2147,6 +2216,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         })
                         state = "LOST"
                         lock_state = "SEARCHING"
+                        provisional_since = None
                         lost_start_time = lost_start_time if lost_start_time is not None else t
                         lost_since = lost_since if lost_since is not None else t
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
@@ -2174,6 +2244,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         })
                         state = "LOST"
                         lock_state = "SEARCHING"
+                        provisional_since = None
                         lost_start_time = lost_start_time if lost_start_time is not None else t
                         lost_since = lost_since if lost_since is not None else t
                         reacquire_until = t + max(0.0, reacquire_window_seconds)
@@ -2189,7 +2260,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif reid_gate_required and reid_gate_has_value and not reid_gate_ok:
                 clip_reason = "reid_dropout_grace" if dropout_grace_active else "reid_mismatch"
             elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_score_threshold:
-                clip_reason = "provisional_disallowed"
+                clip_reason = "provisional_disallowed" if not provisional_clip_ready else "allowed"
             elif identity_score < unlock_threshold:
                 clip_reason = "locked_grace" if locked_grace_active else "identity_below_unlock_threshold"
             elif identity_score < clip_score_threshold:
@@ -2245,6 +2316,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "allow_unconfirmed_clips": allow_unconfirmed,
                 "min_track_seconds": min_track_seconds,
                 "clip_score_threshold": clip_score_threshold,
+                "provisional_clip_threshold": provisional_clip_threshold,
+                "provisional_age": provisional_age,
+                "provisional_clip_ready": provisional_clip_ready,
                 "score_lock_threshold": float(setup.get("score_lock_threshold", params.score_lock_threshold)),
                 "score_unlock_threshold": float(setup.get("score_unlock_threshold", params.score_unlock_threshold)),
                 "locked_grace_active": locked_grace_active,
@@ -2328,6 +2402,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             if prev_lock_state != lock_state:
                 timeline.append({"t": t, "event": "lock_state", "from": prev_lock_state, "to": lock_state})
                 timeline.append({"t": t, "event": "state_transition", "kind": "lock_state", "from": prev_lock_state, "to": lock_state})
+                if prev_lock_state == "PROVISIONAL" and lock_state == "CONFIRMED":
+                    timeline.append({"t": t, "event": "lock_state_transition", "from": "PROVISIONAL", "to": "CONFIRMED", "reason": "promotion"})
+                if prev_lock_state == "CONFIRMED" and lock_state == "SEARCHING":
+                    timeline.append({"t": t, "event": "lock_state_transition", "from": "CONFIRMED", "to": "SEARCHING", "reason": "lock_lost_or_reid_gate"})
 
             log.info(
                 "decision frame_time=%.3f status=%s candidates=%d chosen_id=%s sim=%.3f in_rink=%s in_bench=%s end_reason=%s",
