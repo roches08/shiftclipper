@@ -29,6 +29,7 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["score_unlock_threshold"] == 0.33
     assert setup["swap_guard_seconds"] == 2.5
     assert setup["swap_guard_bonus"] == 0.1
+    assert setup["locked_grace_seconds"] == 0.75
     assert setup["reid_enable"] is True
     assert setup["reid_fail_policy"] == "disable"
     assert setup["reid_weights_path"] == "/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth"

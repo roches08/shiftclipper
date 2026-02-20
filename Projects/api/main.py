@@ -435,7 +435,7 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
 
     for nm in [
         "lost_timeout", "reacquire_window_seconds", "gap_merge_seconds", "lock_seconds_after_confirm",
-        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds",
+        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds", "locked_grace_seconds",
         "reid_every_n_frames", "reid_sharpness_threshold",
     ]:
         _check_non_negative(nm)

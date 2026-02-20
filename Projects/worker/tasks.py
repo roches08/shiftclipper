@@ -149,6 +149,7 @@ class TrackingParams:
     reid_reacquire_hysteresis: float = 0.02
     swap_guard_seconds: float = 2.0
     swap_guard_bonus: float = 0.1
+    locked_grace_seconds: float = 0.75
 
 
 class ClipEndReason(str, Enum):
@@ -353,6 +354,28 @@ def _compute_clip_end_for_loss(last_seen_time: float, loss_timeout: float, video
 def _append_segment(segments: List[Tuple[float, float, str]], start_time: float, end_time: float, reason: ClipEndReason) -> None:
     if end_time > start_time:
         segments.append((float(start_time), float(end_time), reason.value))
+
+
+def _locked_clip_continuity_active(
+    *,
+    state: str,
+    lock_state: str,
+    identity_score: float,
+    unlock_threshold: float,
+    t: float,
+    locked_grace_start: Optional[float],
+    locked_grace_seconds: float,
+    lost_since: Optional[float],
+    lost_timeout: float,
+) -> Tuple[bool, Optional[float], bool]:
+    if state != "LOCKED" or lock_state not in {"CONFIRMED", "PROVISIONAL"}:
+        return False, None, False
+    if identity_score >= unlock_threshold:
+        return True, None, False
+    grace_start = t if locked_grace_start is None else locked_grace_start
+    grace_active = (t - grace_start) < max(0.0, locked_grace_seconds)
+    within_lost_timeout = bool(lost_since is not None and (t - lost_since) < max(0.0, lost_timeout))
+    return grace_active or within_lost_timeout, grace_start, grace_active
 
 
 def _clamp_segment_window(start_time: float, end_time: float, video_duration: float) -> Optional[Tuple[float, float]]:
@@ -856,6 +879,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     clip_start_time: Optional[float] = None
     clip_last_seen_time: Optional[float] = None
     gate_hold_start: Optional[float] = None
+    locked_grace_start: Optional[float] = None
     clip_bench_enter_time: Optional[float] = None
     clip_end_reason: Optional[str] = None
     reacquire_hits: Dict[int, int] = {}
@@ -914,6 +938,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     reid_low_sim_streak = 0
     reid_locked_missing_since: Optional[float] = None
     reid_locked_missing_grace_s = max(0.5, float(setup.get("reid_missing_grace_s", 0.75)))
+    locked_grace_seconds = max(0.0, float(setup.get("locked_grace_seconds", params.locked_grace_seconds)))
     edge_margin_px = float(setup.get("edge_margin_px", params.edge_margin_px))
 
     segments, shifts = [], []
@@ -1896,7 +1921,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif not base_gate:
                 gate_hold_start = None
             gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= min_track_seconds)
-            present = bool(
+            can_start_clip = bool(
                 gate_held
                 and (
                     lock_state == "CONFIRMED"
@@ -1909,6 +1934,18 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     )
                 )
             )
+            keep_continuity, locked_grace_start, locked_grace_active = _locked_clip_continuity_active(
+                state=state,
+                lock_state=lock_state,
+                identity_score=identity_score,
+                unlock_threshold=unlock_threshold,
+                t=t,
+                locked_grace_start=locked_grace_start,
+                locked_grace_seconds=locked_grace_seconds,
+                lost_since=lost_since,
+                lost_timeout=float(setup.get("lost_timeout", params.lost_timeout)),
+            )
+            present = can_start_clip or bool(present_prev and keep_continuity)
             reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST", "LOCKED"})
             reid_sim_value = float(best.get("sim", -1.0)) if best is not None else -1.0
             if (
@@ -1966,7 +2003,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_score_threshold:
                 clip_reason = "provisional_disallowed"
             elif identity_score < unlock_threshold:
-                clip_reason = "identity_below_unlock_threshold"
+                clip_reason = "locked_grace" if locked_grace_active else "identity_below_unlock_threshold"
             elif identity_score < clip_score_threshold:
                 clip_reason = "identity_below_threshold"
             elif not gate_held:
@@ -1983,6 +2020,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "clip_score_threshold": clip_score_threshold,
                 "score_lock_threshold": float(setup.get("score_lock_threshold", params.score_lock_threshold)),
                 "score_unlock_threshold": float(setup.get("score_unlock_threshold", params.score_unlock_threshold)),
+                "locked_grace_active": locked_grace_active,
+                "locked_grace_seconds": locked_grace_seconds,
                 "frame_idx": current_idx,
             })
 
