@@ -824,6 +824,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         raise RuntimeError(f"could not open video: {video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    video_duration = (float(total) / float(fps)) if (total > 0 and fps and fps > 0) else None
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     model = YOLO("yolov8s.pt")
@@ -2341,7 +2342,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     cap.release()
     if writer is not None:
         writer.release()
-    video_duration = max(0.0, frame_idx / max(fps, 1.0))
+    video_duration = max(0.0, frame_idx / max(fps, 1.0)) if frame_idx > 0 else float(video_duration or 0.0)
     if present_prev:
         _append_segment(segments, clip_start_time or seg_start, video_duration, ClipEndReason.VIDEO_END)
         timeline.append({"t": video_duration, "event": "clip_end", "reason": ClipEndReason.VIDEO_END.value, "end_time": video_duration, "last_good_lock_t": last_good_lock_t, "last_reid_ok_t": last_reid_ok_t, "lost_since": lost_since})
