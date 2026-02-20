@@ -218,6 +218,14 @@ def _parse_digits(txt: str) -> Optional[str]:
     return d or None
 
 
+def _sanitize_player_num(raw_value: Any) -> Optional[str]:
+    parsed = _parse_digits(str(raw_value or ""))
+    if parsed is None:
+        return None
+    normalized = parsed.lstrip("0")
+    return normalized or None
+
+
 def _clip(box, w, h):
     x1, y1, x2, y2 = [int(v) for v in box]
     x1 = max(0, min(w - 1, x1)); x2 = max(1, min(w, x2))
@@ -894,7 +902,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
     jersey_hsv = _hex_to_hsv(setup.get("jersey_color", "#203524"))
     opponent_hsv = _hex_to_hsv(setup.get("opponent_color", "#ffffff"))
-    player_num = re.sub(r"\D+", "", str(setup.get("player_number") or ""))
+    player_num = _sanitize_player_num(setup.get("player_number"))
 
     state = "SEARCH"
     lock_state = "SEARCHING"
@@ -1987,29 +1995,27 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             clip_score_threshold = threshold_used if lock_state == "PROVISIONAL" else float(setup.get("score_lock_threshold", params.score_lock_threshold))
             identity_score = _clamp01(float(best["score"])) if best else 0.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
-            base_gate = (
+            chosen_id = best.get("track_id") if best else None
+            track_present = bool(
                 state == "LOCKED"
-                and lock_state in {"CONFIRMED", "PROVISIONAL"}
+                and chosen_id is not None
+                and identity_score >= unlock_threshold
+            )
+            clip_emit_allowed = bool(
+                state == "LOCKED"
+                and chosen_id is not None
                 and identity_score >= clip_score_threshold
+                and (lock_state == "CONFIRMED" or allow_unconfirmed)
+            )
+            base_gate = (
+                clip_emit_allowed
             )
             if base_gate and gate_hold_start is None:
                 gate_hold_start = t
             elif not base_gate:
                 gate_hold_start = None
             gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= min_track_seconds)
-            can_start_clip = bool(
-                gate_held
-                and (
-                    lock_state == "CONFIRMED"
-                    or (
-                        lock_state == "PROVISIONAL"
-                        and (
-                            allow_unconfirmed
-                            or identity_score >= clip_score_threshold
-                        )
-                    )
-                )
-            )
+            can_start_clip = bool(gate_held)
             keep_continuity, locked_grace_start, locked_grace_active = _locked_clip_continuity_active(
                 state=state,
                 lock_state=lock_state,
@@ -2021,7 +2027,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 lost_since=lost_since,
                 lost_timeout=float(setup.get("lost_timeout", params.lost_timeout)),
             )
-            present = can_start_clip or bool(present_prev and keep_continuity)
+            lost_timeout_window = max(0.0, float(setup.get("lost_timeout", params.lost_timeout)))
+            continuity_allowed = bool(track_present or (state == "LOST" and lost_since is not None and (t - lost_since) < lost_timeout_window))
+            present = can_start_clip or bool(present_prev and continuity_allowed)
             reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST", "LOCKED"})
             reid_sim_value = float(best.get("sim", -1.0)) if best is not None else -1.0
             if (
@@ -2154,7 +2162,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         "time_since_last_good_lock": float(time_since_last_good_lock),
                         "reason_prev": reason_prev,
                     })
-            if clip_is_active and state == "LOST" and lost_since is not None and (t - lost_since) < max(0.0, float(setup.get("lost_timeout", params.lost_timeout))):
+            if clip_is_active and state == "LOST" and lost_since is not None and (t - lost_since) < lost_timeout_window:
                 present = True
                 if clip_reason in {"reid_mismatch", "reid_unavailable", "searching", "reid_gate_search"}:
                     clip_reason = "lost_timeout_grace"
@@ -2165,6 +2173,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "state": state,
                 "identity_score": identity_score,
                 "lock_state": lock_state,
+                "track_present": track_present,
+                "clip_emit_allowed": clip_emit_allowed,
+                "chosen_id": chosen_id,
                 "allow_unconfirmed_clips": allow_unconfirmed,
                 "min_track_seconds": min_track_seconds,
                 "clip_score_threshold": clip_score_threshold,
@@ -2181,47 +2192,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if shift_state == "OFF_ICE":
                     shift_state = "ON_ICE"
                     shift_start = t
-            if present and best and params.use_bench_mask and best.get("in_bench"):
-                clip_bench_enter_time = clip_bench_enter_time or t
-                if (t - clip_bench_enter_time) >= max(0.0, float(setup.get("bench_confirm_sec", 0.35))):
-                    clip_end_reason = ClipEndReason.BENCH_ENTER.value
-            else:
-                clip_bench_enter_time = None
-
-            if present and clip_start_time is not None and (t - clip_start_time) > float(setup.get("max_clip_len_sec", params.max_clip_len_sec)):
-                clip_end_reason = "safety_close_max_len"
+            clip_bench_enter_time = None
 
             if clip_end_reason == ClipEndReason.LOST_TIMEOUT.value and clip_start_time is not None:
                 seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
                 _append_segment(segments, clip_start_time, seg_end, ClipEndReason.LOST_TIMEOUT)
                 present = False
-            elif clip_end_reason == ClipEndReason.BENCH_ENTER.value and clip_start_time is not None:
-                _append_segment(segments, clip_start_time, t, ClipEndReason.BENCH_ENTER)
-                present = False
-            elif clip_end_reason == "safety_close_max_len" and clip_start_time is not None:
-                _append_segment(segments, clip_start_time, t, ClipEndReason.MAX_LEN_GUARD)
-                present = False
-
             if (not present) and present_prev and clip_end_reason is None and clip_start_time is not None:
-                if clip_reason == "reid_mismatch":
-                    clip_end_reason = ClipEndReason.REID_GATE.value
-                elif clip_reason in {"identity_below_unlock_threshold", "identity_below_threshold"}:
-                    clip_end_reason = ClipEndReason.SCORE_DROPOUT.value
-                elif state == "LOST":
-                    clip_end_reason = ClipEndReason.LOCK_LOST.value
-                else:
-                    clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
-                seg_end = _compute_clip_end_time(
-                    video_duration=video_duration,
-                    t=t,
-                    last_good_lock_t=last_good_lock_t,
-                    last_seen_time=clip_last_seen_time if clip_last_seen_time is not None else (last_seen if last_seen >= 0.0 else None),
-                    post_roll=float(setup.get("post_roll", params.post_roll)),
-                    lost_timeout=float(setup.get("lost_timeout", params.lost_timeout)),
-                    reason=clip_end_reason,
-                )
-                if seg_end > clip_start_time:
-                    segments.append((float(clip_start_time), float(seg_end), clip_end_reason))
+                clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
 
             if (not present) and present_prev:
                 seg_end = _compute_clip_end_time(
