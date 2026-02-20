@@ -2226,6 +2226,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if shift_state == "OFF_ICE":
                     shift_state = "ON_ICE"
                     shift_start = t
+
             if present and best and params.use_bench_mask and best.get("in_bench"):
                 clip_bench_enter_time = clip_bench_enter_time or t
                 if (t - clip_bench_enter_time) >= max(0.0, float(setup.get("bench_confirm_sec", 0.35))):
@@ -2235,18 +2236,25 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             max_len_sec = float(setup.get("max_clip_len_sec", params.max_clip_len_sec))
             if max_len_sec > 0 and present and clip_start_time is not None and (t - clip_start_time) > max_len_sec:
-                clip_end_reason = ClipEndReason.MAX_LEN.value
+                clip_end_reason = ClipEndReason.MAX_LEN_GUARD.value
 
             if clip_end_reason == ClipEndReason.LOST_TIMEOUT.value and clip_start_time is not None:
-                seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
+                seg_end = _compute_clip_end_for_loss(
+                    clip_last_seen_time or last_seen or t,
+                    loss_timeout_sec,
+                    frame_idx / max(fps, 1.0),
+                )
                 _append_segment(segments, clip_start_time, seg_end, ClipEndReason.LOST_TIMEOUT)
                 present = False
+
             elif clip_end_reason == ClipEndReason.BENCH_ENTER.value and clip_start_time is not None:
                 _append_segment(segments, clip_start_time, t, ClipEndReason.BENCH_ENTER)
                 present = False
-            elif clip_end_reason == "safety_close_max_len" and clip_start_time is not None:
+
+            elif clip_end_reason == ClipEndReason.MAX_LEN_GUARD.value and clip_start_time is not None:
                 _append_segment(segments, clip_start_time, t, ClipEndReason.MAX_LEN_GUARD)
                 present = False
+
             if (not present) and present_prev and clip_end_reason is None and clip_start_time is not None:
                 clip_end_reason = ClipEndReason.LOST_TIMEOUT.value
 
