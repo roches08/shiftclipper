@@ -137,7 +137,7 @@ class TrackingParams:
     reacquire_max_sec: float = 2.0
     reacquire_confirm_frames: int = 5
     reid_sim_threshold: float = 0.35
-    max_clip_len_sec: float = 90.0
+    max_clip_len_sec: float = 0.0
     allow_bench_reacquire: bool = False
     edge_margin_px: float = 2.0
     reid_every_n_frames: int = 5
@@ -2004,8 +2004,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             lost_timeout_window = max(0.0, float(setup.get("lost_timeout", params.lost_timeout)))
             locked_recent_seen = bool(t_minus_last_seen is not None and t_minus_last_seen < lost_timeout_window)
             track_present = bool(
-                (state == "LOCKED" and identity_score >= unlock_threshold)
-                or locked_recent_seen
+            (state == "LOCKED" and chosen_id is not None)
+            or locked_recent_seen
             )
             clip_emit_allowed = bool(
                 state == "LOCKED"
@@ -2233,8 +2233,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif not present or not best or not best.get("in_bench"):
                 clip_bench_enter_time = None
 
-            if present and clip_start_time is not None and (t - clip_start_time) > float(setup.get("max_clip_len_sec", params.max_clip_len_sec)):
-                clip_end_reason = "safety_close_max_len"
+            max_len_sec = float(setup.get("max_clip_len_sec", params.max_clip_len_sec))
+            if max_len_sec > 0 and present and clip_start_time is not None and (t - clip_start_time) > max_len_sec:
+                clip_end_reason = ClipEndReason.MAX_LEN.value
 
             if clip_end_reason == ClipEndReason.LOST_TIMEOUT.value and clip_start_time is not None:
                 seg_end = _compute_clip_end_for_loss(clip_last_seen_time or last_seen or t, loss_timeout_sec, frame_idx / max(fps, 1.0))
