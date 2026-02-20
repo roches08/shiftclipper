@@ -88,6 +88,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     mode_defaults = {
         "score_lock_threshold": 0.55,
         "score_unlock_threshold": 0.33,
+        "locked_grace_seconds": 0.75,
         "lost_timeout": 4.0,
         "reacquire_window_seconds": 8.0,
         "reacquire_score_lock_threshold": 0.30,
@@ -150,6 +151,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "min_clip_seconds": _as_float(src, "min_clip_seconds", 1.0),
         "score_lock_threshold": _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]),
         "score_unlock_threshold": _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"]),
+        "locked_grace_seconds": _as_float(src, "locked_grace_seconds", mode_defaults["locked_grace_seconds"]),
         "seed_lock_seconds": _as_float(src, "seed_lock_seconds", 8.0),
         "seed_iou_min": _as_float(src, "seed_iou_min", _as_float(src, "seed_min_iou", 0.12)),
         "seed_dist_max": _as_float(src, "seed_dist_max", 0.22),

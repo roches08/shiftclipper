@@ -1,0 +1,9 @@
+{
+  "timeline": [
+    {"t": 51.900, "event": "clip_allowed", "reason": "allowed", "state": "LOCKED", "lock_state": "CONFIRMED"},
+    {"t": 52.486, "event": "clip_blocked", "reason": "provisional_disallowed", "state": "LOCKED", "lock_state": "PROVISIONAL", "identity_score": 0.41},
+    {"t": 52.700, "event": "clip_blocked", "reason": "provisional_disallowed", "state": "LOCKED", "lock_state": "PROVISIONAL", "identity_score": 0.39},
+    {"t": 53.100, "event": "clip_allowed", "reason": "allowed", "state": "LOCKED", "lock_state": "CONFIRMED"},
+    {"t": 55.000, "event": "clip_end", "reason": "video_end", "state": "LOCKED"}
+  ]
+}
