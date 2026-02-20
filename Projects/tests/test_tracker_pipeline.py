@@ -11,6 +11,7 @@ from worker.tasks import (
     _compute_clip_end_for_loss,
     _compute_seed_clip_window,
     _point_in_polygon,
+    _should_close_clip_for_gate_transition,
     _should_reject_for_reid,
     _swap_guard_allows_transition,
 )
@@ -75,6 +76,53 @@ def test_swap_guard_blocks_transition_when_reid_low():
         reid_min_sim=0.45,
     )
 
+
+
+
+def test_locked_provisional_gate_does_not_force_clip_close():
+    assert not _should_close_clip_for_gate_transition(
+        present_prev=True,
+        present_now=False,
+        state="LOCKED",
+        clip_reason="provisional_disallowed",
+    )
+
+
+def test_timeline_regression_locked_provisional_dip_keeps_clip_open():
+    timeline_path = Path("/mnt/data/debug_timeline 2-20 10am.json")
+    if not timeline_path.exists():
+        timeline_path = Path(__file__).resolve().parent / "fixtures" / "debug_timeline_2-20_10am.json"
+    assert timeline_path.exists(), "Regression timeline missing; expected /mnt/data/debug_timeline 2-20 10am.json"
+
+    import json
+
+    payload = json.loads(timeline_path.read_text())
+    events = payload.get("timeline", payload)
+    assert isinstance(events, list)
+
+    dip_event = next(
+        ev
+        for ev in events
+        if ev.get("event") == "clip_blocked"
+        and ev.get("reason") == "provisional_disallowed"
+        and ev.get("state") == "LOCKED"
+        and abs(float(ev.get("t", 0.0)) - 52.486) < 0.1
+    )
+
+    assert not _should_close_clip_for_gate_transition(
+        present_prev=True,
+        present_now=False,
+        state=str(dip_event.get("state")),
+        clip_reason=str(dip_event.get("reason")),
+    )
+
+    dip_t = float(dip_event["t"])
+    clip_ends_near_dip = [
+        ev
+        for ev in events
+        if ev.get("event") == "clip_end" and abs(float(ev.get("t", 0.0)) - dip_t) <= 0.6
+    ]
+    assert not clip_ends_near_dip
 
 def test_reid_disabled_does_not_initialize_embedder(tmp_path, monkeypatch):
     from worker import tasks as worker_tasks
