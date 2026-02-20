@@ -447,6 +447,126 @@ def test_missing_weights_with_auto_download_disabled_disables_reid_and_continues
     assert any(ev.get("event") == "reid_disabled_due_to_error" for ev in out["timeline"])
 
 
+def test_track_presence_debug_timeline_does_not_raise_when_clip_ends_mid_loop(tmp_path, monkeypatch):
+    from worker import tasks as worker_tasks
+
+    class _FakeCapture:
+        def __init__(self, _):
+            self._frames = [
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+            ]
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == worker_tasks.cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_COUNT:
+                return 60
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_WIDTH:
+                return 1280
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_HEIGHT:
+                return 720
+            return 0
+
+        def read(self):
+            if not self._frames:
+                return False, None
+            return True, self._frames.pop(0)
+
+        def release(self):
+            return None
+
+    class _FakeTensor:
+        def __init__(self, arr):
+            self._arr = np.array(arr, dtype=np.float32)
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self._arr
+
+    class _FakeBoxes:
+        xyxy = _FakeTensor(np.empty((0, 4), dtype=np.float32))
+        conf = _FakeTensor(np.empty((0,), dtype=np.float32))
+        cls = _FakeTensor(np.empty((0,), dtype=np.float32))
+
+    class _FakePred:
+        boxes = _FakeBoxes()
+
+    class _FakeYOLO:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def predict(self, source, **_kwargs):
+            frame_count = len(source) if isinstance(source, list) else 1
+            return [_FakePred() for _ in range(frame_count)]
+
+    class _FakeTrack:
+        def __init__(self, track_id=7):
+            self.track_id = track_id
+
+        def is_confirmed(self):
+            return True
+
+        def to_ltrb(self):
+            return [100, 100, 220, 360]
+
+    class _FakeTracker:
+        def __init__(self, *_args, **_kwargs):
+            self.calls = 0
+
+        def update_tracks(self, _dets, frame=None):
+            self.calls += 1
+            if self.calls == 1:
+                return [_FakeTrack()]
+            return []
+
+    if worker_tasks.cv2 is None:
+        class _FakeCv2:
+            CAP_PROP_FPS = 5
+            CAP_PROP_FRAME_COUNT = 7
+            CAP_PROP_FRAME_WIDTH = 3
+            CAP_PROP_FRAME_HEIGHT = 4
+            VideoCapture = _FakeCapture
+
+        monkeypatch.setattr(worker_tasks, "cv2", _FakeCv2)
+    else:
+        monkeypatch.setattr(worker_tasks.cv2, "VideoCapture", _FakeCapture)
+
+    monkeypatch.setattr(worker_tasks, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(worker_tasks, "LightweightIOUTracker", _FakeTracker)
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cpu", "cpu"))
+    monkeypatch.setattr(worker_tasks, "warm_easyocr_models", lambda *_: None)
+    monkeypatch.setattr(worker_tasks, "_build_ocr_reader", lambda *_: (None, False))
+    monkeypatch.setattr(worker_tasks, "_hex_to_hsv", lambda *_: (60, 80, 80))
+    monkeypatch.setattr(worker_tasks, "_color_score", lambda *_: 1.0)
+    monkeypatch.setattr(worker_tasks, "_mean_hsv", lambda *_: (60, 80, 80))
+    monkeypatch.setattr(worker_tasks, "_crop_sharpness", lambda *_: 0.9)
+
+    out = worker_tasks.track_presence(
+        str(tmp_path / "dummy.mp4"),
+        {
+            "debug_timeline": True,
+            "reid_enable": False,
+            "use_reid": False,
+            "ocr_disable": True,
+            "reacquire_confirm_frames": 1,
+            "min_track_seconds": 0.0,
+            "allow_unconfirmed_clips": True,
+        },
+    )
+
+    assert isinstance(out, dict)
+    assert isinstance(out["timeline"], list)
+
+
 def test_locked_provisional_disallowed_does_not_end_active_clip():
     # Regression for debug timeline dip (~52.486s): keep the clip open while still LOCKED.
     frame_times = [52.400, 52.486, 52.560, 52.640]
