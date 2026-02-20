@@ -1999,14 +1999,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             if best and state == "LOCKED":
                 last_seen = t
                 clip_last_seen_time = t
-            t_minus_last_seen = None if clip_last_seen_time is None else max(0.0, t - clip_last_seen_time)
+            effective_last_seen = clip_last_seen_time if clip_last_seen_time is not None else (last_seen if last_seen >= 0.0 else None)
+            t_minus_last_seen = None if effective_last_seen is None else max(0.0, t - effective_last_seen)
             lost_timeout_window = max(0.0, float(setup.get("lost_timeout", params.lost_timeout)))
-            locked_recent_seen = bool(
-                state == "LOCKED"
-                and clip_last_seen_time is not None
-                and t_minus_last_seen is not None
-                and t_minus_last_seen < lost_timeout_window
-            )
+            locked_recent_seen = bool(t_minus_last_seen is not None and t_minus_last_seen < lost_timeout_window)
             track_present = bool(
                 (state == "LOCKED" and identity_score >= unlock_threshold)
                 or locked_recent_seen
@@ -2043,6 +2039,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 or (state == "LOST" and lost_since is not None and (t - lost_since) < lost_timeout_window)
             )
             present = can_start_clip or bool(present_prev and continuity_allowed)
+            dropout_grace_active = bool(state == "LOCKED" and locked_recent_seen and best is None)
             reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST", "LOCKED"})
             reid_sim_value = float(best.get("sim", -1.0)) if best is not None else -1.0
             if (
@@ -2094,38 +2091,60 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             clip_is_active = bool(clip_start_time is not None or present_prev)
             if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
                 if clip_is_active and state == "LOCKED":
-                    timeline.append({
-                        "t": t,
-                        "event": "reid_gate_transition",
-                        "reason": "reid_mismatch",
-                        "from_state": state,
-                        "to_state": "LOST",
-                        "track_id": best.get("track_id") if best else None,
-                        "reid_sim": reid_sim_value,
-                        "reid_min_sim": reid_min_sim,
-                    })
-                    state = "LOST"
-                    lock_state = "SEARCHING"
-                    lost_start_time = lost_start_time if lost_start_time is not None else t
-                    lost_since = lost_since if lost_since is not None else t
-                    reacquire_until = t + max(0.0, reacquire_window_seconds)
+                    if locked_recent_seen:
+                        timeline.append({
+                            "t": t,
+                            "event": "reid_gate_deferred",
+                            "reason": "reid_mismatch",
+                            "state": state,
+                            "track_id": best.get("track_id") if best else None,
+                            "reid_sim": reid_sim_value,
+                            "reid_min_sim": reid_min_sim,
+                            "t_minus_last_seen": t_minus_last_seen,
+                        })
+                    else:
+                        timeline.append({
+                            "t": t,
+                            "event": "reid_gate_transition",
+                            "reason": "reid_mismatch",
+                            "from_state": state,
+                            "to_state": "LOST",
+                            "track_id": best.get("track_id") if best else None,
+                            "reid_sim": reid_sim_value,
+                            "reid_min_sim": reid_min_sim,
+                        })
+                        state = "LOST"
+                        lock_state = "SEARCHING"
+                        lost_start_time = lost_start_time if lost_start_time is not None else t
+                        lost_since = lost_since if lost_since is not None else t
+                        reacquire_until = t + max(0.0, reacquire_window_seconds)
                 elif not clip_is_active:
                     present = False
             if state == "LOCKED" and reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:
                 if clip_is_active:
-                    timeline.append({
-                        "t": t,
-                        "event": "reid_gate_transition",
-                        "reason": "reid_unavailable",
-                        "from_state": state,
-                        "to_state": "LOST",
-                        "track_id": best.get("track_id") if best else None,
-                    })
-                    state = "LOST"
-                    lock_state = "SEARCHING"
-                    lost_start_time = lost_start_time if lost_start_time is not None else t
-                    lost_since = lost_since if lost_since is not None else t
-                    reacquire_until = t + max(0.0, reacquire_window_seconds)
+                    if locked_recent_seen:
+                        timeline.append({
+                            "t": t,
+                            "event": "reid_gate_deferred",
+                            "reason": "reid_unavailable",
+                            "state": state,
+                            "track_id": best.get("track_id") if best else None,
+                            "t_minus_last_seen": t_minus_last_seen,
+                        })
+                    else:
+                        timeline.append({
+                            "t": t,
+                            "event": "reid_gate_transition",
+                            "reason": "reid_unavailable",
+                            "from_state": state,
+                            "to_state": "LOST",
+                            "track_id": best.get("track_id") if best else None,
+                        })
+                        state = "LOST"
+                        lock_state = "SEARCHING"
+                        lost_start_time = lost_start_time if lost_start_time is not None else t
+                        lost_since = lost_since if lost_since is not None else t
+                        reacquire_until = t + max(0.0, reacquire_window_seconds)
                 else:
                     present = False
             clip_reason = "allowed"
@@ -2134,9 +2153,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             elif state != "LOCKED":
                 clip_reason = "state_not_locked"
             elif reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:
-                clip_reason = "reid_unavailable"
+                clip_reason = "reid_dropout_grace" if dropout_grace_active else "reid_unavailable"
             elif reid_gate_required and reid_gate_has_value and not reid_gate_ok:
-                clip_reason = "reid_mismatch"
+                clip_reason = "reid_dropout_grace" if dropout_grace_active else "reid_mismatch"
             elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_score_threshold:
                 clip_reason = "provisional_disallowed"
             elif identity_score < unlock_threshold:
