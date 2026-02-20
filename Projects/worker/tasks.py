@@ -307,6 +307,10 @@ def _reacquire_combined_score(identity_score: float, reid_sim: float, proximity_
     return float(w_id * float(identity_score) + w_reid * safe_reid + w_spatial * safe_prox)
 
 
+def _clamp01(value: float) -> float:
+    return float(max(0.0, min(1.0, float(value))))
+
+
 def _should_reject_for_reid(
     locked_emb: Optional[np.ndarray],
     reid_sim: float,
@@ -735,7 +739,7 @@ class LightweightIOUTracker:
 
 
 def _perf_breakdown(perf: Dict[str, float], frames: int) -> Dict[str, Any]:
-    comps = ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms"]
+    comps = ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "reid_ms", "loop_ms"]
     avg = {k: (perf[k] / max(1, frames)) for k in comps}
     loop_total = max(1e-6, perf["loop_ms"])
     pct = {k: (100.0 * perf[k] / loop_total) for k in comps if k != "loop_ms"}
@@ -882,6 +886,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             "seed_reid_embeddings": [],
             "seed_reid_gallery_built": False,
             "seed_reid_target": None,
+            "seed_confirm_hits": 0,
+            "seed_confirm_track_id": None,
         })
 
     seed_window_s = float(setup.get("seed_window_s", params.seed_window_s))
@@ -932,6 +938,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "yolo_ms": 0.0,
         "deepsort_ms": 0.0,
         "ocr_ms": 0.0,
+        "reid_ms": 0.0,
         "loop_ms": 0.0,
         "ocr_calls": 0,
         "frames": 0,
@@ -1000,6 +1007,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     bool(setup.get("allow_seed_clips", params.allow_seed_clips))
                     and dt >= 0.0
                     and not seed.get("seed_clip_emitted")
+                    and (bool(seed.get("acquired")) or dt > seed_window_s)
                 ):
                     _emit_seed_clip_segment(
                         seed=seed,
@@ -1043,7 +1051,23 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             )
             if seed_match_active:
                 seed_bonus_track_id = nearest_seed_track_id
-                active_seed["acquired"] = True
+                if active_seed.get("seed_confirm_track_id") == nearest_seed_track_id:
+                    active_seed["seed_confirm_hits"] = int(active_seed.get("seed_confirm_hits", 0)) + 1
+                else:
+                    active_seed["seed_confirm_track_id"] = nearest_seed_track_id
+                    active_seed["seed_confirm_hits"] = 1
+                seed_confirm_required = max(1, min(reacquire_confirm_frames, int(setup.get("seed_confirm_frames", 4))))
+                if int(active_seed.get("seed_confirm_hits", 0)) >= seed_confirm_required:
+                    if not bool(active_seed.get("acquired")):
+                        timeline.append({
+                            "t": t,
+                            "event": "seed_acquired",
+                            "click_t": active_seed["t"],
+                            "track_id": nearest_seed_track_id,
+                            "confirm_hits": int(active_seed.get("seed_confirm_hits", 0)),
+                            "confirm_required": seed_confirm_required,
+                        })
+                    active_seed["acquired"] = True
                 active_seed["matched_track_id"] = nearest_seed_track_id
                 active_seed["matched_dist"] = nearest_seed_dist
                 active_seed["matched_iou"] = nearest_seed_iou
@@ -1060,8 +1084,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "seed_dist_max": seed_dist_max,
                     "seed_iou_min": seed_iou_min,
                     "in_seed_window": in_seed_window,
+                    "confirm_hits": int(active_seed.get("seed_confirm_hits", 0)),
                 })
             elif active_seed is not None:
+                active_seed["seed_confirm_hits"] = 0
+                active_seed["seed_confirm_track_id"] = None
                 timeline.append({
                     "t": t,
                     "event": "seed_match",
@@ -1099,7 +1126,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 motion = _iou(box, last_box) if last_box else 0.0
                 identity_bonus = params.identity_weight if (locked_track_id is not None and tr.track_id == locked_track_id) else 0.0
                 seed_bonus = seed_bonus_val if (seed_bonus_track_id is not None and tr.track_id == seed_bonus_track_id) else 0.0
-                score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus + seed_bonus - opponent_penalty
+                score = params.color_weight * cscore + params.motion_weight * motion + identity_bonus - opponent_penalty
+                if seed_bonus > 0.0:
+                    score += seed_bonus * max(0.0, 1.0 - score)
                 emb = None
                 sim = -1.0
                 crop = frame[box[1]:box[3], box[0]:box[2]]
@@ -1130,9 +1159,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             reid_enabled = bool(params.reid_enable and reid_embedder is not None)
             target_reid_exists = locked_reid_embedding is not None
             seed_reid_active = any(0.0 <= (t - float(seed.get("t", 0.0))) <= float(setup.get("seed_lock_seconds", params.seed_lock_seconds)) for seed in seed_clicks)
+            force_reid_each_frame = bool(target_reid_exists)
             should_compute_reid = bool(
                 reid_enabled
-                and (current_idx % reid_check_stride == 0)
+                and (force_reid_each_frame or (current_idx % reid_check_stride == 0))
                 and (target_reid_exists or seed_reid_active or state in {"SEARCH", "LOST"} or t <= swap_guard_until)
             )
             if should_compute_reid:
@@ -1143,13 +1173,16 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     cache_key = (current_idx, cand["track_id"])
                     if cache_key in embed_cache:
                         cand["embed"] = embed_cache[cache_key]
-                        cand["sim"] = _cosine_similarity(locked_reid_embedding, cand["embed"])
+                        sim = _cosine_similarity(locked_reid_embedding, cand["embed"])
+                        cand["sim"] = sim if sim >= 0.0 else 0.0
                         continue
                     crop = expand_and_crop(frame, box, float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
                     reid_indices.append(idx_c)
                     reid_crops.append(crop)
                 if reid_indices:
+                    reid_start = time.perf_counter()
                     embs = reid_embedder.embed(reid_crops)
+                    perf["reid_ms"] += (time.perf_counter() - reid_start) * 1000.0
                     for ci, emb in zip(reid_indices, embs):
                         cand = candidates[ci]
                         cache_key = (current_idx, cand["track_id"])
@@ -1157,13 +1190,31 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         cand["embed"] = emb
                         if emb is not None:
                             track_embed_cache[cand["track_id"]] = emb
-                        cand["sim"] = _cosine_similarity(locked_reid_embedding, emb)
+                        sim = _cosine_similarity(locked_reid_embedding, emb)
+                        cand["sim"] = sim if sim >= 0.0 else 0.0
             elif reid_enabled and locked_reid_embedding is not None:
                 for cand in candidates:
                     previous_emb = track_embed_cache.get(cand["track_id"])
                     if previous_emb is not None:
                         cand["embed"] = previous_emb
-                        cand["sim"] = _cosine_similarity(locked_reid_embedding, previous_emb)
+                        sim = _cosine_similarity(locked_reid_embedding, previous_emb)
+                        cand["sim"] = sim if sim >= 0.0 else 0.0
+
+            if reid_enabled and locked_reid_embedding is not None:
+                for cand in candidates:
+                    sim_value = float(cand.get("sim", -1.0))
+                    if sim_value < 0.0:
+                        sim_value = 0.0
+                        cand["sim"] = sim_value
+                    accepted = bool(sim_value >= reid_min_sim)
+                    timeline.append({
+                        "t": t,
+                        "event": "reid_similarity_computed",
+                        "track_id": cand.get("track_id"),
+                        "sim": sim_value,
+                        "accepted": accepted,
+                        "reason": "meets_min_sim" if accepted else "below_min_sim",
+                    })
 
             if reid_enabled and seed_match_active and active_seed is not None:
                 matched_track = active_seed.get("matched_track_id")
@@ -1172,7 +1223,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     forced_emb = matched_cand.get("embed")
                     if forced_emb is None:
                         forced_crop = expand_and_crop(frame, matched_cand["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
-                        forced_emb = reid_embedder.embed([forced_crop])[0] if forced_crop is not None else None
+                        if forced_crop is not None:
+                            reid_start = time.perf_counter()
+                            forced_emb = reid_embedder.embed([forced_crop])[0]
+                            perf["reid_ms"] += (time.perf_counter() - reid_start) * 1000.0
+                        else:
+                            forced_emb = None
                         if forced_emb is not None:
                             matched_cand["embed"] = forced_emb
                             track_embed_cache[matched_track] = forced_emb
@@ -1315,6 +1371,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     and float(cand.get("sim", -1.0)) < reid_min_sim
                 ):
                     cand["score"] -= float(setup.get("reid_locked_low_sim_penalty", 0.75))
+                cand["score"] = _clamp01(cand["score"])
                 if best is None or cand["score"] > best["score"]:
                     best = cand
 
@@ -1388,9 +1445,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "color": float(best.get("color", 0.0)),
                     "motion": float(best.get("motion", 0.0)),
                     "ocr": float(best.get("ocr_match", 0.0)),
-                    "reid": float(best.get("sim", -1.0)) if (params.reid_enable and locked_reid_embedding is not None) else None,
+                    "reid": float(max(0.0, best.get("sim", 0.0))) if (params.reid_enable and locked_reid_embedding is not None) else None,
                     "combined": float(best.get("score", -1.0)),
-                    "reid_sim_used": float(best.get("sim", -1.0)) if (params.reid_enable and locked_reid_embedding is not None) else None,
+                    "reid_sim_used": float(max(0.0, best.get("sim", 0.0))) if (params.reid_enable and locked_reid_embedding is not None) else None,
                 })
 
             sim_ok = True
@@ -1433,7 +1490,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         float(setup.get("reid_crop_expand", params.reid_crop_expand)),
                         int(params.reid_min_px),
                     )
-                    swap_emb = reid_embedder.embed([swap_crop])[0] if swap_crop is not None else None
+                    if swap_crop is not None:
+                        reid_start = time.perf_counter()
+                        swap_emb = reid_embedder.embed([swap_crop])[0]
+                        perf["reid_ms"] += (time.perf_counter() - reid_start) * 1000.0
+                    else:
+                        swap_emb = None
                     if swap_emb is not None:
                         best["embed"] = swap_emb
                         track_embed_cache[best["track_id"]] = swap_emb
@@ -1449,7 +1511,13 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     })
                     best = None
                     sim_ok = False
-            best_seed_stable = bool(best and best.get("seed_match") and seconds_held >= float(setup.get("min_track_seconds", params.min_track_seconds)))
+            active_seed_confirmed = bool(active_seed is not None and active_seed.get("acquired"))
+            best_seed_stable = bool(
+                best
+                and best.get("seed_match")
+                and active_seed_confirmed
+                and (active_seed is None or active_seed.get("matched_track_id") == best.get("track_id"))
+            )
             score_ready = bool(best and best["score"] >= threshold_used)
             reacquire_ready = bool(best and reacquire_mode and seconds_held >= float(setup.get("min_track_seconds", params.min_track_seconds)) and (best.get("reacquire_identity_score", -1.0) >= threshold_used or best["score"] >= threshold_used))
             promote_from_seed = bool(state in {"SEARCH", "LOST"} and best_seed_stable and score_ready)
@@ -1578,7 +1646,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         sharpness = _crop_sharpness(crop_for_sharpness) if crop_for_sharpness is not None and crop_for_sharpness.size else 0.0
                         lock_emb = best.get("embed")
                         if lock_emb is None:
-                            lock_emb = reid_embedder.embed([lock_crop])[0] if lock_crop is not None else None
+                            if lock_crop is not None:
+                                reid_start = time.perf_counter()
+                                lock_emb = reid_embedder.embed([lock_crop])[0]
+                                perf["reid_ms"] += (time.perf_counter() - reid_start) * 1000.0
+                            else:
+                                lock_emb = None
                         if lock_emb is None:
                             timeline.append({
                                 "t": t,
@@ -1639,7 +1712,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         and float(best.get("sim", -1.0)) < 0.0
                     ):
                         lock_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
-                        lock_emb = reid_embedder.embed([lock_crop])[0] if lock_crop is not None else None
+                        if lock_crop is not None:
+                            reid_start = time.perf_counter()
+                            lock_emb = reid_embedder.embed([lock_crop])[0]
+                            perf["reid_ms"] += (time.perf_counter() - reid_start) * 1000.0
+                        else:
+                            lock_emb = None
                         if lock_emb is not None:
                             best["embed"] = lock_emb
                             track_embed_cache[best["track_id"]] = lock_emb
@@ -1822,7 +1900,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     best["sim"] = reid_sim_value
                 elif reid_embedder is not None:
                     gate_crop = expand_and_crop(frame, best["box"], float(setup.get("reid_crop_expand", params.reid_crop_expand)), int(params.reid_min_px))
-                    gate_emb = reid_embedder.embed([gate_crop])[0] if gate_crop is not None else None
+                    if gate_crop is not None:
+                        reid_start = time.perf_counter()
+                        gate_emb = reid_embedder.embed([gate_crop])[0]
+                        perf["reid_ms"] += (time.perf_counter() - reid_start) * 1000.0
+                    else:
+                        gate_emb = None
                     if gate_emb is not None:
                         best["embed"] = gate_emb
                         track_embed_cache[best.get("track_id")] = gate_emb
@@ -1959,7 +2042,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "device": device,
                     "yolo_device": yolo_device,
                     "tracker_type": tracker_type,
-                    "totals": {k: perf[k] for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms", "ocr_calls"]},
+                    "totals": {k: perf[k] for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "reid_ms", "loop_ms", "ocr_calls"]},
                     **breakdown,
                 }
                 heartbeat(current_idx, total, t, perf_summary)
@@ -2017,7 +2100,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "device": device,
         "yolo_device": yolo_device,
         "tracker_type": tracker_type,
-        "totals": {k: perf[k] for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "loop_ms", "ocr_calls"]},
+        "totals": {k: perf[k] for k in ["frame_read_ms", "yolo_ms", "deepsort_ms", "ocr_ms", "reid_ms", "loop_ms", "ocr_calls"]},
         **_perf_breakdown(perf, processed_idx),
     }
     return {
