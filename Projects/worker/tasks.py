@@ -1593,10 +1593,37 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "reid_sim_used": float(max(0.0, best.get("sim", 0.0))) if float(best.get("sim", -1.0)) >= 0.0 else None,
                 })
 
+            reid_candidate_sims = sorted(
+                [float(c.get("sim", -1.0)) for c in candidates if float(c.get("sim", -1.0)) >= 0.0],
+                reverse=True,
+            )
+            best_sim = float(reid_candidate_sims[0]) if reid_candidate_sims else -1.0
+            second_sim = float(reid_candidate_sims[1]) if len(reid_candidate_sims) > 1 else -1.0
+            reid_hysteresis = float(reid_reacquire_hysteresis)
+            min_sim_effective = float(reid_min_sim)
+            search_reid_gate_ok = bool(best_sim >= reid_min_sim)
+            if state == "SEARCH":
+                min_sim_effective = float(reid_min_sim + reid_hysteresis)
+                sim_margin = (best_sim - second_sim) if second_sim >= 0.0 else float("inf")
+                search_reid_gate_ok = bool(best_sim >= min_sim_effective and sim_margin >= reid_hysteresis)
+
             sim_ok = True
             if best and state in {"SEARCH", "LOST"}:
+                if state == "SEARCH" and params.reid_enable and locked_reid_embedding is not None and not search_reid_gate_ok:
+                    timeline.append({
+                        "t": t,
+                        "event": "reacquire_candidate_rejected",
+                        "track_id": best.get("track_id"),
+                        "reason": "reid_no_clear_winner",
+                        "best_sim": best_sim,
+                        "second_sim": second_sim,
+                        "min_sim_effective": min_sim_effective,
+                        "hysteresis": reid_hysteresis,
+                        "gate_ok": False,
+                    })
+                    sim_ok = False
                 prox_score = max(0.0, min(1.0, float(best.get("reacquire_identity_score", 0.0))))
-                if _should_reject_for_reid(
+                if sim_ok and _should_reject_for_reid(
                     locked_emb=locked_reid_embedding,
                     reid_sim=float(best.get("sim", -1.0)),
                     reid_min_sim=reid_min_sim,
@@ -2175,6 +2202,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         best["sim"] = reid_sim_value
             reid_gate_has_value = bool(reid_sim_value >= 0.0)
             reid_gate_ok = bool(reid_gate_has_value and reid_sim_value >= reid_min_sim)
+            if state == "SEARCH" and reid_gate_required:
+                reid_gate_ok = bool(search_reid_gate_ok)
             if reid_gate_ok:
                 last_reid_ok_t = t
             reid_recent_ok = bool(last_reid_ok_t is not None and (t - last_reid_ok_t) <= clip_grace_seconds)
@@ -2324,6 +2353,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "locked_grace_active": locked_grace_active,
                 "locked_grace_seconds": locked_grace_seconds,
                 "frame_idx": current_idx,
+                "best_sim": best_sim,
+                "second_sim": second_sim,
+                "min_sim_effective": min_sim_effective,
+                "hysteresis": reid_hysteresis,
+                "gate_ok": reid_gate_ok,
             })
 
             if present and not present_prev:
