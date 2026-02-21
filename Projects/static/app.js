@@ -28,6 +28,36 @@ const { getAdvancedPreset } = window.ShiftClipperPresets;
 
 const REID_WEIGHTS_DEFAULT_PATH = '/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth';
 const REID_WEIGHTS_DEFAULT_URL = 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth';
+const SETUP_STORAGE_KEY = 'shiftclipper_setup';
+const DEFAULT_SETUP = {
+  score_lock_threshold: 0.60,
+  score_unlock_threshold: 0.25,
+  lost_timeout: 8,
+  locked_grace_seconds: 1.25,
+  reacquire_window_seconds: 16,
+  reacquire_score_lock_threshold: 0.32,
+  reacquire_max_sec: 3,
+  loss_timeout_sec: 2,
+  gap_merge_seconds: 3.0,
+  lock_seconds_after_confirm: 4,
+  min_track_seconds: 0.85,
+  min_clip_seconds: 1.0,
+  extend_sec: 4,
+  allow_bench_reacquire: true,
+  reid_enable: true,
+  reid_every_n_frames: 3,
+  reid_weight: 0.60,
+  reid_min_sim: 0.35,
+  reid_crop_expand: 0.15,
+  reid_batch: 16,
+  reid_device: 'cuda:0',
+  allow_seed_clips: true,
+  seed_lock_seconds: 4,
+  seed_iou_min: 0.12,
+  seed_dist_max: 0.22,
+  seed_bonus: 0.8,
+  seed_window_s: 8,
+};
 
 
 const STAGE_META = [
@@ -94,14 +124,18 @@ function applyAdvancedPreset(name){
   $('scoreLockThreshold').value = p.score_lock_threshold;
   $('scoreUnlockThreshold').value = p.score_unlock_threshold;
   $('lostTimeout').value = p.lost_timeout;
+  setValueIfDefined('lockedGraceSeconds', p.locked_grace_seconds);
   $('reacquireWindowSeconds').value = p.reacquire_window_seconds;
   $('reacquireScoreLockThreshold').value = p.reacquire_score_lock_threshold;
+  setValueIfDefined('reacquireMaxSec', p.reacquire_max_sec);
+  setValueIfDefined('lossTimeoutSec', p.loss_timeout_sec);
   $('mergeGap').value = p.gap_merge_seconds;
   $('lockSeconds').value = p.lock_seconds_after_confirm;
   $('minTrack').value = p.min_track_seconds;
   $('minClipSeconds').value = p.min_clip_seconds;
   $('allowUnconfirmedClips').checked = !!p.allow_unconfirmed_clips;
   $('allowSeedClips').checked = !!p.allow_seed_clips;
+  setCheckedIfDefined('allowBenchReacquire', p.allow_bench_reacquire);
   $('seedLockSeconds').value = p.seed_lock_seconds;
   $('seedIouMin').value = p.seed_iou_min;
   $('seedDistMax').value = p.seed_dist_max;
@@ -130,6 +164,69 @@ function applyAdvancedPreset(name){
   $('swapGuardBonus').value = p.swap_guard_bonus;
 }
 
+function getSetupForStorage(){
+  const setup = payload();
+  delete setup.clicks;
+  delete setup.clicks_count;
+  return setup;
+}
+
+function persistSetup(){
+  localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(getSetupForStorage()));
+}
+
+function applySetupValues(setup){
+  if(!setup) return;
+  setValueIfDefined('scoreLockThreshold', setup.score_lock_threshold);
+  setValueIfDefined('scoreUnlockThreshold', setup.score_unlock_threshold);
+  setValueIfDefined('lostTimeout', setup.lost_timeout);
+  setValueIfDefined('lockedGraceSeconds', setup.locked_grace_seconds);
+  setValueIfDefined('reacquireWindowSeconds', setup.reacquire_window_seconds);
+  setValueIfDefined('reacquireScoreLockThreshold', setup.reacquire_score_lock_threshold);
+  setValueIfDefined('reacquireMaxSec', setup.reacquire_max_sec);
+  setValueIfDefined('lossTimeoutSec', setup.loss_timeout_sec);
+  setValueIfDefined('mergeGap', setup.gap_merge_seconds);
+  setValueIfDefined('lockSeconds', setup.lock_seconds_after_confirm);
+  setValueIfDefined('minTrack', setup.min_track_seconds);
+  setValueIfDefined('minClipSeconds', setup.min_clip_seconds);
+  setValueIfDefined('extendSec', setup.extend_sec);
+  setCheckedIfDefined('allowBenchReacquire', setup.allow_bench_reacquire);
+  setCheckedIfDefined('reidEnable', setup.reid_enable);
+  setValueIfDefined('reidEveryNFrames', setup.reid_every_n_frames);
+  setValueIfDefined('reidWeight', setup.reid_weight);
+  setValueIfDefined('reidMinSim', setup.reid_min_sim);
+  setValueIfDefined('reidCropExpand', setup.reid_crop_expand);
+  setValueIfDefined('reidBatch', setup.reid_batch);
+  setValueIfDefined('reidDevice', setup.reid_device);
+  setCheckedIfDefined('allowSeedClips', setup.allow_seed_clips);
+  setValueIfDefined('seedLockSeconds', setup.seed_lock_seconds);
+  setValueIfDefined('seedIouMin', setup.seed_iou_min);
+  setValueIfDefined('seedDistMax', setup.seed_dist_max);
+  setValueIfDefined('seedBonus', setup.seed_bonus);
+  setValueIfDefined('seedWindowS', setup.seed_window_s);
+}
+
+function loadSavedSetupOrDefaults(){
+  const raw = localStorage.getItem(SETUP_STORAGE_KEY);
+  if(!raw){
+    applySetupValues(DEFAULT_SETUP);
+    return;
+  }
+  try {
+    applySetupValues(JSON.parse(raw));
+  } catch (_) {
+    localStorage.removeItem(SETUP_STORAGE_KEY);
+    applySetupValues(DEFAULT_SETUP);
+  }
+}
+
+function resetSettings(){
+  localStorage.removeItem(SETUP_STORAGE_KEY);
+  applySetupValues(DEFAULT_SETUP);
+  refreshHelp();
+  updateRunButtonState();
+}
+
 function applyPreset(){
   const p = CAMERA_DEFAULTS[$('cameraMode').value];
   $('detectStride').value = p.detect_stride;
@@ -139,6 +236,7 @@ function applyPreset(){
   $('lostTimeout').value = p.lost_timeout;
   $('minTrack').value = p.min_track_seconds;
   applyAdvancedPreset('balanced');
+  applySetupValues(DEFAULT_SETUP);
   refreshHelp();
 }
 
@@ -250,6 +348,10 @@ function payload(){
     score_unlock_threshold: toNumber('scoreUnlockThreshold'),
     reacquire_window_seconds: toNumber('reacquireWindowSeconds'),
     reacquire_score_lock_threshold: toNumber('reacquireScoreLockThreshold'),
+    locked_grace_seconds: toNumber('lockedGraceSeconds'),
+    reacquire_max_sec: toNumber('reacquireMaxSec'),
+    loss_timeout_sec: toNumber('lossTimeoutSec'),
+    allow_bench_reacquire: $('allowBenchReacquire').checked,
     allow_unconfirmed_clips: $('allowUnconfirmedClips').checked,
     allow_seed_clips: $('allowSeedClips').checked,
     min_track_seconds: toNumber('minTrack'),
@@ -288,7 +390,7 @@ function payload(){
   };
 }
 
-async function save(){ await j('PUT', `/jobs/${state.jobId}/setup`, payload()); await pollOnce(); }
+async function save(){ persistSetup(); await j('PUT', `/jobs/${state.jobId}/setup`, payload()); await pollOnce(); }
 
 async function run(){
   if($('verifyMode').value === 'on'){
@@ -404,7 +506,6 @@ function registerSeedClick(evt){
 
 async function loadSetup(){
   if (!state.jobId) return;
-  applyPreset();
   try {
     const resp = await j('GET', `/jobs/${state.jobId}/setup`);
     const setup = resp.setup || {};
@@ -425,6 +526,9 @@ async function loadSetup(){
     setValueIfDefined('scoreUnlockThreshold', setup.score_unlock_threshold);
     setValueIfDefined('reacquireWindowSeconds', setup.reacquire_window_seconds);
     setValueIfDefined('reacquireScoreLockThreshold', setup.reacquire_score_lock_threshold);
+    setValueIfDefined('lockedGraceSeconds', setup.locked_grace_seconds);
+    setValueIfDefined('reacquireMaxSec', setup.reacquire_max_sec);
+    setValueIfDefined('lossTimeoutSec', setup.loss_timeout_sec);
     setValueIfDefined('minTrack', setup.min_track_seconds);
     setValueIfDefined('minClipSeconds', setup.min_clip_seconds);
     setValueIfDefined('seedLockSeconds', setup.seed_lock_seconds);
@@ -453,6 +557,7 @@ async function loadSetup(){
     setValueIfDefined('benchZone', setup.bench_zone_ratio);
     setCheckedIfDefined('allowUnconfirmedClips', setup.allow_unconfirmed_clips);
     setCheckedIfDefined('allowSeedClips', setup.allow_seed_clips);
+    setCheckedIfDefined('allowBenchReacquire', setup.allow_bench_reacquire);
     setCheckedIfDefined('ocrDisable', setup.ocr_disable);
     setCheckedIfDefined('debugOverlay', setup.debug_overlay);
     setCheckedIfDefined('debugTimeline', setup.debug_timeline);
@@ -536,6 +641,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('btnRun').onclick = run;
   $('btnCancel').onclick = cancel;
   $('btnClear').onclick = clearJob;
+  $('btnResetSettings').onclick = resetSettings;
   $('btnClearClicks').onclick = clearSeedClicks;
   $('btnUndoClick').onclick = undoSeedClick;
   $('presetBalanced').onclick = () => applyAdvancedPreset('balanced');
@@ -550,6 +656,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('vid').addEventListener('seeked', drawClickMarkers);
   window.addEventListener('resize', drawClickMarkers);
   applyPreset();
+  loadSavedSetupOrDefaults();
+  document.querySelectorAll('input, select').forEach((el) => {
+    if(el.id === 'file') return;
+    el.addEventListener('change', persistSetup);
+    el.addEventListener('input', persistSetup);
+  });
 
   const existingJobId = localStorage.getItem('shiftclipper.jobId');
   if(existingJobId){
