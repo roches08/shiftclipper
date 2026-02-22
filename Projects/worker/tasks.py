@@ -1019,7 +1019,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     shift_state = "OFF_ICE"
     present_prev = False
     timeline = list(reid_init_timeline_events)
-    timeline.append({"t": 0.0, "event": "config_header", "preset_name": setup.get("preset_name"), "preset_version": setup.get("preset_version"), "config_hash": setup.get("config_hash")})
+    lock_threshold_seed_resolved = float(
+        setup.get("lock_threshold_seed", setup.get("lock_threshold_normal", setup.get("score_lock_threshold", params.score_lock_threshold)))
+    )
+    timeline.append({"t": 0.0, "event": "config_header", "preset_name": setup.get("preset_name"), "preset_version": setup.get("preset_version"), "config_hash": setup.get("config_hash"), "lock_threshold_seed_resolved": lock_threshold_seed_resolved})
     for seed in seed_clicks:
         timeline.append({
             "t": float(seed.get("t", 0.0)),
@@ -1636,7 +1639,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             cold_lock_mode = str(setup.get("cold_lock_mode", "allow")).lower()
             cold_lock_reid_min_similarity = float(setup.get("cold_lock_reid_min_similarity", 0.5))
             cold_lock_margin_min = float(setup.get("cold_lock_margin_min", 0.08))
-            lock_threshold_seed = float(setup.get("lock_threshold_seed", unlock_threshold))
+            lock_threshold_seed = float(
+                setup.get("lock_threshold_seed", setup.get("lock_threshold_normal", setup.get("score_lock_threshold", params.score_lock_threshold)))
+            )
             seed_valid = bool(
                 in_seed_window
                 and seed_dist_ok
