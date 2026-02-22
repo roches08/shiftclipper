@@ -76,7 +76,9 @@ def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
 
 
 def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
-    src = payload or {}
+    src = dict(payload or {})
+    for key in ("config_ui_raw", "config_resolved", "config_hash"):
+        src.pop(key, None)
     camera_mode = str(src.get("camera_mode") or "broadcast").lower()
     if camera_mode not in CAMERA_PRESETS:
         camera_mode = "broadcast"
@@ -208,9 +210,6 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "preset_name": str(src.get("preset_name") or ""),
         "preset_version": str(src.get("preset_version") or ""),
         "config_source": str(src.get("config_source") or "ui"),
-        "config_ui_raw": src.get("config_ui_raw") or {},
-        "config_resolved": src.get("config_resolved") or {},
-        "config_hash": str(src.get("config_hash") or ""),
         "allow_bench_reacquire": bool(src.get("allow_bench_reacquire", False)),
         "edge_margin_px": _as_float(src, "edge_margin_px", 2.0),
         "reid_every_n_frames": max(1, _as_int(src, "reid_every_n_frames", 5)),

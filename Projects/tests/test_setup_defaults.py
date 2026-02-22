@@ -224,3 +224,100 @@ def test_setup_reid_fail_policy_is_normalized(tmp_path, monkeypatch):
 
     setup = json.loads((tmp_path / job_id / "setup.json").read_text())
     assert setup["reid_fail_policy"] == "disable"
+
+
+def test_normalize_setup_strips_nested_config_keys():
+    from common.config import normalize_setup
+
+    normalized = normalize_setup({
+        "tracking_mode": "clip",
+        "config_ui_raw": {"foo": "bar"},
+        "config_resolved": {"nested": True},
+        "config_hash": "abc",
+    })
+
+    assert "config_ui_raw" not in normalized
+    assert "config_resolved" not in normalized
+    assert "config_hash" not in normalized
+
+
+def test_process_job_skips_combined_when_no_clips(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+    monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "no-clips-combined-skip"})["job_id"]
+    job_dir = tmp_path / job_id
+    (job_dir / "in.mp4").write_bytes(b"0")
+
+    api_main.setup_job(job_id, {"tracking_mode": "clip", "generate_combined": True})
+
+    meta = json.loads((job_dir / "job.json").read_text())
+    meta["video_path"] = str(job_dir / "in.mp4")
+    (job_dir / "job.json").write_text(json.dumps(meta))
+
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cuda:0", 0))
+    monkeypatch.setattr(worker_tasks, "analyze_video_quality", lambda _: {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "codec": "h264",
+        "bit_rate": 1000000,
+        "duration": 1.0,
+        "is_vfr": False,
+        "avg_frame_rate": "30/1",
+        "r_frame_rate": "30/1",
+    })
+    monkeypatch.setattr(worker_tasks, "track_presence", lambda *args, **kwargs: {
+        "segments": [], "shifts": [], "timeline": [], "debug_overlay_path": None, "perf": {}, "target_embed_history": []
+    })
+
+    result = worker_tasks.process_job(job_id)
+    assert result["status"] == "done"
+    assert result["message"] == "combined skipped: no clips"
+
+
+def test_process_job_surfaces_ffmpeg_combine_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+    monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "combine-fail"})["job_id"]
+    job_dir = tmp_path / job_id
+    (job_dir / "in.mp4").write_bytes(b"0")
+
+    api_main.setup_job(job_id, {"tracking_mode": "clip", "generate_combined": True})
+
+    meta = json.loads((job_dir / "job.json").read_text())
+    meta["video_path"] = str(job_dir / "in.mp4")
+    (job_dir / "job.json").write_text(json.dumps(meta))
+
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cuda:0", 0))
+    monkeypatch.setattr(worker_tasks, "analyze_video_quality", lambda _: {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "codec": "h264",
+        "bit_rate": 1000000,
+        "duration": 1.0,
+        "is_vfr": False,
+        "avg_frame_rate": "30/1",
+        "r_frame_rate": "30/1",
+    })
+    monkeypatch.setattr(worker_tasks, "track_presence", lambda *args, **kwargs: {
+        "segments": [(0.0, 1.0, "unlock")], "shifts": [], "timeline": [], "debug_overlay_path": None, "perf": {}, "target_embed_history": []
+    })
+    monkeypatch.setattr(worker_tasks, "cut_clip", lambda *args, **kwargs: Path(args[3]).write_bytes(b"clip"))
+
+    def _fail_concat(paths, out_path):
+        raise worker_tasks.FFmpegError(["ffmpeg", "concat"], 1, "concat exploded")
+
+    monkeypatch.setattr(worker_tasks, "concat_clips", _fail_concat)
+
+    try:
+        worker_tasks.process_job(job_id)
+        assert False, "Expected combine failure"
+    except worker_tasks.FFmpegError as exc:
+        assert "concat exploded" in str(exc)
+
+    result = json.loads((job_dir / "job.json").read_text())
+    assert result["status"] == "failed"
+    assert "concat exploded" in (result.get("error") or "")

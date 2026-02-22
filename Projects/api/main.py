@@ -462,6 +462,14 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
 
 
 
+def _runtime_config_snapshot(setup: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        k: v
+        for k, v in setup.items()
+        if k not in {"config_ui_raw", "config_resolved", "config_hash"}
+    }
+
+
 @app.put("/jobs/{job_id}/setup")
 def setup_job(job_id: str, payload: Dict[str, Any]):
     jd = job_dir(job_id)
@@ -470,7 +478,7 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     payload = payload or {}
     _validate_setup_payload(payload)
     setup = normalize_setup(payload)
-    config_resolved = dict(setup)
+    config_resolved = _runtime_config_snapshot(setup)
     config_hash = hashlib.sha256(json.dumps(config_resolved, sort_keys=True).encode("utf-8")).hexdigest()
     setup.update({
         "video_type": str(payload.get("video_type") or setup.get("video_type") or "coach_cam"),
@@ -504,7 +512,7 @@ def get_setup(job_id: str):
     for k in ("video_type", "preset_name", "preset_version", "config_source", "config_ui_raw", "config_hash"):
         if k in setup_payload:
             setup[k] = setup_payload[k]
-    setup["config_resolved"] = dict(setup)
+    setup["config_resolved"] = _runtime_config_snapshot(setup)
     return {"job_id": job_id, "setup": setup}
 
 
@@ -541,7 +549,7 @@ def run_job(job_id: str):
     for k in ("video_type", "preset_name", "preset_version", "config_source", "config_ui_raw", "config_hash"):
         if k in setup_payload:
             setup[k] = setup_payload[k]
-    setup["config_resolved"] = dict(setup)
+    setup["config_resolved"] = _runtime_config_snapshot(setup)
     has_clicks = bool((setup.get("clicks") or []))
     verify_mode = bool(setup.get("verify_mode", False))
     skip_seeding = bool(setup.get("skip_seeding", False))
