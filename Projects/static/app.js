@@ -92,6 +92,19 @@ async function j(method, path, body){
 
 function mb(n){ return (n / (1024 * 1024)).toFixed(1); }
 
+// Robust job id getter: if state gets out of sync (refresh / hot reload),
+// recover the active job id so buttons don't appear "dead".
+function currentJobId(){
+  if(state.jobId) return state.jobId;
+  try{
+    const ls = localStorage.getItem('shiftclipper.jobId');
+    if(ls) return ls;
+  }catch{}
+  const shown = ($('jobId')?.textContent || '').trim();
+  if(shown && shown !== '—' && shown !== '-') return shown;
+  return null;
+}
+
 function setJobId(jobId){
   const changed = state.jobId !== jobId;
   state.jobId = jobId;
@@ -113,7 +126,7 @@ function setJobId(jobId){
 function updateRunButtonState(){
   const skipSeeding = $('skipSeeding').checked;
   const hasSeed = state.clicks.length > 0;
-  $('btnRun').disabled = !state.jobId || (!hasSeed && !skipSeeding);
+  $('btnRun').disabled = !currentJobId() || (!hasSeed && !skipSeeding);
   $('seedStatus').textContent = `Seed clicks: ${state.clicks.length}`;
   const clickList = state.clicks
     .map((c, idx) => `#${idx + 1} t=${Number(c.t).toFixed(2)} x=${Number(c.x).toFixed(3)} y=${Number(c.y).toFixed(3)}`)
@@ -346,8 +359,9 @@ async function createJob(){
 }
 
 async function saveSetupToServer(){
-  if (!state.jobId) return;
-  const response = await fetch(`/jobs/${state.jobId}/setup`, {
+  const jid = currentJobId();
+  if (!jid) return;
+  const response = await fetch(`/jobs/${jid}/setup`, {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(collectSetupFromUI()),
@@ -358,7 +372,9 @@ async function saveSetupToServer(){
 }
 
 async function upload(){
-  const f = $('file').files[0]; if(!f || !state.jobId) return;
+  const jid = currentJobId();
+  const f = $('file').files[0];
+  if(!f || !jid) return;
   if (state.uploading) return;
   const fd = new FormData(); fd.append('file', f);
   $('progressMessage').textContent = 'Uploading...';
@@ -367,7 +383,7 @@ async function upload(){
   await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     state.uploadXhr = xhr;
-    xhr.open('POST', `/jobs/${state.jobId}/upload`, true);
+    xhr.open('POST', `/jobs/${jid}/upload`, true);
     xhr.upload.onprogress = (evt) => {
       if (!evt.lengthComputable) return;
       const percent = Math.round((evt.loaded / evt.total) * 100);
@@ -480,9 +496,17 @@ function payload(){
   };
 }
 
-async function save(){ persistSetup(); await j('PUT', `/jobs/${state.jobId}/setup`, payload()); await pollOnce(); }
+async function save(){
+  const jid = currentJobId();
+  if(!jid) return;
+  persistSetup();
+  await j('PUT', `/jobs/${jid}/setup`, payload());
+  await pollOnce();
+}
 
 async function run(){
+  const jid = currentJobId();
+  if(!jid) return;
   if($('verifyMode').value === 'on'){
     const ok = confirm('Verify mode will not create clips/combined video. Continue?\nCancel = Turn off verify + run');
     if(!ok){ $('verifyMode').value = 'off'; refreshHelp(); }
@@ -492,13 +516,14 @@ async function run(){
     return;
   }
   await save();
-  await j('POST', `/jobs/${state.jobId}/run`);
+  await j('POST', `/jobs/${jid}/run`);
   startPolling();
 }
 
 async function cancel(){
-  if(!state.jobId) return;
-  await j('POST', `/jobs/${state.jobId}/cancel`);
+  const jid = currentJobId();
+  if(!jid) return;
+  await j('POST', `/jobs/${jid}/cancel`);
   if(state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = null;
   state.uploading = false;
@@ -524,8 +549,9 @@ function resetUiAfterClear(){
 }
 
 async function clearJob(){
-  if(!state.jobId) return;
-  await j('DELETE', `/jobs/${state.jobId}`);
+  const jid = currentJobId();
+  if(!jid) return;
+  await j('DELETE', `/jobs/${jid}`);
   if(state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = null;
   setJobId(null);
@@ -595,9 +621,10 @@ function registerSeedClick(evt){
 }
 
 async function loadSetup(){
-  if (!state.jobId) return;
+  const jid = currentJobId();
+  if (!jid) return;
   try {
-    const resp = await j('GET', `/jobs/${state.jobId}/setup`);
+    const resp = await j('GET', `/jobs/${jid}/setup`);
     const setup = resp.setup || {};
     setValueIfDefined('cameraMode', setup.camera_mode);
     setValueIfDefined('trackingMode', setup.tracking_mode);
@@ -693,8 +720,9 @@ function renderResults(res){
 }
 
 async function pollOnce(){
-  if(!state.jobId) return null;
-  const s = await j('GET', `/jobs/${state.jobId}/status`);
+  const jid = currentJobId();
+  if(!jid) return null;
+  const s = await j('GET', `/jobs/${jid}/status`);
   state.lastStatus = s;
   $('out').textContent = JSON.stringify(s, null, 2);
   if(!state.uploading && s.proxy_ready && s.proxy_url && state.proxySrc !== s.proxy_url){
@@ -720,7 +748,7 @@ async function pollOnce(){
     clearInterval(state.pollTimer);
     state.pollTimer = null;
     try {
-      const res = await j('GET', `/jobs/${state.jobId}/results`);
+      const res = await j('GET', `/jobs/${jid}/results`);
       $('clips').textContent = JSON.stringify(res, null, 2);
       renderResults(res);
     } catch (_) {}
