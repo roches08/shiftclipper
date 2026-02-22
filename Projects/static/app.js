@@ -192,14 +192,20 @@ function applyVideoTypePreset(videoType){
   $('reacquireScoreLockThreshold').value = val('reacquire_score_lock_threshold', $('reacquireScoreLockThreshold').value);
   $('mergeGap').value = val('gap_merge_seconds', $('mergeGap').value);
   $('extendSec').value = val('extend_sec', $('extendSec').value);
-  $('allowBenchReacquire').checked = !!val('allow_bench_reacquire', $('allowBenchReacquire').checked);
-  $('allowSeedClips').checked = !!val('allow_seed_clips', $('allowSeedClips').checked);
+  setCheckedIfPresent('allowBenchReacquire',
+    !!val('allow_bench_reacquire', getChecked('allowBenchReacquire', false))
+  );
+  setCheckedIfPresent('allowSeedClips',
+    !!val('allow_seed_clips', getChecked('allowSeedClips', true))
+  );
   $('seedLockSeconds').value = val('seed_lock_seconds', $('seedLockSeconds').value);
   $('seedIouMin').value = val('seed_iou_min', $('seedIouMin').value);
   $('seedDistMax').value = val('seed_dist_max', $('seedDistMax').value);
   $('seedBonus').value = val('seed_bonus', $('seedBonus').value);
   $('seedWindowS').value = val('seed_window_s', $('seedWindowS').value);
-  $('reidEnable').checked = !!val('reid_enable', val('reid_enabled', $('reidEnable').checked));
+  setCheckedIfPresent('reidEnable',
+    !!val('reid_enable', val('reid_enabled', getChecked('reidEnable', true)))
+  );
   $('reidModel').value = val('reid_model', $('reidModel').value);
   $('reidEveryNFrames').value = val('reid_every_n_frames', $('reidEveryNFrames').value);
   $('reidWeight').value = val('reid_weight', $('reidWeight').value);
@@ -351,6 +357,11 @@ function setCheckedIfDefined(id, value){
   const el = $(id);
   if(!el) return;
   el.checked = !!value;
+}
+
+function setCheckedIfPresent(id, value){
+  const el = $(id);
+  if(el) el.checked = !!value;
 }
 
 function renderStepper(stage){

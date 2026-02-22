@@ -51,7 +51,7 @@ log = logging.getLogger("worker")
 DEBUG_MODE = os.getenv("WORKER_DEBUG", "0") == "1"
 HEARTBEAT_SECONDS = float(os.getenv("WORKER_HEARTBEAT_SECONDS", "5"))
 STALL_TIMEOUT_S = float(os.getenv("WORKER_STALL_TIMEOUT_SECONDS", "120"))
-COMBINE_STALL_TIMEOUT_S = float(os.getenv("WORKER_COMBINE_STALL_TIMEOUT_SECONDS", "900"))
+COMBINE_STALL_TIMEOUT_S = float(os.getenv("WORKER_COMBINE_STALL_TIMEOUT_SECONDS", "3600"))
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 JOBS_DIR = Path(os.getenv("JOBS_DIR", str(BASE_DIR / "data" / "jobs"))).resolve()
@@ -2757,7 +2757,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
     def watchdog():
         while not stop_watchdog:
             time.sleep(2)
-            timeout_s = COMBINE_STALL_TIMEOUT_S if stage.get("name") == "combined" else STALL_TIMEOUT_S
+            stage_name = str(stage.get("name") or "").lower()
+            timeout_s = COMBINE_STALL_TIMEOUT_S if stage_name in {"combined", "combine"} else STALL_TIMEOUT_S
             if time.time() - stage["updated"] > timeout_s:
                 stage["stalled"] = True
                 return
@@ -2951,21 +2952,12 @@ def process_job(job_id: str) -> Dict[str, Any]:
                 try:
                     write_status("processing", "combined", 92, "Combining video")
                     touch_stage("combined")
-                    last_combined_write = 0.0
-
-                    def combined_heartbeat():
-                        nonlocal last_combined_write
-                        touch_stage("combined")
-                        now = time.time()
-                        if now - last_combined_write >= 5.0:
-                            write_status("processing", "combined", 95, "Combining video")
-                            last_combined_write = now
 
                     combined_path = str(job_dir / "combined.mp4")
                     concat_clips_with_heartbeat(
                         manifest_clips,
                         combined_path,
-                        heartbeat=combined_heartbeat,
+                        heartbeat=lambda: (touch_stage("combined"), write_status("processing", "combined", 95, "Combining video")),
                         cancel_check=cancel_check,
                     )
                     write_status("processing", "combined", 98, "Combining video")
