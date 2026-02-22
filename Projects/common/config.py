@@ -199,7 +199,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "max_clip_len_sec": _as_float(src, "max_clip_len_sec", 0.0),
         "lock_threshold_normal": _as_float(src, "lock_threshold_normal", _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"])),
         "lock_threshold_reacquire": _as_float(src, "lock_threshold_reacquire", _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"])),
-        "lock_threshold_seed": _as_float(src, "lock_threshold_seed", _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"])),
+        "lock_threshold_seed": _as_float(src, "lock_threshold_seed", _as_float(src, "lock_threshold_normal", _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]))),
         "cold_lock_mode": str(src.get("cold_lock_mode") or "allow").lower(),
         "cold_lock_reid_min_similarity": _as_float(src, "cold_lock_reid_min_similarity", _as_float(src, "reid_min_sim", 0.5)),
         "cold_lock_margin_min": _as_float(src, "cold_lock_margin_min", 0.08),
