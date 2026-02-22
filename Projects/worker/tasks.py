@@ -1176,18 +1176,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 active_seed["matched_dist"] = nearest_seed_dist
                 active_seed["matched_iou"] = nearest_seed_iou
                 if in_seed_window and seed_dist_ok and seed_iou_ok:
-                    locked_track_id = nearest_seed_track_id
-                    state = "LOCKED"
-                    lock_state = "LOCKED"
-                    seed_acquired = True
-                    active_seed["acquired"] = True
-                    lock_start_frame = current_idx
-                    confirm_frames = 0
                     timeline.append({
                         "t": t,
                         "event": "lock_acquired_from_seed",
                         "track_id": nearest_seed_track_id,
                         "click_t": active_seed["t"],
+                        "bypass_disabled": True,
                     })
                 timeline.append({
                     "t": t,
@@ -1568,9 +1562,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             swap_guard_bonus = max(0.0, float(setup.get("swap_guard_bonus", params.swap_guard_bonus)))
             lock_threshold = reacquire_threshold if t <= reacquire_until else score_lock_threshold
             unlock_threshold = float(setup.get("lock_threshold_seed", setup.get("score_unlock_threshold", params.score_unlock_threshold)))
-            allow_seed_relaxed_lock = bool(best and best.get("seed_match"))
-            if allow_seed_relaxed_lock:
-                lock_threshold = min(lock_threshold, unlock_threshold)
             if best:
                 last_box = best["box"]
 
@@ -1645,7 +1636,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             cold_lock_mode = str(setup.get("cold_lock_mode", "allow")).lower()
             cold_lock_reid_min_similarity = float(setup.get("cold_lock_reid_min_similarity", 0.5))
             cold_lock_margin_min = float(setup.get("cold_lock_margin_min", 0.08))
-            cold_lock_max_seconds = max(0.0, float(setup.get("cold_lock_max_seconds", 3.0)))
             lock_threshold_seed = float(setup.get("lock_threshold_seed", unlock_threshold))
             seed_valid = bool(
                 in_seed_window
@@ -1654,7 +1644,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 and best_sim >= cold_lock_reid_min_similarity
                 and winner_margin >= cold_lock_margin_min
                 and active_seed is not None
-                and (t - float(active_seed.get("t", 0.0))) <= max(seed_window_s, cold_lock_max_seconds)
+                and (t - float(active_seed.get("t", 0.0))) <= seed_window_s
                 and best is not None
                 and bool(best.get("seed_match"))
                 and _clamp01(float(best.get("score", -1.0))) >= lock_threshold_seed
@@ -1791,6 +1781,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 if best and sim_ok and not best.get("closeup_blocked", False) and not cold_lock_blocked:
                     score_for_lock = _clamp01(float(best.get("score", -1.0)))
                     sim_for_lock = float(best.get("sim", -1.0))
+                    seed_gate_ready = bool(seed_valid and score_for_lock >= lock_threshold_seed)
                     bbox_sane = True
                     if last_good_area_ratio and last_good_area_ratio > 1e-6:
                         b = best["box"]
@@ -1803,7 +1794,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         and sim_for_lock >= reid_min_sim_reacquire
                         and bbox_sane
                     )
-                    reacquire_ready = bool(score_for_lock >= score_lock_threshold or strong_reid_reacquire)
+                    reacquire_ready = bool(score_for_lock >= score_lock_threshold or strong_reid_reacquire or seed_gate_ready)
                     if reacquire_ready:
                         track_id = int(best["track_id"])
                         reacquire_hits[track_id] = reacquire_hits.get(track_id, 0) + 1
@@ -1814,17 +1805,21 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         required_frames = reid_reacquire_confirm_frames if strong_reid_reacquire and score_for_lock < score_lock_threshold else reacquire_confirm_frames
                         if strong_reid_reacquire and score_for_lock < score_lock_threshold:
                             reacquire_reason = "reid_confirmed"
+                        elif seed_gate_ready and score_for_lock < score_lock_threshold:
+                            reacquire_reason = "seed_confirmed"
                         if confirm_frames >= required_frames:
                             state = "LOCKED"
                             lock_transition_from_search = True
                             should_lock_now = True
                             reacquire_confirm_count = confirm_frames
+                            promote_from_seed = bool(seed_gate_ready and not strong_reid_reacquire and score_for_lock < score_lock_threshold)
                             promote_from_reacquire = bool(lost_start_time is not None)
                             timeline.append({
                                 "t": t,
                                 "event": "lock_acquired",
                                 "reason": reacquire_reason,
                                 "track_id": track_id,
+                                "lock_type": "seed" if promote_from_seed else "reacquire" if promote_from_reacquire else "normal",
                             })
                     else:
                         confirm_frames = 0
@@ -2013,6 +2008,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                         "track_id": best["track_id"],
                         "identity_score": float(best.get("score", -1.0)),
                         "reid_sim_used": float(best.get("sim", -1.0)) if (params.reid_enable and locked_reid_embedding is not None and float(best.get("sim", -1.0)) >= 0.0) else None,
+                        "lock_type": "seed" if promote_from_seed else "reacquire" if promote_from_reacquire else "normal",
                     })
             elif state == "LOCKED":
                 forced_reid_loss = False
