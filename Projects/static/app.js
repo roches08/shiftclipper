@@ -1,4 +1,26 @@
-const $ = (id) => document.getElementById(id);
+function $(id) {
+  return document.getElementById(id)
+    || document.getElementById(id.replaceAll('_', '-'))
+    || document.getElementById(id.replaceAll('-', '_'));
+}
+
+function readChecked(id, fallback = false) {
+  const el = $(id);
+  if (!el) return fallback;
+  return !!el.checked;
+}
+
+function readValue(id, fallback = '') {
+  const el = $(id);
+  if (!el) return fallback;
+  return (el.value ?? fallback);
+}
+
+function readNumber(id, fallback = 0) {
+  const v = readValue(id, '');
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 const state = {
   jobId: null,
   clicks: [],
@@ -124,7 +146,7 @@ function setJobId(jobId){
 }
 
 function updateRunButtonState(){
-  const skipSeeding = $('skipSeeding').checked;
+  const skipSeeding = readChecked('skipSeeding', false);
   const hasSeed = state.clicks.length > 0;
   $('btnRun').disabled = !currentJobId() || (!hasSeed && !skipSeeding);
   $('seedStatus').textContent = `Seed clicks: ${state.clicks.length}`;
@@ -412,27 +434,30 @@ async function upload(){
 }
 
 function payload(){
-  const toNumber = (id) => parseFloat($(id).value);
-  const toInt = (id) => parseInt($(id).value, 10);
+  const toNumber = (id, fallback = 0) => readNumber(id, fallback);
+  const toInt = (id, fallback = 0) => Math.trunc(readNumber(id, fallback));
+  const jerseyColor = readValue('jerseyColor', '#000000');
+  const jerseyColorHex = /^#[0-9a-fA-F]{6}$/.test(jerseyColor) ? jerseyColor : '#000000';
+  const jerseyRgbHex = jerseyColorHex.replace('#', '');
   return {
-    video_type: $('videoType').value,
-    camera_mode: $('cameraMode').value,
-    tracking_mode: $('trackingMode').value,
-    verify_mode: $('verifyMode').value === 'on',
-    skip_seeding: $('skipSeeding').checked,
-    player_number: $('playerNumber').value,
-    jersey_color: $('jerseyColor').value,
-    jersey_color_hex: $('jerseyColor').value,
-    opponent_color: $('opponentColor').value,
-    jersey_color_rgb: (() => { const v=$('jerseyColor').value.replace("#",""); return { r: parseInt(v.slice(0,2),16), g: parseInt(v.slice(2,4),16), b: parseInt(v.slice(4,6),16) }; })(),
+    video_type: readValue('videoType', DEFAULT_SETUP.video_type),
+    camera_mode: readValue('cameraMode', 'broadcast_wide'),
+    tracking_mode: readValue('trackingMode', 'clip'),
+    verify_mode: readValue('verifyMode', 'off') === 'on',
+    skip_seeding: readChecked('skipSeeding', false),
+    player_number: readValue('playerNumber', ''),
+    jersey_color: jerseyColorHex,
+    jersey_color_hex: jerseyColorHex,
+    opponent_color: readValue('opponentColor', '#000000'),
+    jersey_color_rgb: (() => ({ r: parseInt(jerseyRgbHex.slice(0,2),16), g: parseInt(jerseyRgbHex.slice(2,4),16), b: parseInt(jerseyRgbHex.slice(4,6),16) }))(),
     color_tolerance: toInt('colorTolerance'),
     extend_sec: toNumber('extendSec'),
     detect_stride: toInt('detectStride'),
     yolo_imgsz: toInt('yoloImgsz'),
     yolo_batch: toInt('yoloBatch'),
-    tracker_type: $('trackerType').value || 'bytetrack',
+    tracker_type: readValue('trackerType', 'bytetrack') || 'bytetrack',
     ocr_min_conf: toNumber('ocrMinConf'),
-    ocr_disable: $('ocrDisable').checked,
+    ocr_disable: readChecked('ocrDisable', false),
     ocr_every_n_frames: toInt('ocrEveryNFrames'),
     ocr_veto_conf: toNumber('ocrVetoConf'),
     ocr_veto_seconds: toNumber('ocrVetoSeconds'),
@@ -449,9 +474,9 @@ function payload(){
     locked_grace_seconds: toNumber('lockedGraceSeconds'),
     reacquire_max_sec: toNumber('reacquireMaxSec'),
     loss_timeout_sec: toNumber('lossTimeoutSec'),
-    allow_bench_reacquire: $('allowBenchReacquire').checked,
-    allow_unconfirmed_clips: $('allowUnconfirmedClips').checked,
-    allow_seed_clips: $('allowSeedClips').checked,
+    allow_bench_reacquire: readChecked('allowBenchReacquire', false),
+    allow_unconfirmed_clips: readChecked('allowUnconfirmedClips', false),
+    allow_seed_clips: readChecked('allowSeedClips', true),
     min_track_seconds: toNumber('minTrack'),
     min_clip_seconds: toNumber('minClipSeconds'),
     seed_lock_seconds: toNumber('seedLockSeconds'),
@@ -460,22 +485,22 @@ function payload(){
     seed_bonus: toNumber('seedBonus'),
     seed_window_s: toNumber('seedWindowS'),
     max_clip_len_sec: toNumber('maxClipLenSec'),
-    cold_lock_mode: $('coldLockMode').value,
+    cold_lock_mode: readValue('coldLockMode', 'require_seed'),
     cold_lock_reid_min_similarity: toNumber('coldLockReidMinSimilarity'),
     cold_lock_margin_min: toNumber('coldLockMarginMin'),
     cold_lock_max_seconds: toNumber('coldLockMaxSeconds'),
     clicks_count: state.clicks.length,
     bench_zone_ratio: toNumber('benchZone'),
-    debug_overlay: $('debugOverlay').checked,
-    debug_timeline: $('debugTimeline').checked,
-    generate_combined: $('generateCombined').checked,
-    transcode_enabled: $('transcodeEnabled').checked,
+    debug_overlay: readChecked('debugOverlay', false),
+    debug_timeline: readChecked('debugTimeline', true),
+    generate_combined: readChecked('generateCombined', true),
+    transcode_enabled: readChecked('transcodeEnabled', false),
     transcode_scale_max: toInt('transcodeScaleMax'),
-    transcode_fps: $('transcodeFps').value ? toInt('transcodeFps') : null,
-    transcode_deinterlace: $('transcodeDeinterlace').checked,
-    transcode_denoise: $('transcodeDenoise').checked,
-    reid_enable: $('reidEnable').checked,
-    reid_model: $('reidModel').value,
+    transcode_fps: readValue('transcodeFps', '') ? toInt('transcodeFps') : null,
+    transcode_deinterlace: readChecked('transcodeDeinterlace', true),
+    transcode_denoise: readChecked('transcodeDenoise', false),
+    reid_enable: readChecked('reidEnable', true),
+    reid_model: readValue('reidModel', ''),
     reid_every_n_frames: toInt('reidEveryNFrames'),
     reid_weight: toNumber('reidWeight'),
     reid_min_sim: toNumber('reidMinSim'),
@@ -483,15 +508,15 @@ function payload(){
     reid_min_px: toInt('reidMinPx'),
     reid_sharpness_threshold: toNumber('reidSharpnessThreshold'),
     reid_batch: toInt('reidBatch'),
-    reid_device: $('reidDevice').value,
+    reid_device: readValue('reidDevice', 'cuda:0'),
     reid_fail_policy: 'disable',
     reid_auto_download: true,
     reid_weights_path: REID_WEIGHTS_DEFAULT_PATH,
     reid_weights_url: REID_WEIGHTS_DEFAULT_URL,
     swap_guard_seconds: toNumber('swapGuardSeconds'),
     swap_guard_bonus: toNumber('swapGuardBonus'),
-    preset_name: $('presetLabel').dataset.presetName || 'Wide Single Cam — Working (Test 2 profile)',
-    preset_version: $('presetLabel').dataset.presetVersion || 'v1',
+    preset_name: $('presetLabel')?.dataset.presetName || 'Wide Single Cam — Working (Test 2 profile)',
+    preset_version: $('presetLabel')?.dataset.presetVersion || 'v1',
     clicks: state.clicks,
   };
 }
@@ -507,11 +532,11 @@ async function save(){
 async function run(){
   const jid = currentJobId();
   if(!jid) return;
-  if($('verifyMode').value === 'on'){
+  if(readValue('verifyMode', 'off') === 'on'){
     const ok = confirm('Verify mode will not create clips/combined video. Continue?\nCancel = Turn off verify + run');
     if(!ok){ $('verifyMode').value = 'off'; refreshHelp(); }
   }
-  if (state.clicks.length < 1 && !$('skipSeeding').checked){
+  if (state.clicks.length < 1 && !readChecked('skipSeeding', false)){
     alert('Add at least one seed click or check Skip seeding before running.');
     return;
   }
@@ -763,36 +788,52 @@ function startPolling(){
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
-  $('btnCreate').onclick = createJob;
-  $('btnUpload').onclick = upload;
-  $('btnSave').onclick = save;
-  $('btnRun').onclick = run;
-  $('btnCancel').onclick = cancel;
-  $('btnClear').onclick = clearJob;
-  $('btnResetSettings').onclick = resetSettings;
-  $('btnClearClicks').onclick = clearSeedClicks;
-  $('btnUndoClick').onclick = undoSeedClick;
-  $('cameraMode').onchange = applyPreset;
-  $('videoType').onchange = () => {
+  const bindClick = (id, handler) => {
+    const el = $(id);
+    if (el) el.onclick = handler;
+  };
+  const bindChange = (id, handler) => {
+    const el = $(id);
+    if (el) el.onchange = handler;
+  };
+
+  bindClick('btnCreate', createJob);
+  bindClick('btnUpload', upload);
+  bindClick('btnSave', save);
+  bindClick('btnRun', run);
+  bindClick('btnCancel', cancel);
+  bindClick('btnClear', clearJob);
+  bindClick('btnResetSettings', resetSettings);
+  bindClick('btnClearClicks', clearSeedClicks);
+  bindClick('btnUndoClick', undoSeedClick);
+
+  bindChange('cameraMode', applyPreset);
+  bindChange('videoType', () => {
     if (!confirm('This will overwrite Advanced settings.')) { return; }
-    applyVideoTypePreset($('videoType').value);
+    applyVideoTypePreset(readValue('videoType', DEFAULT_SETUP.video_type));
     loadSavedSetupOrDefaults();
     persistSetup();
-  };
-  $('trackingMode').onchange = refreshHelp;
-  $('verifyMode').onchange = refreshHelp;
-  $('skipSeeding').onchange = updateRunButtonState;
-  $('vid').addEventListener('click', registerSeedClick);
-  $('vid').addEventListener('loadedmetadata', drawClickMarkers);
-  $('vid').addEventListener('seeked', drawClickMarkers);
+  });
+  bindChange('trackingMode', refreshHelp);
+  bindChange('verifyMode', refreshHelp);
+  bindChange('skipSeeding', updateRunButtonState);
+
+  const vid = $('vid');
+  if (vid) {
+    vid.addEventListener('click', registerSeedClick);
+    vid.addEventListener('loadedmetadata', drawClickMarkers);
+    vid.addEventListener('seeked', drawClickMarkers);
+  }
   window.addEventListener('resize', drawClickMarkers);
   applyPreset();
   applyVideoTypePreset('wide_single_cam_working_v1');
   loadSavedSetupOrDefaults();
   document.querySelectorAll('input, select').forEach((el) => {
     if(el.id === 'file') return;
-    el.addEventListener('change', persistSetup);
-    el.addEventListener('input', persistSetup);
+    if (el) {
+      el.addEventListener('change', persistSetup);
+      el.addEventListener('input', persistSetup);
+    }
   });
 
   const existingJobId = localStorage.getItem('shiftclipper.jobId');
