@@ -2787,6 +2787,11 @@ def process_job(job_id: str) -> Dict[str, Any]:
             cur.save_meta()
         log.info("job_id=%s stage=%s progress=%s message=%s", job_id, stage_name, progress, message, extra={"job_id": job_id, "stage": stage_name})
 
+    def touch_stage(stage_name: str | None = None):
+        if stage_name:
+            stage["name"] = stage_name
+        stage["updated"] = time.time()
+
     def cancel_check() -> bool:
         if not meta_path.exists():
             return False
@@ -2837,6 +2842,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
             if cancel_check():
                 raise RuntimeError("cancelled")
             if stage["stalled"]:
+                if stage.get("name") == "combined":
+                    return
                 raise RuntimeError(f"Stalled in {stage['name']}")
             pct = int(min(70, 10 + (frame_idx / max(1, total)) * 60))
             extra = {"perf": perf} if perf else {}
@@ -2945,11 +2952,22 @@ def process_job(job_id: str) -> Dict[str, Any]:
             else:
                 try:
                     write_status("processing", "combined", 92, "Combining video")
+                    touch_stage("combined")
+                    last_combined_write = 0.0
+
+                    def combined_heartbeat():
+                        nonlocal last_combined_write
+                        touch_stage("combined")
+                        now = time.time()
+                        if now - last_combined_write >= 5.0:
+                            write_status("processing", "combined", 95, "Combining video")
+                            last_combined_write = now
+
                     combined_path = str(job_dir / "combined.mp4")
                     concat_clips_with_heartbeat(
                         manifest_clips,
                         combined_path,
-                        heartbeat=lambda: write_status("processing", "combined", 95, "Combining video"),
+                        heartbeat=combined_heartbeat,
                         cancel_check=cancel_check,
                     )
                     write_status("processing", "combined", 98, "Combining video")
@@ -3046,7 +3064,11 @@ def process_job(job_id: str) -> Dict[str, Any]:
             terminal_message = "combined skipped: no clips"
 
         if stage["stalled"]:
-            raise RuntimeError(f"Stalled in {stage['name']}")
+            if stage.get("name") == "combined":
+                write_status("done", "done", 100, "Processing complete (combined skipped: watchdog stall)")
+                stage["stalled"] = False
+            else:
+                raise RuntimeError(f"Stalled in {stage['name']}")
 
         write_status(terminal_status, terminal_stage, 100, terminal_message)
         meta.update({
