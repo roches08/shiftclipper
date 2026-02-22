@@ -608,6 +608,24 @@ def test_locked_provisional_disallowed_does_not_end_active_clip():
     assert present_prev is True
 
 
+
+
+def test_locked_continuity_does_not_extend_past_grace_with_lost_timeout():
+    keep, grace_start, grace_active = _locked_clip_continuity_active(
+        state="LOCKED",
+        lock_state="CONFIRMED",
+        identity_score=0.2,
+        unlock_threshold=0.33,
+        t=12.0,
+        locked_grace_start=10.0,
+        locked_grace_seconds=0.75,
+        lost_since=10.2,
+        lost_timeout=6.0,
+    )
+
+    assert keep is False
+    assert grace_start == 10.0
+    assert grace_active is False
 def test_locked_continuity_uses_grace_when_lost_timeout_disabled():
     keep, grace_start, grace_active = _locked_clip_continuity_active(
         state="LOCKED",

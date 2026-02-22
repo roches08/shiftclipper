@@ -416,8 +416,7 @@ def _locked_clip_continuity_active(
         return True, None, False
     grace_start = t if locked_grace_start is None else locked_grace_start
     grace_active = (t - grace_start) < max(0.0, locked_grace_seconds)
-    within_lost_timeout = bool(lost_since is not None and (t - lost_since) < max(0.0, lost_timeout))
-    return grace_active or within_lost_timeout, grace_start, grace_active
+    return grace_active, grace_start, grace_active
 
 
 def _clamp_segment_window(start_time: float, end_time: float, video_duration: float) -> Optional[Tuple[float, float]]:
@@ -2215,6 +2214,45 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             identity_score = _clamp01(float(best["score"])) if best else 0.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             chosen_id = best.get("track_id") if best else None
+            if (
+                state == "LOCKED"
+                and lock_state == "CONFIRMED"
+                and identity_score < unlock_threshold
+            ):
+                grace_anchor = t if locked_grace_start is None else locked_grace_start
+                grace_expired = (t - grace_anchor) >= max(0.0, locked_grace_seconds)
+                if grace_expired:
+                    timeline.append({
+                        "t": t,
+                        "event": "lock_released",
+                        "from": "CONFIRMED",
+                        "to": "LOST",
+                        "reason": "identity_below_unlock_threshold",
+                        "identity_score": identity_score,
+                        "unlock_threshold": unlock_threshold,
+                        "locked_grace_seconds": locked_grace_seconds,
+                        "track_id": chosen_id,
+                    })
+                    timeline.append({
+                        "t": t,
+                        "event": "lock_state_transition",
+                        "from": "CONFIRMED",
+                        "to": "LOST",
+                        "reason": "identity_below_unlock_threshold",
+                        "identity_score": identity_score,
+                        "unlock_threshold": unlock_threshold,
+                        "locked_grace_seconds": locked_grace_seconds,
+                        "track_id": chosen_id,
+                    })
+                    state = "LOST"
+                    lock_state = "SEARCHING"
+                    provisional_since = None
+                    lost_start_time = t
+                    lost_since = t
+                    reacquire_until = t + max(0.0, reacquire_window_seconds)
+                    reacquire_hits.clear()
+                    reacquire_failed_logged = False
+
             provisional_age = max(0.0, t - provisional_since) if provisional_since is not None else 0.0
             provisional_clip_ready = bool(
                 state == "LOCKED"
@@ -2234,26 +2272,6 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             (state == "LOCKED" and chosen_id is not None)
             or locked_recent_seen
             )
-            clip_emit_allowed = bool(
-                (
-                    state == "LOCKED"
-                    and chosen_id is not None
-                    and identity_score >= clip_score_threshold
-                    and (lock_state == "CONFIRMED" or allow_unconfirmed)
-                )
-                or provisional_clip_ready
-            )
-            base_gate = (
-                clip_emit_allowed
-            )
-            if base_gate and gate_hold_start is None:
-                gate_hold_start = t
-            elif not base_gate:
-                gate_hold_start = None
-            gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= min_track_seconds)
-            if provisional_clip_ready:
-                gate_held = True
-            can_start_clip = bool(gate_held)
             keep_continuity, locked_grace_start, locked_grace_active = _locked_clip_continuity_active(
                 state=state,
                 lock_state=lock_state,
@@ -2270,6 +2288,28 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 or locked_recent_seen
                 or (state == "LOST" and lost_since is not None and (t - lost_since) < lost_timeout_window)
             )
+            unlock_gate_open = bool(identity_score >= unlock_threshold or locked_grace_active)
+            clip_emit_allowed = bool(
+                (
+                    state == "LOCKED"
+                    and chosen_id is not None
+                    and identity_score >= clip_score_threshold
+                    and unlock_gate_open
+                    and (lock_state == "CONFIRMED" or allow_unconfirmed)
+                )
+                or provisional_clip_ready
+            )
+            base_gate = (
+                clip_emit_allowed
+            )
+            if base_gate and gate_hold_start is None:
+                gate_hold_start = t
+            elif not base_gate:
+                gate_hold_start = None
+            gate_held = bool(base_gate and gate_hold_start is not None and (t - gate_hold_start) >= min_track_seconds)
+            if provisional_clip_ready:
+                gate_held = True
+            can_start_clip = bool(gate_held)
             present = can_start_clip or bool(present_prev and continuity_allowed)
             dropout_grace_active = bool(state == "LOCKED" and locked_recent_seen and best is None)
             reid_gate_required = bool(params.reid_enable and locked_reid_embedding is not None and state in {"SEARCH", "LOST", "LOCKED"})
@@ -2548,6 +2588,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 timeline.append({"t": t, "event": "state_transition", "kind": "lock_state", "from": prev_lock_state, "to": lock_state})
                 if prev_lock_state == "PROVISIONAL" and lock_state == "CONFIRMED":
                     timeline.append({"t": t, "event": "lock_state_transition", "from": "PROVISIONAL", "to": "CONFIRMED", "reason": "promotion"})
+                if prev_lock_state == "CONFIRMED" and state == "LOST":
+                    timeline.append({"t": t, "event": "lock_state_transition", "from": "CONFIRMED", "to": "LOST", "reason": "lock_released"})
                 if prev_lock_state == "CONFIRMED" and lock_state == "SEARCHING":
                     timeline.append({"t": t, "event": "lock_state_transition", "from": "CONFIRMED", "to": "SEARCHING", "reason": "lock_lost_or_reid_gate"})
 
