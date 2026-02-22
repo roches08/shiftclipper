@@ -51,6 +51,7 @@ log = logging.getLogger("worker")
 DEBUG_MODE = os.getenv("WORKER_DEBUG", "0") == "1"
 HEARTBEAT_SECONDS = float(os.getenv("WORKER_HEARTBEAT_SECONDS", "5"))
 STALL_TIMEOUT_S = float(os.getenv("WORKER_STALL_TIMEOUT_SECONDS", "120"))
+COMBINE_STALL_TIMEOUT_S = float(os.getenv("WORKER_COMBINE_STALL_TIMEOUT_SECONDS", "900"))
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 JOBS_DIR = Path(os.getenv("JOBS_DIR", str(BASE_DIR / "data" / "jobs"))).resolve()
@@ -776,7 +777,7 @@ def concat_clips_with_heartbeat(paths: List[str], out_path: str, heartbeat: Call
             f.write(f"file '{p}'\n")
 
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path]
-    proc = subprocess.Popen(cmd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
 
     while proc.poll() is None:
         if cancel_check and cancel_check():
@@ -2756,7 +2757,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
     def watchdog():
         while not stop_watchdog:
             time.sleep(2)
-            if time.time() - stage["updated"] > STALL_TIMEOUT_S:
+            timeout_s = COMBINE_STALL_TIMEOUT_S if stage.get("name") == "combined" else STALL_TIMEOUT_S
+            if time.time() - stage["updated"] > timeout_s:
                 stage["stalled"] = True
                 return
 

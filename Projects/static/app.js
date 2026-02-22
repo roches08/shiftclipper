@@ -4,23 +4,27 @@ function $(id) {
     || document.getElementById(id.replaceAll('-', '_'));
 }
 
-function readChecked(id, fallback = false) {
+function getChecked(id, fallback = false) {
   const el = $(id);
   if (!el) return fallback;
   return !!el.checked;
 }
 
-function readValue(id, fallback = '') {
+function getValue(id, fallback = '') {
   const el = $(id);
   if (!el) return fallback;
   return (el.value ?? fallback);
 }
 
-function readNumber(id, fallback = 0) {
-  const v = readValue(id, '');
-  const n = Number(v);
+function getNumber(id, fallback = 0) {
+  const v = getValue(id, '');
+  const n = parseFloat(v);
   return Number.isFinite(n) ? n : fallback;
 }
+
+const readChecked = getChecked;
+const readValue = getValue;
+const readNumber = getNumber;
 const state = {
   jobId: null,
   clicks: [],
@@ -434,30 +438,30 @@ async function upload(){
 }
 
 function payload(){
-  const toNumber = (id, fallback = 0) => readNumber(id, fallback);
-  const toInt = (id, fallback = 0) => Math.trunc(readNumber(id, fallback));
-  const jerseyColor = readValue('jerseyColor', '#000000');
+  const toNumber = (id, fallback = 0) => getNumber(id, fallback);
+  const toInt = (id, fallback = 0) => Math.trunc(getNumber(id, fallback));
+  const jerseyColor = getValue('jerseyColor', '#000000');
   const jerseyColorHex = /^#[0-9a-fA-F]{6}$/.test(jerseyColor) ? jerseyColor : '#000000';
   const jerseyRgbHex = jerseyColorHex.replace('#', '');
   return {
-    video_type: readValue('videoType', DEFAULT_SETUP.video_type),
-    camera_mode: readValue('cameraMode', 'broadcast_wide'),
-    tracking_mode: readValue('trackingMode', 'clip'),
-    verify_mode: readValue('verifyMode', 'off') === 'on',
-    skip_seeding: readChecked('skipSeeding', false),
-    player_number: readValue('playerNumber', ''),
+    video_type: getValue('videoType', DEFAULT_SETUP.video_type),
+    camera_mode: getValue('cameraMode', 'broadcast_wide'),
+    tracking_mode: getValue('trackingMode', 'clip'),
+    verify_mode: getValue('verifyMode', 'off') === 'on',
+    skip_seeding: getChecked('skipSeeding', false),
+    player_number: getValue('playerNumber', ''),
     jersey_color: jerseyColorHex,
     jersey_color_hex: jerseyColorHex,
-    opponent_color: readValue('opponentColor', '#000000'),
+    opponent_color: getValue('opponentColor', '#000000'),
     jersey_color_rgb: (() => ({ r: parseInt(jerseyRgbHex.slice(0,2),16), g: parseInt(jerseyRgbHex.slice(2,4),16), b: parseInt(jerseyRgbHex.slice(4,6),16) }))(),
     color_tolerance: toInt('colorTolerance'),
     extend_sec: toNumber('extendSec'),
     detect_stride: toInt('detectStride'),
     yolo_imgsz: toInt('yoloImgsz'),
     yolo_batch: toInt('yoloBatch'),
-    tracker_type: readValue('trackerType', 'bytetrack') || 'bytetrack',
+    tracker_type: getValue('trackerType', 'bytetrack') || 'bytetrack',
     ocr_min_conf: toNumber('ocrMinConf'),
-    ocr_disable: readChecked('ocrDisable', false),
+    ocr_disable: getChecked('ocrDisable', false),
     ocr_every_n_frames: toInt('ocrEveryNFrames'),
     ocr_veto_conf: toNumber('ocrVetoConf'),
     ocr_veto_seconds: toNumber('ocrVetoSeconds'),
@@ -474,9 +478,9 @@ function payload(){
     locked_grace_seconds: toNumber('lockedGraceSeconds'),
     reacquire_max_sec: toNumber('reacquireMaxSec'),
     loss_timeout_sec: toNumber('lossTimeoutSec'),
-    allow_bench_reacquire: readChecked('allowBenchReacquire', false),
-    allow_unconfirmed_clips: readChecked('allowUnconfirmedClips', false),
-    allow_seed_clips: readChecked('allowSeedClips', true),
+    allow_bench_reacquire: getChecked('allowBenchReacquire', false),
+    allow_unconfirmed_clips: getChecked('allowUnconfirmedClips', false),
+    allow_seed_clips: getChecked('allowSeedClips', true),
     min_track_seconds: toNumber('minTrack'),
     min_clip_seconds: toNumber('minClipSeconds'),
     seed_lock_seconds: toNumber('seedLockSeconds'),
@@ -485,22 +489,22 @@ function payload(){
     seed_bonus: toNumber('seedBonus'),
     seed_window_s: toNumber('seedWindowS'),
     max_clip_len_sec: toNumber('maxClipLenSec'),
-    cold_lock_mode: readValue('coldLockMode', 'require_seed'),
+    cold_lock_mode: getValue('coldLockMode', 'require_seed'),
     cold_lock_reid_min_similarity: toNumber('coldLockReidMinSimilarity'),
     cold_lock_margin_min: toNumber('coldLockMarginMin'),
     cold_lock_max_seconds: toNumber('coldLockMaxSeconds'),
     clicks_count: state.clicks.length,
     bench_zone_ratio: toNumber('benchZone'),
-    debug_overlay: readChecked('debugOverlay', false),
-    debug_timeline: readChecked('debugTimeline', true),
-    generate_combined: readChecked('generateCombined', true),
-    transcode_enabled: readChecked('transcodeEnabled', false),
+    debug_overlay: getChecked('debugOverlay', false),
+    debug_timeline: getChecked('debugTimeline', true),
+    generate_combined: getChecked('generateCombined', true),
+    transcode_enabled: getChecked('transcodeEnabled', false),
     transcode_scale_max: toInt('transcodeScaleMax'),
-    transcode_fps: readValue('transcodeFps', '') ? toInt('transcodeFps') : null,
-    transcode_deinterlace: readChecked('transcodeDeinterlace', true),
-    transcode_denoise: readChecked('transcodeDenoise', false),
-    reid_enable: readChecked('reidEnable', true),
-    reid_model: readValue('reidModel', ''),
+    transcode_fps: getValue('transcodeFps', '') ? toInt('transcodeFps') : null,
+    transcode_deinterlace: getChecked('transcodeDeinterlace', true),
+    transcode_denoise: getChecked('transcodeDenoise', false),
+    reid_enable: getChecked('reidEnable', true),
+    reid_model: getValue('reidModel', ''),
     reid_every_n_frames: toInt('reidEveryNFrames'),
     reid_weight: toNumber('reidWeight'),
     reid_min_sim: toNumber('reidMinSim'),
@@ -508,7 +512,7 @@ function payload(){
     reid_min_px: toInt('reidMinPx'),
     reid_sharpness_threshold: toNumber('reidSharpnessThreshold'),
     reid_batch: toInt('reidBatch'),
-    reid_device: readValue('reidDevice', 'cuda:0'),
+    reid_device: getValue('reidDevice', 'cuda:0'),
     reid_fail_policy: 'disable',
     reid_auto_download: true,
     reid_weights_path: REID_WEIGHTS_DEFAULT_PATH,
