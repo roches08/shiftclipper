@@ -196,7 +196,21 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reacquire_max_sec": _as_float(src, "reacquire_max_sec", _as_float(src, "REACQUIRE_MAX_SEC", 2.0)),
         "reacquire_confirm_frames": _as_int(src, "reacquire_confirm_frames", _as_int(src, "REACQUIRE_CONFIRM_FRAMES", 5)),
         "reid_sim_threshold": _as_float(src, "reid_sim_threshold", _as_float(src, "REID_SIM_THRESHOLD", 0.35)),
-        "max_clip_len_sec": _as_float(src, "max_clip_len_sec", 90.0),
+        "max_clip_len_sec": _as_float(src, "max_clip_len_sec", 0.0),
+        "lock_threshold_normal": _as_float(src, "lock_threshold_normal", _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"])),
+        "lock_threshold_reacquire": _as_float(src, "lock_threshold_reacquire", _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"])),
+        "lock_threshold_seed": _as_float(src, "lock_threshold_seed", _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"])),
+        "cold_lock_mode": str(src.get("cold_lock_mode") or "allow").lower(),
+        "cold_lock_reid_min_similarity": _as_float(src, "cold_lock_reid_min_similarity", _as_float(src, "reid_min_sim", 0.5)),
+        "cold_lock_margin_min": _as_float(src, "cold_lock_margin_min", 0.08),
+        "cold_lock_max_seconds": _as_float(src, "cold_lock_max_seconds", 3.0),
+        "video_type": str(src.get("video_type") or "coach_cam"),
+        "preset_name": str(src.get("preset_name") or ""),
+        "preset_version": str(src.get("preset_version") or ""),
+        "config_source": str(src.get("config_source") or "ui"),
+        "config_ui_raw": src.get("config_ui_raw") or {},
+        "config_resolved": src.get("config_resolved") or {},
+        "config_hash": str(src.get("config_hash") or ""),
         "allow_bench_reacquire": bool(src.get("allow_bench_reacquire", False)),
         "edge_margin_px": _as_float(src, "edge_margin_px", 2.0),
         "reid_every_n_frames": max(1, _as_int(src, "reid_every_n_frames", 5)),
@@ -222,4 +236,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         setup["reid_weights_path"] = DEFAULT_REID_WEIGHTS_PATH
     if not str(setup["reid_weights_url"]).startswith(("http://", "https://")):
         setup["reid_weights_url"] = DEFAULT_REID_WEIGHTS_URL
+
+    if setup["cold_lock_mode"] not in {"allow", "block", "require_seed"}:
+        setup["cold_lock_mode"] = "allow"
     return setup

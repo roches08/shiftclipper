@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import subprocess
 import shutil
+import hashlib
 
 import redis
 from rq import Queue
@@ -429,13 +430,13 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
 
     for nm in [
         "score_lock_threshold", "score_unlock_threshold", "reacquire_score_lock_threshold",
-        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf", "swap_guard_bonus", "reid_weight", "reid_min_sim", "reid_crop_expand",
+        "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf", "swap_guard_bonus", "reid_weight", "reid_min_sim", "reid_crop_expand", "lock_threshold_normal", "lock_threshold_reacquire", "lock_threshold_seed", "cold_lock_reid_min_similarity", "cold_lock_margin_min",
     ]:
         _check_01(nm)
 
     for nm in [
         "lost_timeout", "reacquire_window_seconds", "gap_merge_seconds", "lock_seconds_after_confirm",
-        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds", "locked_grace_seconds",
+        "min_track_seconds", "min_clip_seconds", "seed_lock_seconds", "seed_window_s", "ocr_veto_seconds", "swap_guard_seconds", "locked_grace_seconds", "max_clip_len_sec", "cold_lock_max_seconds",
         "reid_every_n_frames", "reid_sharpness_threshold",
     ]:
         _check_non_negative(nm)
@@ -448,6 +449,9 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="reid_min_px must be >= 1")
     if "reid_model" in payload and payload.get("reid_model") not in {"osnet_x0_25", "osnet_x1_0"}:
         raise HTTPException(status_code=400, detail="reid_model must be one of: osnet_x0_25, osnet_x1_0")
+
+    if "cold_lock_mode" in payload and payload.get("cold_lock_mode") not in {"allow", "block", "require_seed"}:
+        raise HTTPException(status_code=400, detail="cold_lock_mode must be one of: allow, block, require_seed")
 
     if "detect_stride" in payload and int(payload["detect_stride"]) < 1:
         raise HTTPException(status_code=400, detail="detect_stride must be >= 1")
@@ -463,8 +467,20 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    _validate_setup_payload(payload or {})
+    payload = payload or {}
+    _validate_setup_payload(payload)
     setup = normalize_setup(payload)
+    config_resolved = dict(setup)
+    config_hash = hashlib.sha256(json.dumps(config_resolved, sort_keys=True).encode("utf-8")).hexdigest()
+    setup.update({
+        "video_type": str(payload.get("video_type") or setup.get("video_type") or "coach_cam"),
+        "preset_name": str(payload.get("preset_name") or setup.get("preset_name") or ""),
+        "preset_version": str(payload.get("preset_version") or setup.get("preset_version") or ""),
+        "config_source": "ui",
+        "config_ui_raw": payload,
+        "config_resolved": config_resolved,
+        "config_hash": config_hash,
+    })
     write_json(jd / "setup.json", setup)
 
     set_status(
@@ -483,7 +499,12 @@ def get_setup(job_id: str):
     jd = job_dir(job_id)
     if not jd.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    setup = read_json(jd / "setup.json", {})
+    setup_payload = read_json(jd / "setup.json", {})
+    setup = normalize_setup(setup_payload.get("config_resolved") or setup_payload)
+    for k in ("video_type", "preset_name", "preset_version", "config_source", "config_ui_raw", "config_hash"):
+        if k in setup_payload:
+            setup[k] = setup_payload[k]
+    setup["config_resolved"] = dict(setup)
     return {"job_id": job_id, "setup": setup}
 
 
@@ -515,12 +536,19 @@ def run_job(job_id: str):
         )
         raise HTTPException(status_code=400, detail="Missing input video")
 
-    setup = read_json(jd / "setup.json", {})
+    setup_payload = read_json(jd / "setup.json", {})
+    setup = normalize_setup(setup_payload.get("config_resolved") or setup_payload)
+    for k in ("video_type", "preset_name", "preset_version", "config_source", "config_ui_raw", "config_hash"):
+        if k in setup_payload:
+            setup[k] = setup_payload[k]
+    setup["config_resolved"] = dict(setup)
     has_clicks = bool((setup.get("clicks") or []))
     verify_mode = bool(setup.get("verify_mode", False))
     skip_seeding = bool(setup.get("skip_seeding", False))
     if not has_clicks and not verify_mode and not skip_seeding:
         raise HTTPException(status_code=400, detail="At least one player seed click is required unless verify mode or skip seeding is enabled")
+
+    write_json(jd / "setup.json", setup)
 
     if meta.get("cancel_requested"):
         meta["cancel_requested"] = False
