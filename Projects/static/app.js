@@ -508,7 +508,7 @@ function payload(){
     bench_zone_ratio: toNumber('benchZone'),
     debug_overlay: getChecked('debugOverlay', false),
     debug_timeline: getChecked('debugTimeline', true),
-    generate_combined: getChecked('generateCombined', true),
+    generate_combined: getChecked('generateCombined', false),
     transcode_enabled: getChecked('transcodeEnabled', false),
     transcode_scale_max: toInt('transcodeScaleMax'),
     transcode_fps: getValue('transcodeFps', '') ? toInt('transcodeFps') : null,
