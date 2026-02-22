@@ -13,7 +13,7 @@ from fractions import Fraction
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from rq import get_current_job
@@ -764,6 +764,34 @@ def concat_clips(paths: List[str], out_path: str) -> None:
         raise FFmpegError(cmd, proc.returncode, err)
     if not Path(out_path).exists() or Path(out_path).stat().st_size == 0:
         err = (proc.stderr or proc.stdout or "ffmpeg produced no output").strip()
+        raise RuntimeError(f"ffmpeg combine failed: output not created at {out_path}. stderr={err}")
+
+
+def concat_clips_with_heartbeat(paths: List[str], out_path: str, heartbeat: Callable[[], None] | None = None, cancel_check: Callable[[], bool] | None = None) -> None:
+    if not paths:
+        return
+    lst = out_path + ".txt"
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in paths:
+            f.write(f"file '{p}'\n")
+
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    while proc.poll() is None:
+        if cancel_check and cancel_check():
+            proc.kill()
+            raise RuntimeError("cancelled")
+        if heartbeat:
+            heartbeat()
+        time.sleep(0.75)
+
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
+        err = (stderr or stdout or "").strip()
+        raise FFmpegError(cmd, int(proc.returncode or 1), err)
+    if not Path(out_path).exists() or Path(out_path).stat().st_size == 0:
+        err = (stderr or stdout or "ffmpeg produced no output").strip()
         raise RuntimeError(f"ffmpeg combine failed: output not created at {out_path}. stderr={err}")
 
 
@@ -2904,46 +2932,41 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "clips": clip_paths,
         }
         data["clips_manifest"] = clips_manifest
+        (job_dir / "clips_manifest.json").write_text(json.dumps(clips_manifest, indent=2))
 
         combined_path = None
         combined_url = None
         clips_manifest = data.get("clips_manifest")
-        clips_count = int((clips_manifest or {}).get("count", len(clip_paths)))
+        manifest_clips = list((clips_manifest or {}).get("clips") or clip_paths)
+        clips_count = int((clips_manifest or {}).get("count", len(manifest_clips)))
         if bool(setup.get("generate_combined", True)):
             if not clips_manifest or clips_count == 0:
                 write_status("processing", "combined", 100, "combined skipped: no clips")
             else:
-                write_status("processing", "combined", 92, "Combining video")
-                combined_path = str(job_dir / "combined.mp4")
-
-                done = False
-                heartbeat_error = None
-
-                def _combine_worker():
-                    nonlocal done, heartbeat_error
-                    try:
-                        concat_clips(clip_paths, combined_path)
-                    except Exception as exc:
-                        heartbeat_error = exc
-                    finally:
-                        done = True
-
-                combine_thread = threading.Thread(target=_combine_worker, daemon=True)
-                combine_thread.start()
-                while not done:
-                    if cancel_check():
-                        raise RuntimeError("cancelled")
-                    if stage["stalled"]:
-                        raise RuntimeError(f"Stalled in {stage['name']}")
-                    write_status("processing", "combined", 95, "Combining video")
-                    time.sleep(min(HEARTBEAT_SECONDS, 2.0))
-                combine_thread.join()
-                if heartbeat_error:
-                    raise heartbeat_error
-
-                write_status("processing", "combined", 98, "Combining video")
-                if Path(combined_path).exists():
-                    combined_url = f"/data/jobs/{job_id}/combined.mp4"
+                try:
+                    write_status("processing", "combined", 92, "Combining video")
+                    combined_path = str(job_dir / "combined.mp4")
+                    concat_clips_with_heartbeat(
+                        manifest_clips,
+                        combined_path,
+                        heartbeat=lambda: write_status("processing", "combined", 95, "Combining video"),
+                        cancel_check=cancel_check,
+                    )
+                    write_status("processing", "combined", 98, "Combining video")
+                    if Path(combined_path).exists():
+                        combined_url = f"/data/jobs/{job_id}/combined.mp4"
+                    else:
+                        raise RuntimeError(f"combined output missing at {combined_path}")
+                except Exception as combine_exc:
+                    combined_path = None
+                    combined_url = None
+                    write_status("processing", "combined", 100, f"combined skipped: {str(combine_exc)[:240]}")
+                    log.warning(
+                        "job_id=%s combined skipped: %s",
+                        job_id,
+                        combine_exc,
+                        extra={"job_id": job_id, "stage": "combined"},
+                    )
 
         checked_paths = [str(Path(c["path"])) for c in clips]
         if combined_path:

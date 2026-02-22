@@ -206,7 +206,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "cold_lock_reid_min_similarity": _as_float(src, "cold_lock_reid_min_similarity", _as_float(src, "reid_min_sim", 0.5)),
         "cold_lock_margin_min": _as_float(src, "cold_lock_margin_min", 0.08),
         "cold_lock_max_seconds": _as_float(src, "cold_lock_max_seconds", 3.0),
-        "video_type": str(src.get("video_type") or "coach_cam"),
+        "video_type": str(src.get("video_type") or "wide_single_cam_working_v1"),
         "preset_name": str(src.get("preset_name") or ""),
         "preset_version": str(src.get("preset_version") or ""),
         "config_source": str(src.get("config_source") or "ui"),

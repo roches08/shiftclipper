@@ -1,7 +1,24 @@
 (function initShiftClipperPresets(global) {
   const PRESET_VERSION = 'v1';
-  const VIDEO_TYPE_ORDER = ['coach_cam', 'wide_single_cam', 'broadcast'];
+  const DEFAULT_VIDEO_TYPE = 'wide_single_cam_working_v1';
+  const VIDEO_TYPE_ORDER = ['wide_single_cam_working_v1', 'coach_cam', 'wide_single_cam', 'broadcast'];
   const VIDEO_TYPE_PRESETS = {
+    wide_single_cam_working_v1: {
+      preset_name: 'Wide Single Cam — Working (Test 2 profile)',
+      preset_version: PRESET_VERSION,
+      values: {
+        video_type: 'wide_single_cam_working_v1', camera_mode: 'broadcast', tracking_mode: 'clip', extend_sec: 2, post_roll: 2, color_tolerance: 26,
+        detect_stride: 1, yolo_imgsz: 640, yolo_batch: 4, tracker_type: 'bytetrack', ocr_disable: false, ocr_every_n_frames: 12, ocr_min_conf: 0.2,
+        ocr_veto_conf: 0.92, ocr_veto_seconds: 1, lock_seconds_after_confirm: 4, gap_merge_seconds: 0.5, lost_timeout: 8, locked_grace_seconds: 0.75,
+        score_lock_threshold: 0.5, score_unlock_threshold: 0.44, reacquire_window_seconds: 14, reacquire_score_lock_threshold: 0.34, reacquire_max_sec: 2,
+        loss_timeout_sec: 1.5, min_track_seconds: 0.75, min_clip_seconds: 1, max_clip_len_sec: 0, seed_lock_seconds: 6, seed_iou_min: 0.12,
+        seed_dist_max: 0.22, seed_bonus: 1, seed_window_s: 12, lock_threshold_normal: 0.56, lock_threshold_reacquire: 0.36, lock_threshold_seed: 0.32,
+        cold_lock_mode: 'allow', cold_lock_reid_min_similarity: 0.62, cold_lock_margin_min: 0.02, cold_lock_max_seconds: 3, reid_enable: true,
+        reid_model: 'osnet_x0_25', reid_every_n_frames: 3, reid_weight: 0.55, reid_min_sim: 0.45, reid_crop_expand: 0.2, reid_min_px: 12,
+        reid_sharpness_threshold: 10, reid_batch: 16, reid_device: 'cuda:0', swap_guard_seconds: 10, swap_guard_bonus: 0.3,
+        allow_bench_reacquire: false, allow_unconfirmed_clips: false, allow_seed_clips: true, debug_overlay: false, debug_timeline: true, generate_combined: true,
+      },
+    },
     coach_cam: {
       preset_name: 'Coach Cam (Single-cam, stable)',
       preset_version: PRESET_VERSION,
@@ -20,8 +37,8 @@
   };
 
   const deepCopy = (value) => (typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value)));
-  const getVideoTypePreset = (name) => deepCopy(VIDEO_TYPE_PRESETS[name] || VIDEO_TYPE_PRESETS.coach_cam);
-  const api = { PRESET_VERSION, VIDEO_TYPE_ORDER, VIDEO_TYPE_PRESETS, getVideoTypePreset, deepCopy };
+  const getVideoTypePreset = (name) => deepCopy(VIDEO_TYPE_PRESETS[name] || VIDEO_TYPE_PRESETS[DEFAULT_VIDEO_TYPE]);
+  const api = { PRESET_VERSION, DEFAULT_VIDEO_TYPE, VIDEO_TYPE_ORDER, VIDEO_TYPE_PRESETS, getVideoTypePreset, deepCopy };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   global.ShiftClipperPresets = api;
