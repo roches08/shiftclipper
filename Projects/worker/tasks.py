@@ -756,7 +756,15 @@ def concat_clips(paths: List[str], out_path: str) -> None:
     with open(lst, "w", encoding="utf-8") as f:
         for p in paths:
             f.write(f"file '{p}'\n")
-    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path])
+
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise FFmpegError(cmd, proc.returncode, err)
+    if not Path(out_path).exists() or Path(out_path).stat().st_size == 0:
+        err = (proc.stderr or proc.stdout or "ffmpeg produced no output").strip()
+        raise RuntimeError(f"ffmpeg combine failed: output not created at {out_path}. stderr={err}")
 
 
 @dataclass
@@ -2704,6 +2712,15 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "reid_disabled_due_to_error": reid_disabled_reason,
     }
 
+
+
+def _runtime_config_snapshot(setup: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        k: v
+        for k, v in setup.items()
+        if k not in {"config_ui_raw", "config_resolved", "config_hash"}
+    }
+
 def process_job(job_id: str) -> Dict[str, Any]:
     _ensure_dirs()
     cur = get_current_job()
@@ -2731,7 +2748,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
     for k in ("video_type", "preset_name", "preset_version", "config_source", "config_ui_raw", "config_hash"):
         if k in (raw_setup or {}):
             setup[k] = raw_setup[k]
-    setup["config_resolved"] = dict(setup)
+    setup["config_resolved"] = _runtime_config_snapshot(setup)
 
     def write_status(status, stage_name, progress, message, **extra):
         stage.update({"name": stage_name, "updated": time.time()})
@@ -2882,15 +2899,51 @@ def process_job(job_id: str) -> Dict[str, Any]:
             clip_progress = 70 + int((i / segment_count) * 20)
             write_status("processing", "clips", min(90, clip_progress), f"Creating clips ({i}/{segment_count})")
 
+        clips_manifest = {
+            "count": len(clip_paths),
+            "clips": clip_paths,
+        }
+        data["clips_manifest"] = clips_manifest
+
         combined_path = None
         combined_url = None
-        if bool(setup.get("generate_combined", True)) and clip_paths:
-            write_status("processing", "combined", 92, "Combining video")
-            combined_path = str(job_dir / "combined.mp4")
-            concat_clips(clip_paths, combined_path)
-            write_status("processing", "combined", 98, "Combining video")
-            if Path(combined_path).exists():
-                combined_url = f"/data/jobs/{job_id}/combined.mp4"
+        clips_manifest = data.get("clips_manifest")
+        clips_count = int((clips_manifest or {}).get("count", len(clip_paths)))
+        if bool(setup.get("generate_combined", True)):
+            if not clips_manifest or clips_count == 0:
+                write_status("processing", "combined", 100, "combined skipped: no clips")
+            else:
+                write_status("processing", "combined", 92, "Combining video")
+                combined_path = str(job_dir / "combined.mp4")
+
+                done = False
+                heartbeat_error = None
+
+                def _combine_worker():
+                    nonlocal done, heartbeat_error
+                    try:
+                        concat_clips(clip_paths, combined_path)
+                    except Exception as exc:
+                        heartbeat_error = exc
+                    finally:
+                        done = True
+
+                combine_thread = threading.Thread(target=_combine_worker, daemon=True)
+                combine_thread.start()
+                while not done:
+                    if cancel_check():
+                        raise RuntimeError("cancelled")
+                    if stage["stalled"]:
+                        raise RuntimeError(f"Stalled in {stage['name']}")
+                    write_status("processing", "combined", 95, "Combining video")
+                    time.sleep(min(HEARTBEAT_SECONDS, 2.0))
+                combine_thread.join()
+                if heartbeat_error:
+                    raise heartbeat_error
+
+                write_status("processing", "combined", 98, "Combining video")
+                if Path(combined_path).exists():
+                    combined_url = f"/data/jobs/{job_id}/combined.mp4"
 
         checked_paths = [str(Path(c["path"])) for c in clips]
         if combined_path:
@@ -2965,7 +3018,9 @@ def process_job(job_id: str) -> Dict[str, Any]:
             terminal_stage = "done"
             terminal_message = "Run completed with no shifts detected."
         elif tracking_mode == "clip" and not clips and not combined_path:
-            raise RuntimeError("No clips created; see debug overlay/timeline (checked clips and combined outputs)")
+            terminal_status = "done"
+            terminal_stage = "done"
+            terminal_message = "combined skipped: no clips"
 
         if stage["stalled"]:
             raise RuntimeError(f"Stalled in {stage['name']}")
