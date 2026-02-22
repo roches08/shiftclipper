@@ -51,7 +51,7 @@ log = logging.getLogger("worker")
 DEBUG_MODE = os.getenv("WORKER_DEBUG", "0") == "1"
 HEARTBEAT_SECONDS = float(os.getenv("WORKER_HEARTBEAT_SECONDS", "5"))
 STALL_TIMEOUT_S = float(os.getenv("WORKER_STALL_TIMEOUT_SECONDS", "120"))
-COMBINE_STALL_TIMEOUT_S = float(os.getenv("WORKER_COMBINE_STALL_TIMEOUT_SECONDS", "3600"))
+COMBINE_STALL_TIMEOUT_S = float(os.getenv("WORKER_COMBINE_STALL_TIMEOUT_SECONDS", "7200"))
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 JOBS_DIR = Path(os.getenv("JOBS_DIR", str(BASE_DIR / "data" / "jobs"))).resolve()
@@ -2957,7 +2957,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
                     concat_clips_with_heartbeat(
                         manifest_clips,
                         combined_path,
-                        heartbeat=lambda: (touch_stage("combined"), write_status("processing", "combined", 95, "Combining video")),
+                        heartbeat=lambda: touch_stage("combined"),
                         cancel_check=cancel_check,
                     )
                     write_status("processing", "combined", 98, "Combining video")
