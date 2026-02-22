@@ -1019,6 +1019,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     shift_state = "OFF_ICE"
     present_prev = False
     timeline = list(reid_init_timeline_events)
+    timeline.append({"t": 0.0, "event": "config_header", "preset_name": setup.get("preset_name"), "preset_version": setup.get("preset_version"), "config_hash": setup.get("config_hash")})
     for seed in seed_clicks:
         timeline.append({
             "t": float(seed.get("t", 0.0)),
@@ -1561,12 +1562,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             prev_state = state
             prev_lock_state = lock_state
             reacquire_window_seconds = float(setup.get("reacquire_window_seconds", params.reacquire_window_seconds))
-            reacquire_threshold = float(setup.get("reacquire_score_lock_threshold", params.reacquire_score_lock_threshold))
-            score_lock_threshold = float(setup.get("score_lock_threshold", params.score_lock_threshold))
+            reacquire_threshold = float(setup.get("lock_threshold_reacquire", setup.get("reacquire_score_lock_threshold", params.reacquire_score_lock_threshold)))
+            score_lock_threshold = float(setup.get("lock_threshold_normal", setup.get("score_lock_threshold", params.score_lock_threshold)))
             swap_guard_seconds = max(0.0, float(setup.get("swap_guard_seconds", params.swap_guard_seconds)))
             swap_guard_bonus = max(0.0, float(setup.get("swap_guard_bonus", params.swap_guard_bonus)))
             lock_threshold = reacquire_threshold if t <= reacquire_until else score_lock_threshold
-            unlock_threshold = float(setup.get("score_unlock_threshold", params.score_unlock_threshold))
+            unlock_threshold = float(setup.get("lock_threshold_seed", setup.get("score_unlock_threshold", params.score_unlock_threshold)))
             allow_seed_relaxed_lock = bool(best and best.get("seed_match"))
             if allow_seed_relaxed_lock:
                 lock_threshold = min(lock_threshold, unlock_threshold)
@@ -1641,6 +1642,24 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             second_sim = float(reid_candidate_sims[1]) if len(reid_candidate_sims) > 1 else -1.0
             reid_hysteresis = float(reid_reacquire_hysteresis)
             winner_margin = (best_sim - second_sim) if second_sim >= 0.0 else float("inf")
+            cold_lock_mode = str(setup.get("cold_lock_mode", "allow")).lower()
+            cold_lock_reid_min_similarity = float(setup.get("cold_lock_reid_min_similarity", 0.5))
+            cold_lock_margin_min = float(setup.get("cold_lock_margin_min", 0.08))
+            cold_lock_max_seconds = max(0.0, float(setup.get("cold_lock_max_seconds", 3.0)))
+            lock_threshold_seed = float(setup.get("lock_threshold_seed", unlock_threshold))
+            seed_valid = bool(
+                in_seed_window
+                and seed_dist_ok
+                and seed_iou_ok
+                and best_sim >= cold_lock_reid_min_similarity
+                and winner_margin >= cold_lock_margin_min
+                and active_seed is not None
+                and (t - float(active_seed.get("t", 0.0))) <= max(seed_window_s, cold_lock_max_seconds)
+                and best is not None
+                and bool(best.get("seed_match"))
+                and _clamp01(float(best.get("score", -1.0))) >= lock_threshold_seed
+            )
+            cold_lock_blocked = False
             min_sim_effective = float(reid_min_sim_reacquire)
             search_reid_gate_ok = bool(best_sim >= reid_min_sim_reacquire)
             if state == "SEARCH":
@@ -1765,7 +1784,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             if state in {"SEARCH", "LOST"}:
                 strong_reid_reacquire = False
                 reacquire_reason = "threshold"
-                if best and sim_ok and not best.get("closeup_blocked", False):
+                if cold_lock_mode == "block":
+                    cold_lock_blocked = True
+                elif cold_lock_mode == "require_seed" and not seed_valid:
+                    cold_lock_blocked = True
+                if best and sim_ok and not best.get("closeup_blocked", False) and not cold_lock_blocked:
                     score_for_lock = _clamp01(float(best.get("score", -1.0)))
                     sim_for_lock = float(best.get("sim", -1.0))
                     bbox_sane = True
@@ -1811,9 +1834,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     confirm_frames = 0
                     reacquire_hits.clear()
                     state = "SEARCH"
-            elif best and sim_ok and not best.get("closeup_blocked", False) and _clamp01(float(best.get("score", -1.0))) >= lock_threshold:
-                state = "LOCKED"
-                should_lock_now = True
+            elif best and sim_ok and not best.get("closeup_blocked", False):
+                lock_threshold_normal = float(setup.get("lock_threshold_normal", lock_threshold))
+                score_now = _clamp01(float(best.get("score", -1.0)))
+                if score_now >= lock_threshold_normal and (cold_lock_mode == "allow" or seed_valid):
+                    state = "LOCKED"
+                    should_lock_now = True
+                elif cold_lock_mode in {"block", "require_seed"} and not seed_valid:
+                    cold_lock_blocked = True
 
             if should_lock_now:
                     if locked_track_id is not None and best["track_id"] != locked_track_id and best.get("motion", 0.0) < 0.15:
@@ -2433,6 +2461,12 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "min_sim_effective": min_sim_effective,
                 "hysteresis": reid_hysteresis,
                 "gate_ok": reid_gate_ok,
+                "lock_type": ("reacquire" if promote_from_reacquire else "seed" if promote_from_seed else "normal") if should_lock_now else "cold_blocked" if cold_lock_blocked else "normal",
+                "cold_lock_blocked": cold_lock_blocked,
+                "seed_valid": seed_valid,
+                "best_sim": best_sim,
+                "second_best_sim": second_sim,
+                "margin": winner_margin,
             })
 
             if present and not present_prev:
@@ -2650,7 +2684,11 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
     meta = json.loads(meta_path.read_text())
     raw_setup = json.loads(setup_path.read_text()) if setup_path.exists() else meta.get("setup", {})
-    setup = normalize_setup(raw_setup)
+    setup = normalize_setup((raw_setup or {}).get("config_resolved") or raw_setup)
+    for k in ("video_type", "preset_name", "preset_version", "config_source", "config_ui_raw", "config_hash"):
+        if k in (raw_setup or {}):
+            setup[k] = raw_setup[k]
+    setup["config_resolved"] = dict(setup)
 
     def write_status(status, stage_name, progress, message, **extra):
         stage.update({"name": stage_name, "updated": time.time()})

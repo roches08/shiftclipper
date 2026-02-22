@@ -49,6 +49,9 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["transcode_fps"] is None
     assert setup["transcode_deinterlace"] is True
     assert setup["transcode_denoise"] is False
+    assert setup["max_clip_len_sec"] == 0.0
+    assert setup["cold_lock_mode"] in {"allow", "block", "require_seed"}
+    assert "config_hash" in setup
 
 
 def test_setup_overrides_persist_and_worker_consumes_and_debug_reflects_values(tmp_path, monkeypatch):
@@ -100,6 +103,7 @@ def test_setup_overrides_persist_and_worker_consumes_and_debug_reflects_values(t
     assert captured["tracker_type"] == "bytetrack"
     assert debug_json["setup"]["score_lock_threshold"] == 0.45
     assert debug_json["setup"]["lost_timeout"] == 10.0
+    assert isinstance(job_json["setup"].get("config_hash"), str)
 
 
 def test_non_bytetrack_tracker_is_normalized_to_bytetrack(tmp_path, monkeypatch):
