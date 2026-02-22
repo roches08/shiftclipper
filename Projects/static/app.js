@@ -29,6 +29,7 @@ const { getVideoTypePreset } = window.ShiftClipperPresets;
 const REID_WEIGHTS_DEFAULT_PATH = '/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth';
 const REID_WEIGHTS_DEFAULT_URL = 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth';
 const SETUP_STORAGE_KEY = 'shiftclipper_setup';
+const SETUP_STORAGE_PREFIX = 'setup:';
 const DEFAULT_SETUP = {
   video_type: 'wide_single_cam_working_v1',
   score_lock_threshold: 0.50,
@@ -193,15 +194,25 @@ function applyVideoTypePreset(videoType){
   updatePresetLabel(preset.preset_name, preset.preset_version);
 }
 
+function getVideoTypeSetupKey(videoType){
+  return `${SETUP_STORAGE_PREFIX}${videoType || 'wide_single_cam_working_v1'}`;
+}
+
+function collectSetupFromUI(){
+  return payload();
+}
+
 function getSetupForStorage(){
-  const setup = payload();
+  const setup = collectSetupFromUI();
   delete setup.clicks;
   delete setup.clicks_count;
   return setup;
 }
 
 function persistSetup(){
-  localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(getSetupForStorage()));
+  const setup = getSetupForStorage();
+  localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(setup));
+  localStorage.setItem(getVideoTypeSetupKey(setup.video_type), JSON.stringify(setup));
 }
 
 function applySetupValues(setup){
@@ -242,9 +253,20 @@ function applySetupValues(setup){
   setValueIfDefined('coldLockReidMinSimilarity', setup.cold_lock_reid_min_similarity);
   setValueIfDefined('coldLockMarginMin', setup.cold_lock_margin_min);
   setValueIfDefined('coldLockMaxSeconds', setup.cold_lock_max_seconds);
+  setCheckedIfDefined('generateCombined', setup.generate_combined);
 }
 
 function loadSavedSetupOrDefaults(){
+  const selectedVideoType = $('videoType')?.value || DEFAULT_SETUP.video_type;
+  const scopedRaw = localStorage.getItem(getVideoTypeSetupKey(selectedVideoType));
+  if (scopedRaw){
+    try {
+      applySetupValues(JSON.parse(scopedRaw));
+      return;
+    } catch (_) {
+      localStorage.removeItem(getVideoTypeSetupKey(selectedVideoType));
+    }
+  }
   const raw = localStorage.getItem(SETUP_STORAGE_KEY);
   if(!raw){
     applySetupValues(DEFAULT_SETUP);
@@ -317,8 +339,22 @@ function updateProgressUi(status){
 async function createJob(){
   const r = await j('POST', '/jobs', { name: 'ui-job' });
   setJobId(r.job_id);
+  loadSavedSetupOrDefaults();
+  await saveSetupToServer();
   await loadSetup();
   await pollOnce();
+}
+
+async function saveSetupToServer(){
+  if (!state.jobId) return;
+  const response = await fetch(`/jobs/${state.jobId}/setup`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(collectSetupFromUI()),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
 }
 
 async function upload(){
@@ -416,6 +452,7 @@ function payload(){
     bench_zone_ratio: toNumber('benchZone'),
     debug_overlay: $('debugOverlay').checked,
     debug_timeline: $('debugTimeline').checked,
+    generate_combined: $('generateCombined').checked,
     transcode_enabled: $('transcodeEnabled').checked,
     transcode_scale_max: toInt('transcodeScaleMax'),
     transcode_fps: $('transcodeFps').value ? toInt('transcodeFps') : null,
@@ -623,6 +660,7 @@ async function loadSetup(){
     setCheckedIfDefined('ocrDisable', setup.ocr_disable);
     setCheckedIfDefined('debugOverlay', setup.debug_overlay);
     setCheckedIfDefined('debugTimeline', setup.debug_timeline);
+    setCheckedIfDefined('generateCombined', setup.generate_combined);
     setCheckedIfDefined('transcodeEnabled', setup.transcode_enabled);
     setValueIfDefined('transcodeScaleMax', setup.transcode_scale_max);
     setValueIfDefined('transcodeFps', setup.transcode_fps);
@@ -710,6 +748,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('videoType').onchange = () => {
     if (!confirm('This will overwrite Advanced settings.')) { return; }
     applyVideoTypePreset($('videoType').value);
+    loadSavedSetupOrDefaults();
     persistSetup();
   };
   $('trackingMode').onchange = refreshHelp;
