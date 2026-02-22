@@ -776,7 +776,7 @@ def concat_clips_with_heartbeat(paths: List[str], out_path: str, heartbeat: Call
             f.write(f"file '{p}'\n")
 
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out_path]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(cmd)
 
     while proc.poll() is None:
         if cancel_check and cancel_check():
@@ -786,13 +786,11 @@ def concat_clips_with_heartbeat(paths: List[str], out_path: str, heartbeat: Call
             heartbeat()
         time.sleep(0.75)
 
-    stdout, stderr = proc.communicate()
-    if proc.returncode != 0:
-        err = (stderr or stdout or "").strip()
-        raise FFmpegError(cmd, int(proc.returncode or 1), err)
+    rc = proc.wait()
+    if rc != 0:
+        raise FFmpegError(cmd, int(rc), "ffmpeg combine failed")
     if not Path(out_path).exists() or Path(out_path).stat().st_size == 0:
-        err = (stderr or stdout or "ffmpeg produced no output").strip()
-        raise RuntimeError(f"ffmpeg combine failed: output not created at {out_path}. stderr={err}")
+        raise RuntimeError(f"ffmpeg combine failed: output not created at {out_path}.")
 
 
 @dataclass
@@ -2842,8 +2840,6 @@ def process_job(job_id: str) -> Dict[str, Any]:
             if cancel_check():
                 raise RuntimeError("cancelled")
             if stage["stalled"]:
-                if stage.get("name") == "combined":
-                    return
                 raise RuntimeError(f"Stalled in {stage['name']}")
             pct = int(min(70, 10 + (frame_idx / max(1, total)) * 60))
             extra = {"perf": perf} if perf else {}
@@ -3064,11 +3060,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
             terminal_message = "combined skipped: no clips"
 
         if stage["stalled"]:
-            if stage.get("name") == "combined":
-                write_status("done", "done", 100, "Processing complete (combined skipped: watchdog stall)")
-                stage["stalled"] = False
-            else:
-                raise RuntimeError(f"Stalled in {stage['name']}")
+            raise RuntimeError(f"Stalled in {stage['name']}")
 
         write_status(terminal_status, terminal_stage, 100, terminal_message)
         meta.update({
