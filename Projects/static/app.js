@@ -30,7 +30,7 @@ const REID_WEIGHTS_DEFAULT_PATH = '/workspace/shiftclipper/Projects/models/reid/
 const REID_WEIGHTS_DEFAULT_URL = 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth';
 const SETUP_STORAGE_KEY = 'shiftclipper_setup';
 const DEFAULT_SETUP = {
-  video_type: 'coach_cam',
+  video_type: 'wide_single_cam_working_v1',
   score_lock_threshold: 0.50,
   score_unlock_threshold: 0.38,
   lock_threshold_normal: 0.50,
@@ -66,7 +66,7 @@ const DEFAULT_SETUP = {
   cold_lock_reid_min_similarity: 0.5,
   cold_lock_margin_min: 0.08,
   cold_lock_max_seconds: 3,
-  preset_name: 'Coach Cam (Single-cam, stable)',
+  preset_name: 'Wide Single Cam — Working (Test 2 profile)',
   preset_version: 'v1',
 };
 
@@ -140,40 +140,56 @@ function updatePresetLabel(name, version){
 function applyVideoTypePreset(videoType){
   const preset = getVideoTypePreset(videoType);
   const p = preset.values;
+  const val = (k, fallback) => (p[k] !== undefined ? p[k] : fallback);
   $('videoType').value = videoType;
-  $('scoreLockThreshold').value = p.score_lock_threshold;
-  $('scoreUnlockThreshold').value = p.score_unlock_threshold;
-  $('lockThresholdNormal').value = p.lock_threshold_normal;
-  $('lockThresholdReacquire').value = p.lock_threshold_reacquire;
-  $('lockThresholdSeed').value = p.lock_threshold_seed;
-  $('lostTimeout').value = p.lost_timeout;
-  $('reacquireWindowSeconds').value = p.reacquire_window_s;
-  $('reacquireScoreLockThreshold').value = p.reacquire_score_lock_threshold;
-  $('mergeGap').value = p.gap_merge_seconds;
-  $('extendSec').value = p.extend_sec;
-  $('allowBenchReacquire').checked = !!p.allow_bench_reacquire;
-  $('allowSeedClips').checked = !!p.allow_seed_clips;
-  $('seedLockSeconds').value = p.seed_lock_seconds;
-  $('seedIouMin').value = p.seed_iou_min;
-  $('seedDistMax').value = p.seed_dist_max;
-  $('seedBonus').value = p.seed_bonus;
-  $('seedWindowS').value = p.seed_window_s;
-  $('reidEnable').checked = !!p.reid_enabled;
-  $('reidModel').value = p.reid_model;
-  $('reidEveryNFrames').value = p.reid_every_n_frames;
-  $('reidWeight').value = p.reid_weight;
-  $('reidMinSim').value = p.reid_min_similarity;
-  $('reidCropExpand').value = p.reid_crop_expand;
-  $('reidBatch').value = p.reid_batch;
-  $('reidMinPx').value = p.reid_min_px;
-  $('reidSharpnessThreshold').value = p.reid_sharpness_threshold;
-  $('swapGuardSeconds').value = p.swap_guard_seconds;
-  $('swapGuardBonus').value = p.swap_guard_bonus;
-  $('coldLockMode').value = p.cold_lock_mode;
-  $('coldLockReidMinSimilarity').value = p.cold_lock_reid_min_similarity;
-  $('coldLockMarginMin').value = p.cold_lock_margin_min;
-  $('coldLockMaxSeconds').value = p.cold_lock_max_seconds;
-  $('maxClipLenSec').value = p.max_clip_len_sec;
+  $('scoreLockThreshold').value = val('score_lock_threshold', $('scoreLockThreshold').value);
+  $('scoreUnlockThreshold').value = val('score_unlock_threshold', $('scoreUnlockThreshold').value);
+  $('lockThresholdNormal').value = val('lock_threshold_normal', $('lockThresholdNormal').value);
+  $('lockThresholdReacquire').value = val('lock_threshold_reacquire', $('lockThresholdReacquire').value);
+  $('lockThresholdSeed').value = val('lock_threshold_seed', $('lockThresholdSeed').value);
+  $('lostTimeout').value = val('lost_timeout', $('lostTimeout').value);
+  $('reacquireWindowSeconds').value = val('reacquire_window_seconds', val('reacquire_window_s', $('reacquireWindowSeconds').value));
+  $('reacquireScoreLockThreshold').value = val('reacquire_score_lock_threshold', $('reacquireScoreLockThreshold').value);
+  $('mergeGap').value = val('gap_merge_seconds', $('mergeGap').value);
+  $('extendSec').value = val('extend_sec', $('extendSec').value);
+  $('allowBenchReacquire').checked = !!val('allow_bench_reacquire', $('allowBenchReacquire').checked);
+  $('allowSeedClips').checked = !!val('allow_seed_clips', $('allowSeedClips').checked);
+  $('seedLockSeconds').value = val('seed_lock_seconds', $('seedLockSeconds').value);
+  $('seedIouMin').value = val('seed_iou_min', $('seedIouMin').value);
+  $('seedDistMax').value = val('seed_dist_max', $('seedDistMax').value);
+  $('seedBonus').value = val('seed_bonus', $('seedBonus').value);
+  $('seedWindowS').value = val('seed_window_s', $('seedWindowS').value);
+  $('reidEnable').checked = !!val('reid_enable', val('reid_enabled', $('reidEnable').checked));
+  $('reidModel').value = val('reid_model', $('reidModel').value);
+  $('reidEveryNFrames').value = val('reid_every_n_frames', $('reidEveryNFrames').value);
+  $('reidWeight').value = val('reid_weight', $('reidWeight').value);
+  $('reidMinSim').value = val('reid_min_sim', val('reid_min_similarity', $('reidMinSim').value));
+  $('reidCropExpand').value = val('reid_crop_expand', $('reidCropExpand').value);
+  $('reidBatch').value = val('reid_batch', $('reidBatch').value);
+  $('reidDevice').value = val('reid_device', $('reidDevice').value);
+  $('reidMinPx').value = val('reid_min_px', $('reidMinPx').value);
+  $('reidSharpnessThreshold').value = val('reid_sharpness_threshold', $('reidSharpnessThreshold').value);
+  $('swapGuardSeconds').value = val('swap_guard_seconds', $('swapGuardSeconds').value);
+  $('swapGuardBonus').value = val('swap_guard_bonus', $('swapGuardBonus').value);
+  $('coldLockMode').value = val('cold_lock_mode', $('coldLockMode').value);
+  $('coldLockReidMinSimilarity').value = val('cold_lock_reid_min_similarity', $('coldLockReidMinSimilarity').value);
+  $('coldLockMarginMin').value = val('cold_lock_margin_min', $('coldLockMarginMin').value);
+  $('coldLockMaxSeconds').value = val('cold_lock_max_seconds', $('coldLockMaxSeconds').value);
+  $('maxClipLenSec').value = val('max_clip_len_sec', $('maxClipLenSec').value);
+  setValueIfDefined('postRoll', p.post_roll);
+  setValueIfDefined('colorTolerance', p.color_tolerance);
+  setValueIfDefined('yoloBatch', p.yolo_batch);
+  setCheckedIfDefined('ocrDisable', p.ocr_disable);
+  setValueIfDefined('ocrEveryNFrames', p.ocr_every_n_frames);
+  setValueIfDefined('ocrVetoConf', p.ocr_veto_conf);
+  setValueIfDefined('ocrVetoSeconds', p.ocr_veto_seconds);
+  setValueIfDefined('lockedGraceSeconds', p.locked_grace_seconds);
+  setValueIfDefined('reacquireMaxSec', p.reacquire_max_sec);
+  setValueIfDefined('lossTimeoutSec', p.loss_timeout_sec);
+  setCheckedIfDefined('allowUnconfirmedClips', p.allow_unconfirmed_clips);
+  setCheckedIfDefined('debugOverlay', p.debug_overlay);
+  setCheckedIfDefined('debugTimeline', p.debug_timeline);
+  setCheckedIfDefined('generateCombined', p.generate_combined);
   updatePresetLabel(preset.preset_name, preset.preset_version);
 }
 
@@ -257,19 +273,23 @@ function applyPreset(){
   $('mergeGap').value = p.gap_merge_seconds;
   $('lostTimeout').value = p.lost_timeout;
   $('minTrack').value = p.min_track_seconds;
-  applyVideoTypePreset($('videoType').value || 'coach_cam');
+  applyVideoTypePreset($('videoType').value || 'wide_single_cam_working_v1');
   applySetupValues(DEFAULT_SETUP);
   refreshHelp();
 }
 
 function setValueIfDefined(id, value){
   if(value === undefined || value === null) return;
-  $(id).value = value;
+  const el = $(id);
+  if(!el) return;
+  el.value = value;
 }
 
 function setCheckedIfDefined(id, value){
   if(value === undefined || value === null) return;
-  $(id).checked = !!value;
+  const el = $(id);
+  if(!el) return;
+  el.checked = !!value;
 }
 
 function renderStepper(stage){
@@ -417,7 +437,7 @@ function payload(){
     reid_weights_url: REID_WEIGHTS_DEFAULT_URL,
     swap_guard_seconds: toNumber('swapGuardSeconds'),
     swap_guard_bonus: toNumber('swapGuardBonus'),
-    preset_name: $('presetLabel').dataset.presetName || 'Coach Cam (Single-cam, stable)',
+    preset_name: $('presetLabel').dataset.presetName || 'Wide Single Cam — Working (Test 2 profile)',
     preset_version: $('presetLabel').dataset.presetVersion || 'v1',
     clicks: state.clicks,
   };
@@ -700,7 +720,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('vid').addEventListener('seeked', drawClickMarkers);
   window.addEventListener('resize', drawClickMarkers);
   applyPreset();
-  applyVideoTypePreset('coach_cam');
+  applyVideoTypePreset('wide_single_cam_working_v1');
   loadSavedSetupOrDefaults();
   document.querySelectorAll('input, select').forEach((el) => {
     if(el.id === 'file') return;

@@ -481,7 +481,7 @@ def setup_job(job_id: str, payload: Dict[str, Any]):
     config_resolved = _runtime_config_snapshot(setup)
     config_hash = hashlib.sha256(json.dumps(config_resolved, sort_keys=True).encode("utf-8")).hexdigest()
     setup.update({
-        "video_type": str(payload.get("video_type") or setup.get("video_type") or "coach_cam"),
+        "video_type": str(payload.get("video_type") or setup.get("video_type") or "wide_single_cam_working_v1"),
         "preset_name": str(payload.get("preset_name") or setup.get("preset_name") or ""),
         "preset_version": str(payload.get("preset_version") or setup.get("preset_version") or ""),
         "config_source": "ui",

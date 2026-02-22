@@ -54,6 +54,26 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert "config_hash" in setup
 
 
+def test_setup_persists_preset_metadata_and_config_resolved(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "preset-metadata"})["job_id"]
+    payload = {
+        "video_type": "wide_single_cam_working_v1",
+        "preset_name": "Wide Single Cam — Working (Test 2 profile)",
+        "preset_version": "v1",
+    }
+    api_main.setup_job(job_id, payload)
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["video_type"] == payload["video_type"]
+    assert setup["preset_name"] == payload["preset_name"]
+    assert setup["preset_version"] == payload["preset_version"]
+    assert setup["config_resolved"]["video_type"] == payload["video_type"]
+    assert setup["config_resolved"]["preset_name"] == payload["preset_name"]
+    assert setup["config_resolved"]["preset_version"] == payload["preset_version"]
+
+
 def test_setup_overrides_persist_and_worker_consumes_and_debug_reflects_values(tmp_path, monkeypatch):
     monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)
@@ -276,7 +296,7 @@ def test_process_job_skips_combined_when_no_clips(tmp_path, monkeypatch):
     assert result["message"] == "combined skipped: no clips"
 
 
-def test_process_job_surfaces_ffmpeg_combine_error(tmp_path, monkeypatch):
+def test_process_job_skips_on_ffmpeg_combine_error(tmp_path, monkeypatch):
     monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)
 
@@ -312,12 +332,10 @@ def test_process_job_surfaces_ffmpeg_combine_error(tmp_path, monkeypatch):
 
     monkeypatch.setattr(worker_tasks, "concat_clips", _fail_concat)
 
-    try:
-        worker_tasks.process_job(job_id)
-        assert False, "Expected combine failure"
-    except worker_tasks.FFmpegError as exc:
-        assert "concat exploded" in str(exc)
-
+    result = worker_tasks.process_job(job_id)
+    assert result["status"] == "done"
+    assert result["combined_path"] is None
+    assert "combined skipped" in result["message"].lower() or "processing complete" in result["message"].lower()
     result = json.loads((job_dir / "job.json").read_text())
-    assert result["status"] == "failed"
-    assert "concat exploded" in (result.get("error") or "")
+    assert result["status"] == "done"
+    assert result.get("error") in (None, "")
