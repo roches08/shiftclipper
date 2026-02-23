@@ -123,6 +123,7 @@ class TrackingParams:
     debug_timeline: bool = True
     use_rink_mask: bool = True
     use_bench_mask: bool = True
+    use_penalty_mask: bool = False
     reid_enable: bool = True
     reid_model: str = "osnet_x0_25"
     reid_fail_policy: str = "disable"
@@ -166,6 +167,7 @@ class ClipEndReason(str, Enum):
     REID_GATE = "reid_gate"
     SCORE_DROPOUT = "score_dropout"
     BENCH_ENTER = "bench_enter"
+    PENALTY_ENTER = "penalty_enter"
     PERIOD_END = "period_end"
     VIDEO_END = "video_end"
     MANUAL_STOP = "manual_stop"
@@ -284,17 +286,27 @@ def _bbox_feet_point(box: Tuple[int, int, int, int]) -> Tuple[float, float]:
     return ((x1 + x2) / 2.0, float(y2))
 
 
-def _normalize_polygon(poly: List[List[float]], width: int, height: int, normalized: bool) -> List[Tuple[float, float]]:
+def _normalize_polygon(poly: List[Any], width: int, height: int, normalized: bool) -> List[Tuple[float, float]]:
     out = []
     for pt in poly or []:
-        if len(pt) != 2:
+        try:
+            if isinstance(pt, dict):
+                px, py = float(pt.get("x")), float(pt.get("y"))
+            elif isinstance(pt, (list, tuple)) and len(pt) == 2:
+                px, py = float(pt[0]), float(pt[1])
+            else:
+                continue
+        except Exception:
             continue
-        px, py = float(pt[0]), float(pt[1])
         if normalized:
             px *= width
             py *= height
         out.append((px, py))
     return out
+
+
+def _in_any_polygon(point: Tuple[float, float], polygons: List[List[Tuple[float, float]]], margin: float) -> bool:
+    return any(_poly_contains_with_margin(point, poly, margin) for poly in polygons if poly)
 
 
 def _poly_contains_with_margin(point: Tuple[float, float], polygon: List[Tuple[float, float]], margin: float) -> bool:
@@ -1000,6 +1012,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     confirm_frames: int = 0
     seed_acquired: bool = False
 
+    seed_crops_dir = Path(video_path).with_name("seed_crops")
+    seed_crops_dir.mkdir(parents=True, exist_ok=True)
+    seed_crop_artifacts: List[Dict[str, Any]] = []
+
     seed_clicks = []
     for click in setup.get("clicks") or []:
         seed_t = max(0.0, float(click.get("t", 0.0)))
@@ -1017,6 +1033,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
             "seed_reid_target": None,
             "seed_confirm_hits": 0,
             "seed_confirm_track_id": None,
+            "seed_crop_saved": False,
+            "seed_crop_path": None,
         })
 
     seed_window_s = float(setup.get("seed_window_s", params.seed_window_s))
@@ -1030,6 +1048,15 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     polygon_normalized = bool(setup.get("polygon_coords_normalized", True))
     rink_polygon = _normalize_polygon(setup.get("rink_polygon") or [], w, h, polygon_normalized)
     bench_polygons = [_normalize_polygon(poly, w, h, polygon_normalized) for poly in (setup.get("bench_polygons") or [])]
+    penalty_polygons = [_normalize_polygon(poly, w, h, polygon_normalized) for poly in (setup.get("penalty_polygons") or [])]
+
+    mask_warnings: List[str] = []
+    if params.use_rink_mask and len(rink_polygon) < 3:
+        mask_warnings.append("Mask enabled but polygon empty; ignoring mask until polygons provided. (rink)")
+    if params.use_bench_mask and not any(len(poly) >= 3 for poly in bench_polygons):
+        mask_warnings.append("Mask enabled but polygon empty; ignoring mask until polygons provided. (bench)")
+    if bool(setup.get("use_penalty_mask", params.use_penalty_mask)) and not any(len(poly) >= 3 for poly in penalty_polygons):
+        mask_warnings.append("Mask enabled but polygon empty; ignoring mask until polygons provided. (penalty)")
 
     loss_timeout_sec = float(setup.get("loss_timeout_sec", setup.get("LOSS_TIMEOUT_SEC", params.loss_timeout_sec)))
     reacquire_confirm_frames = max(1, int(setup.get("reacquire_confirm_frames", setup.get("REACQUIRE_CONFIRM_FRAMES", params.reacquire_confirm_frames))))
@@ -1057,6 +1084,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         setup.get("lock_threshold_seed", setup.get("lock_threshold_normal", setup.get("score_lock_threshold", params.score_lock_threshold)))
     )
     timeline.append({"t": 0.0, "event": "config_header", "preset_name": setup.get("preset_name"), "preset_version": setup.get("preset_version"), "config_hash": setup.get("config_hash"), "lock_threshold_seed_resolved": lock_threshold_seed_resolved})
+    for warning in mask_warnings:
+        timeline.append({"t": 0.0, "event": "mask_warning", "warning": warning})
     for seed in seed_clicks:
         timeline.append({
             "t": float(seed.get("t", 0.0)),
@@ -1160,6 +1189,30 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     active_seed = seed
                     click_dist = dt
 
+            if active_seed is not None and not active_seed.get("seed_crop_saved"):
+                sx, sy = active_seed["seed_px"]
+                crop_half = max(16, int(min(w, h) * 0.04))
+                x1 = max(0, sx - crop_half)
+                y1 = max(0, sy - crop_half)
+                x2 = min(w, sx + crop_half)
+                y2 = min(h, sy + crop_half)
+                seed_crop = frame[y1:y2, x1:x2]
+                if seed_crop.size:
+                    crop_name = f"seed_{len(seed_crop_artifacts)+1:02d}_{int(active_seed.get('seed_frame', 0)):06d}.jpg"
+                    crop_path = seed_crops_dir / crop_name
+                    cv2.imwrite(str(crop_path), seed_crop)
+                    active_seed["seed_crop_saved"] = True
+                    active_seed["seed_crop_path"] = str(crop_path)
+                    seed_crop_artifacts.append({"path": str(crop_path), "click_t": float(active_seed.get("t", 0.0))})
+                    timeline.append({"t": t, "event": "seed_crop_saved", "path": str(crop_path), "click_t": float(active_seed.get("t", 0.0))})
+                    if params.reid_enable and reid_embedder is not None:
+                        try:
+                            seed_emb = reid_embedder.embed([seed_crop])[0]
+                            if seed_emb is not None:
+                                active_seed["seed_reid_embeddings"].append(seed_emb)
+                        except Exception:
+                            pass
+
             nearest_seed_track_id = None
             nearest_seed_dist = float("inf")
             nearest_seed_iou = 0.0
@@ -1261,9 +1314,14 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     continue
                 box = _clip(tr.to_ltrb(), w, h)
                 feet = _bbox_feet_point(box)
-                in_rink = True if not params.use_rink_mask or not rink_polygon else _poly_contains_with_margin(feet, rink_polygon, edge_margin_px)
-                in_bench = any(_poly_contains_with_margin(feet, poly, edge_margin_px) for poly in bench_polygons if poly)
-                if params.use_rink_mask and rink_polygon and not in_rink:
+                rink_active = bool(params.use_rink_mask and len(rink_polygon) >= 3)
+                bench_active = bool(params.use_bench_mask and any(len(poly) >= 3 for poly in bench_polygons))
+                penalty_active = bool(setup.get("use_penalty_mask", params.use_penalty_mask) and any(len(poly) >= 3 for poly in penalty_polygons))
+                in_rink = True if not rink_active else _poly_contains_with_margin(feet, rink_polygon, edge_margin_px)
+                in_bench = _in_any_polygon(feet, bench_polygons, edge_margin_px) if bench_active else False
+                in_penalty = _in_any_polygon(feet, penalty_polygons, edge_margin_px) if penalty_active else False
+                on_ice = (in_rink and not in_bench and not in_penalty) if rink_active else (not in_bench and not in_penalty)
+                if not on_ice:
                     continue
                 if state in {"SEARCH", "LOST"} and params.use_bench_mask and in_bench and not bool(setup.get("allow_bench_reacquire", params.allow_bench_reacquire)):
                     continue
@@ -1297,6 +1355,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "seed_iou": nearest_seed_iou if tr.track_id == seed_bonus_track_id else None,
                     "in_rink": in_rink,
                     "in_bench": in_bench,
+                    "in_penalty": in_penalty,
+                    "on_ice": on_ice,
                     "embed": emb,
                     "sim": sim,
                     "sharpness": sharpness,
@@ -2552,11 +2612,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     shift_state = "ON_ICE"
                     shift_start = t
 
-            if present and best and params.use_bench_mask and best.get("in_bench"):
+            if present and best and (best.get("in_bench") or best.get("in_penalty")):
                 clip_bench_enter_time = clip_bench_enter_time or t
                 if (t - clip_bench_enter_time) >= max(0.0, float(setup.get("bench_confirm_sec", 0.35))):
-                    clip_end_reason = ClipEndReason.BENCH_ENTER.value
-            elif not present or not best or not best.get("in_bench"):
+                    clip_end_reason = ClipEndReason.PENALTY_ENTER.value if best.get("in_penalty") else ClipEndReason.BENCH_ENTER.value
+            elif not present or not best or (not best.get("in_bench") and not best.get("in_penalty")):
                 clip_bench_enter_time = None
 
             max_len_sec = float(setup.get("max_clip_len_sec", params.max_clip_len_sec))
@@ -2574,6 +2634,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             elif clip_end_reason == ClipEndReason.BENCH_ENTER.value and clip_start_time is not None:
                 _append_segment(segments, clip_start_time, t, ClipEndReason.BENCH_ENTER)
+                present = False
+
+            elif clip_end_reason == ClipEndReason.PENALTY_ENTER.value and clip_start_time is not None:
+                _append_segment(segments, clip_start_time, t, ClipEndReason.PENALTY_ENTER)
                 present = False
 
             elif clip_end_reason == ClipEndReason.MAX_LEN_GUARD.value and clip_start_time is not None:
@@ -2629,7 +2693,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     timeline.append({"t": t, "event": "lock_state_transition", "from": "CONFIRMED", "to": "SEARCHING", "reason": "lock_lost_or_reid_gate"})
 
             log.info(
-                "decision frame_time=%.3f status=%s candidates=%d chosen_id=%s sim=%.3f in_rink=%s in_bench=%s end_reason=%s",
+                "decision frame_time=%.3f status=%s candidates=%d chosen_id=%s sim=%.3f in_rink=%s in_bench=%s in_penalty=%s end_reason=%s",
                 t,
                 state,
                 len(candidates),
@@ -2637,6 +2701,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 float(best.get("sim", -1.0)) if best else -1.0,
                 bool(best.get("in_rink", True)) if best else None,
                 bool(best.get("in_bench", False)) if best else None,
+                bool(best.get("in_penalty", False)) if best else None,
                 clip_end_reason,
             )
 
@@ -2737,6 +2802,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
         "perf": perf_summary,
         "target_embed_history": target_embed_history,
         "reid_disabled_due_to_error": reid_disabled_reason,
+        "mask_warnings": mask_warnings,
+        "seed_crop_artifacts": seed_crop_artifacts,
     }
 
 
@@ -2914,6 +2981,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
         write_status("processing", "tracking", 12, "Tracking in progress")
         data = track_presence(tracking_input_path, setup, heartbeat=hb, cancel_check=cancel_check)
+        if data.get("mask_warnings"):
+            write_status("processing", "tracking", 71, "Tracking complete with mask warnings", mask_warnings=data.get("mask_warnings"))
         if data.get("reid_disabled_due_to_error"):
             write_status("processing", "tracking", 71, "ReID disabled, continuing")
         data["timeline"] = preflight_timeline + (data.get("timeline") or [])
@@ -3018,6 +3087,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
         if not shifts_json_path.exists():
             raise RuntimeError("Missing shifts.json output")
 
+        seed_crop_artifacts = data.get("seed_crop_artifacts") or []
         artifacts = {
             "clips": clips,
             "combined_path": combined_path,
@@ -3030,6 +3100,11 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "debug_json_url": f"/data/jobs/{job_id}/debug.json" if (job_dir / "debug.json").exists() else None,
             "hard_moments_dataset_path": str(dataset_path),
             "hard_moments_dataset_url": f"/data/jobs/{job_id}/datasets/hard_moments/events.json",
+            "seed_crop_artifacts": [
+                {**item, "url": f"/data/jobs/{job_id}/seed_crops/{Path(item.get('path')).name}"}
+                for item in seed_crop_artifacts
+                if item.get("path")
+            ],
         }
         artifacts["list"] = [
             {"type": "clip", "path": c["path"], "url": c["url"]} for c in clips
@@ -3040,6 +3115,8 @@ def process_job(job_id: str) -> Dict[str, Any]:
             artifacts["list"].append({"type": "debug_overlay", "path": artifacts["debug_overlay_path"], "url": artifacts["debug_overlay_url"]})
         if artifacts.get("debug_timeline_path"):
             artifacts["list"].append({"type": "debug_timeline", "path": artifacts["debug_timeline_path"], "url": artifacts["debug_timeline_url"]})
+        for item in artifacts.get("seed_crop_artifacts", []):
+            artifacts["list"].append({"type": "seed_crop", "path": item.get("path"), "url": item.get("url")})
 
         terminal_status = "done"
         terminal_stage = "done"
@@ -3067,6 +3144,7 @@ def process_job(job_id: str) -> Dict[str, Any]:
             "shift_count": len(shifts_json),
             "perf": data.get("perf"),
             "segments_summary": {"count": len(data.get("segments", [])), "segments": data.get("segments", [])},
+            "mask_warnings": data.get("mask_warnings", []),
             "status": terminal_status,
             "stage": terminal_stage,
             "progress": 100,

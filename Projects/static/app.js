@@ -28,6 +28,8 @@ const readNumber = getNumber;
 const state = {
   jobId: null,
   clicks: [],
+  maskEditorActive: false,
+  maskPolygons: { rink_polygon: [], bench_polygons: [[], []], penalty_polygons: [[], []] },
   lastStatus: null,
   pollTimer: null,
   proxySrc: null,
@@ -56,6 +58,7 @@ const REID_WEIGHTS_DEFAULT_PATH = '/workspace/shiftclipper/Projects/models/reid/
 const REID_WEIGHTS_DEFAULT_URL = 'https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth';
 const SETUP_STORAGE_KEY = 'shiftclipper_setup';
 const SETUP_STORAGE_PREFIX = 'setup:';
+const MASK_STORAGE_KEY = 'shiftclipper_mask_polygons';
 const DEFAULT_SETUP = {
   video_type: 'wide_single_cam_working_v1',
   score_lock_threshold: 0.50,
@@ -95,6 +98,12 @@ const DEFAULT_SETUP = {
   cold_lock_max_seconds: 3,
   preset_name: 'Wide Single Cam — Working (Test 2 profile)',
   preset_version: 'v1',
+  use_rink_mask: true,
+  use_bench_mask: true,
+  use_penalty_mask: false,
+  rink_polygon: [],
+  bench_polygons: [[], []],
+  penalty_polygons: [[], []],
 };
 
 
@@ -258,6 +267,7 @@ function persistSetup(){
   const setup = getSetupForStorage();
   localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(setup));
   localStorage.setItem(getVideoTypeSetupKey(setup.video_type), JSON.stringify(setup));
+  persistMaskPolygons();
 }
 
 function applySetupValues(setup){
@@ -299,6 +309,16 @@ function applySetupValues(setup){
   setValueIfDefined('coldLockMarginMin', setup.cold_lock_margin_min);
   setValueIfDefined('coldLockMaxSeconds', setup.cold_lock_max_seconds);
   setCheckedIfDefined('generateCombined', setup.generate_combined);
+  setCheckedIfDefined('useRinkMask', setup.use_rink_mask);
+  setCheckedIfDefined('useBenchMask', setup.use_bench_mask);
+  setCheckedIfDefined('usePenaltyMask', setup.use_penalty_mask);
+  state.maskPolygons = {
+    rink_polygon: normalizePolygon(setup.rink_polygon || state.maskPolygons.rink_polygon || []),
+    bench_polygons: normalizePolygonList(setup.bench_polygons || state.maskPolygons.bench_polygons || []),
+    penalty_polygons: normalizePolygonList(setup.penalty_polygons || state.maskPolygons.penalty_polygons || []),
+  };
+  drawMaskOverlay();
+  updateMaskWarning();
 }
 
 function loadSavedSetupOrDefaults(){
@@ -330,6 +350,7 @@ function resetSettings(){
   applySetupValues(DEFAULT_SETUP);
   refreshHelp();
   updateRunButtonState();
+  updateMaskWarning();
 }
 
 function applyPreset(){
@@ -448,6 +469,176 @@ async function upload(){
   startPolling();
 }
 
+
+function normalizePoint(point){
+  if (!point || typeof point !== 'object') return null;
+  const x = Number(point.x);
+  const y = Number(point.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+}
+
+function normalizePolygon(poly){
+  if (!Array.isArray(poly)) return [];
+  return poly.map(normalizePoint).filter(Boolean);
+}
+
+function normalizePolygonList(polys){
+  if (!Array.isArray(polys)) return [[], []];
+  const out = polys.map(normalizePolygon);
+  if (!out.length) return [[], []];
+  while(out.length < 2) out.push([]);
+  return out.slice(0, 2);
+}
+
+function loadMaskPolygonsFromStorage(){
+  try {
+    const raw = localStorage.getItem(MASK_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    state.maskPolygons = {
+      rink_polygon: normalizePolygon(parsed.rink_polygon || []),
+      bench_polygons: normalizePolygonList(parsed.bench_polygons || []),
+      penalty_polygons: normalizePolygonList(parsed.penalty_polygons || []),
+    };
+  } catch (_) {}
+}
+
+function persistMaskPolygons(){
+  localStorage.setItem(MASK_STORAGE_KEY, JSON.stringify(state.maskPolygons));
+}
+
+function getMaskTargetRef(){
+  const target = getValue('maskTarget', 'rink');
+  if (target === 'rink') return { key: 'rink_polygon', index: null };
+  const [kind, idx] = target.split('_');
+  const index = Number(idx);
+  if (!Number.isInteger(index)) return { key: 'rink_polygon', index: null };
+  return { key: `${kind}_polygons`, index };
+}
+
+function getMaskPolygonByTarget(){
+  const ref = getMaskTargetRef();
+  if (ref.index === null) return state.maskPolygons.rink_polygon;
+  const arr = state.maskPolygons[ref.key] || [];
+  while(arr.length <= ref.index) arr.push([]);
+  return arr[ref.index];
+}
+
+function drawMaskOverlay(){
+  const vid = $('vid');
+  const canvas = $('maskCanvas');
+  if (!vid || !canvas) return;
+  const rect = vid.getBoundingClientRect();
+  const vw = Math.max(1, rect.width);
+  const vh = Math.max(1, rect.height);
+  canvas.width = Math.round(vw);
+  canvas.height = Math.round(vh);
+  canvas.style.width = `${vw}px`;
+  canvas.style.height = `${vh}px`;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const drawPoly = (poly, color) => {
+    if (!Array.isArray(poly) || !poly.length) return;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color.replace('1)', '0.2)');
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    poly.forEach((pt, idx) => {
+      const x = pt.x * canvas.width;
+      const y = pt.y * canvas.height;
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    if (poly.length > 2) ctx.closePath();
+    ctx.stroke();
+    if (poly.length > 2) ctx.fill();
+    poly.forEach((pt) => {
+      ctx.beginPath();
+      ctx.arc(pt.x * canvas.width, pt.y * canvas.height, 4, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  };
+
+  drawPoly(state.maskPolygons.rink_polygon, 'rgba(32,125,255,1)');
+  (state.maskPolygons.bench_polygons || []).forEach((poly) => drawPoly(poly, 'rgba(255,167,38,1)'));
+  (state.maskPolygons.penalty_polygons || []).forEach((poly) => drawPoly(poly, 'rgba(233,30,99,1)'));
+
+  if (state.maskEditorActive) {
+    canvas.style.display = 'block';
+    canvas.style.pointerEvents = 'auto';
+  } else {
+    canvas.style.display = 'none';
+    canvas.style.pointerEvents = 'none';
+  }
+}
+
+function getMaskWarnings(setup){
+  const warnings = [];
+  if (setup.use_rink_mask && !setup.rink_polygon.length) warnings.push('use_rink_mask enabled but rink polygon is empty.');
+  if (setup.use_bench_mask && !(setup.bench_polygons || []).some((p) => p.length >= 3)) warnings.push('use_bench_mask enabled but bench polygons are empty.');
+  if (setup.use_penalty_mask && !(setup.penalty_polygons || []).some((p) => p.length >= 3)) warnings.push('use_penalty_mask enabled but penalty polygons are empty.');
+  return warnings;
+}
+
+function updateMaskWarning(){
+  const warningEl = $('maskWarning');
+  if (!warningEl) return;
+  const warnings = getMaskWarnings({
+    use_rink_mask: getChecked('useRinkMask', true),
+    use_bench_mask: getChecked('useBenchMask', true),
+    use_penalty_mask: getChecked('usePenaltyMask', false),
+    rink_polygon: state.maskPolygons.rink_polygon || [],
+    bench_polygons: state.maskPolygons.bench_polygons || [],
+    penalty_polygons: state.maskPolygons.penalty_polygons || [],
+  });
+  warningEl.textContent = warnings.join(' ');
+  warningEl.style.display = warnings.length ? 'block' : 'none';
+}
+
+function toggleMaskEditor(){
+  state.maskEditorActive = !state.maskEditorActive;
+  const btn = $('btnEditPolygons');
+  if (btn) btn.textContent = state.maskEditorActive ? 'Stop Editing' : 'Edit Polygons';
+  drawMaskOverlay();
+}
+
+function clearSelectedPolygon(){
+  const ref = getMaskTargetRef();
+  if (ref.index === null) state.maskPolygons.rink_polygon = [];
+  else {
+    const arr = state.maskPolygons[ref.key] || [];
+    while(arr.length <= ref.index) arr.push([]);
+    arr[ref.index] = [];
+    state.maskPolygons[ref.key] = arr;
+  }
+  drawMaskOverlay();
+  updateMaskWarning();
+}
+
+function savePolygons(){
+  persistMaskPolygons();
+  persistSetup();
+  updateMaskWarning();
+}
+
+function registerMaskPoint(evt){
+  if (!state.maskEditorActive) return;
+  evt.preventDefault();
+  const vid = $('vid');
+  if (!vid || !vid.videoWidth || !vid.videoHeight) return;
+  const rect = vid.getBoundingClientRect();
+  const x = (evt.clientX - rect.left) / Math.max(1, rect.width);
+  const y = (evt.clientY - rect.top) / Math.max(1, rect.height);
+  const poly = getMaskPolygonByTarget();
+  if (evt.button === 2) poly.pop();
+  else poly.push({ x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) });
+  drawMaskOverlay();
+  updateMaskWarning();
+}
+
+
 function payload(){
   const toNumber = (id, fallback = 0) => getNumber(id, fallback);
   const toInt = (id, fallback = 0) => Math.trunc(getNumber(id, fallback));
@@ -490,6 +681,13 @@ function payload(){
     reacquire_max_sec: toNumber('reacquireMaxSec'),
     loss_timeout_sec: toNumber('lossTimeoutSec'),
     allow_bench_reacquire: getChecked('allowBenchReacquire', false),
+    use_rink_mask: getChecked('useRinkMask', true),
+    use_bench_mask: getChecked('useBenchMask', true),
+    use_penalty_mask: getChecked('usePenaltyMask', false),
+    polygon_coords_normalized: true,
+    rink_polygon: normalizePolygon(state.maskPolygons.rink_polygon),
+    bench_polygons: normalizePolygonList(state.maskPolygons.bench_polygons),
+    penalty_polygons: normalizePolygonList(state.maskPolygons.penalty_polygons),
     allow_unconfirmed_clips: getChecked('allowUnconfirmedClips', false),
     allow_seed_clips: getChecked('allowSeedClips', true),
     min_track_seconds: toNumber('minTrack'),
@@ -821,6 +1019,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindClick('btnResetSettings', resetSettings);
   bindClick('btnClearClicks', clearSeedClicks);
   bindClick('btnUndoClick', undoSeedClick);
+  bindClick('btnEditPolygons', toggleMaskEditor);
+  bindClick('btnClearPolygon', clearSelectedPolygon);
+  bindClick('btnSavePolygons', savePolygons);
 
   bindChange('cameraMode', applyPreset);
   bindChange('videoType', () => {
@@ -832,17 +1033,28 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindChange('trackingMode', refreshHelp);
   bindChange('verifyMode', refreshHelp);
   bindChange('skipSeeding', updateRunButtonState);
+  bindChange('maskTarget', drawMaskOverlay);
+  bindChange('useRinkMask', () => { persistSetup(); updateMaskWarning(); });
+  bindChange('useBenchMask', () => { persistSetup(); updateMaskWarning(); });
+  bindChange('usePenaltyMask', () => { persistSetup(); updateMaskWarning(); });
 
   const vid = $('vid');
   if (vid) {
-    vid.addEventListener('click', registerSeedClick);
-    vid.addEventListener('loadedmetadata', drawClickMarkers);
+    vid.addEventListener('click', (evt) => {
+      if (state.maskEditorActive) { registerMaskPoint(evt); return; }
+      registerSeedClick(evt);
+    });
+    vid.addEventListener('contextmenu', (evt) => { if (state.maskEditorActive) registerMaskPoint(evt); });
+    vid.addEventListener('loadedmetadata', () => { drawClickMarkers(); drawMaskOverlay(); });
     vid.addEventListener('seeked', drawClickMarkers);
   }
-  window.addEventListener('resize', drawClickMarkers);
+  window.addEventListener('resize', () => { drawClickMarkers(); drawMaskOverlay(); });
+  loadMaskPolygonsFromStorage();
   applyPreset();
   applyVideoTypePreset('wide_single_cam_working_v1');
   loadSavedSetupOrDefaults();
+  drawMaskOverlay();
+  updateMaskWarning();
   document.querySelectorAll('input, select').forEach((el) => {
     if(el.id === 'file') return;
     if (el) {

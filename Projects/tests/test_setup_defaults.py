@@ -246,6 +246,26 @@ def test_setup_reid_fail_policy_is_normalized(tmp_path, monkeypatch):
     assert setup["reid_fail_policy"] == "disable"
 
 
+
+
+def test_setup_accepts_mask_polygons_and_penalty_toggle(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "mask-polygon"})["job_id"]
+    api_main.setup_job(job_id, {
+        "use_penalty_mask": True,
+        "rink_polygon": [{"x": 0.1, "y": 0.1}, {"x": 0.9, "y": 0.1}, {"x": 0.9, "y": 0.9}],
+        "bench_polygons": [[{"x": 0.0, "y": 0.0}, {"x": 0.1, "y": 0.0}, {"x": 0.1, "y": 0.3}]],
+        "penalty_polygons": [[{"x": 0.8, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 1.0, "y": 0.3}]],
+    })
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["use_penalty_mask"] is True
+    assert len(setup["rink_polygon"]) == 3
+    assert len(setup["bench_polygons"]) == 1
+    assert len(setup["penalty_polygons"]) == 1
+
+
 def test_normalize_setup_strips_nested_config_keys():
     from common.config import normalize_setup
 
