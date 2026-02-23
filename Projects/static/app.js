@@ -29,6 +29,8 @@ const state = {
   jobId: null,
   clicks: [],
   maskEditorActive: false,
+  drawMode: null,
+  drawPointer: null,
   maskPolygons: { rink_polygon: [], bench_polygons: [[], []], penalty_polygons: [[], []] },
   lastStatus: null,
   pollTimer: null,
@@ -565,9 +567,25 @@ function drawMaskOverlay(){
   (state.maskPolygons.bench_polygons || []).forEach((poly) => drawPoly(poly, 'rgba(255,167,38,1)'));
   (state.maskPolygons.penalty_polygons || []).forEach((poly) => drawPoly(poly, 'rgba(233,30,99,1)'));
 
-  if (state.maskEditorActive) {
+  if (state.drawMode) {
+    const activePoly = state.drawMode === 'rink'
+      ? state.maskPolygons.rink_polygon
+      : (state.maskPolygons.bench_polygons?.[0] || []);
+    if (activePoly.length && state.drawPointer) {
+      const color = state.drawMode === 'rink' ? 'rgba(32,125,255,0.85)' : 'rgba(255,167,38,0.85)';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const last = activePoly[activePoly.length - 1];
+      ctx.moveTo(last.x * canvas.width, last.y * canvas.height);
+      ctx.lineTo(state.drawPointer.x * canvas.width, state.drawPointer.y * canvas.height);
+      ctx.stroke();
+    }
+  }
+
+  if (state.maskEditorActive || state.drawMode) {
     canvas.style.display = 'block';
-    canvas.style.pointerEvents = 'auto';
+    canvas.style.pointerEvents = state.drawMode ? 'auto' : 'none';
   } else {
     canvas.style.display = 'none';
     canvas.style.pointerEvents = 'none';
@@ -599,8 +617,36 @@ function updateMaskWarning(){
 
 function toggleMaskEditor(){
   state.maskEditorActive = !state.maskEditorActive;
+  if (!state.maskEditorActive) stopDrawingMode();
   const btn = $('btnEditPolygons');
   if (btn) btn.textContent = state.maskEditorActive ? 'Stop Editing' : 'Edit Polygons';
+  setMaskDrawButtons();
+  drawMaskOverlay();
+}
+
+function setMaskDrawButtons(){
+  const rinkBtn = $('btnDrawRink');
+  const benchBtn = $('btnDrawBench');
+  if (rinkBtn) rinkBtn.disabled = !state.maskEditorActive;
+  if (benchBtn) benchBtn.disabled = !state.maskEditorActive;
+}
+
+function stopDrawingMode(){
+  state.drawMode = null;
+  state.drawPointer = null;
+  setMaskDrawButtons();
+  drawMaskOverlay();
+}
+
+function startDrawingMode(mode){
+  if (!state.maskEditorActive) state.maskEditorActive = true;
+  state.drawMode = mode;
+  state.drawPointer = null;
+  if (mode === 'rink') $('maskTarget').value = 'rink';
+  if (mode === 'bench') $('maskTarget').value = 'bench_0';
+  const btn = $('btnEditPolygons');
+  if (btn) btn.textContent = 'Stop Editing';
+  setMaskDrawButtons();
   drawMaskOverlay();
 }
 
@@ -623,20 +669,46 @@ function savePolygons(){
   updateMaskWarning();
 }
 
+function normalizedPointFromCanvasEvent(evt){
+  const canvas = $('maskCanvas');
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  const nx = (evt.clientX - rect.left) / rect.width;
+  const ny = (evt.clientY - rect.top) / rect.height;
+  return {
+    x: Math.max(0, Math.min(1, nx)),
+    y: Math.max(0, Math.min(1, ny)),
+  };
+}
+
 function registerMaskPoint(evt){
-  if (!state.maskEditorActive) return;
+  if (!state.drawMode) return;
   evt.preventDefault();
-  const vid = $('vid');
-  if (!vid || !vid.videoWidth || !vid.videoHeight) return;
-  const rect = vid.getBoundingClientRect();
-  const x = (evt.clientX - rect.left) / Math.max(1, rect.width);
-  const y = (evt.clientY - rect.top) / Math.max(1, rect.height);
-  const poly = getMaskPolygonByTarget();
+  const point = normalizedPointFromCanvasEvent(evt);
+  if (!point) return;
+  const poly = state.drawMode === 'rink' ? state.maskPolygons.rink_polygon : state.maskPolygons.bench_polygons[0];
+  if (!poly) return;
   if (evt.button === 2) poly.pop();
-  else poly.push({ x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) });
+  else poly.push(point);
+  state.drawPointer = point;
   drawMaskOverlay();
   updateMaskWarning();
 }
+
+function updateMaskPointer(evt){
+  if (!state.drawMode) return;
+  const point = normalizedPointFromCanvasEvent(evt);
+  if (!point) return;
+  state.drawPointer = point;
+  drawMaskOverlay();
+}
+
+function endMaskPointer(evt){
+  if (!state.drawMode) return;
+  if (evt) evt.preventDefault();
+}
+
 
 
 function payload(){
@@ -842,6 +914,7 @@ function drawClickMarkers(){
 }
 
 function registerSeedClick(evt){
+  if (state.drawMode) return;
   const vid = $('vid');
   if (!vid.src) return;
   const rect = vid.getBoundingClientRect();
@@ -931,6 +1004,13 @@ async function loadSetup(){
     setValueIfDefined('transcodeFps', setup.transcode_fps);
     setCheckedIfDefined('transcodeDeinterlace', setup.transcode_deinterlace);
     setCheckedIfDefined('transcodeDenoise', setup.transcode_denoise);
+    state.maskPolygons = {
+      rink_polygon: normalizePolygon(setup.rink_polygon || state.maskPolygons.rink_polygon || []),
+      bench_polygons: normalizePolygonList(setup.bench_polygons || state.maskPolygons.bench_polygons || []),
+      penalty_polygons: normalizePolygonList(setup.penalty_polygons || state.maskPolygons.penalty_polygons || []),
+    };
+    drawMaskOverlay();
+    updateMaskWarning();
     state.clicks = Array.isArray(setup.clicks) ? setup.clicks : [];
     setCheckedIfDefined('skipSeeding', setup.skip_seeding);
     drawClickMarkers();
@@ -1020,6 +1100,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindClick('btnClearClicks', clearSeedClicks);
   bindClick('btnUndoClick', undoSeedClick);
   bindClick('btnEditPolygons', toggleMaskEditor);
+  bindClick('btnDrawRink', () => startDrawingMode('rink'));
+  bindClick('btnDrawBench', () => startDrawingMode('bench'));
+  bindClick('btnStopDrawing', stopDrawingMode);
   bindClick('btnClearPolygon', clearSelectedPolygon);
   bindClick('btnSavePolygons', savePolygons);
 
@@ -1039,14 +1122,23 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindChange('usePenaltyMask', () => { persistSetup(); updateMaskWarning(); });
 
   const vid = $('vid');
+  const maskCanvas = $('maskCanvas');
   if (vid) {
     vid.addEventListener('click', (evt) => {
-      if (state.maskEditorActive) { registerMaskPoint(evt); return; }
       registerSeedClick(evt);
     });
-    vid.addEventListener('contextmenu', (evt) => { if (state.maskEditorActive) registerMaskPoint(evt); });
     vid.addEventListener('loadedmetadata', () => { drawClickMarkers(); drawMaskOverlay(); });
     vid.addEventListener('seeked', drawClickMarkers);
+  }
+  if (maskCanvas) {
+    maskCanvas.addEventListener('pointerdown', registerMaskPoint);
+    maskCanvas.addEventListener('pointermove', updateMaskPointer);
+    maskCanvas.addEventListener('pointerup', endMaskPointer);
+    maskCanvas.addEventListener('contextmenu', (evt) => {
+      if (!state.drawMode) return;
+      evt.preventDefault();
+      registerMaskPoint(evt);
+    });
   }
   window.addEventListener('resize', () => { drawClickMarkers(); drawMaskOverlay(); });
   loadMaskPolygonsFromStorage();
@@ -1054,6 +1146,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   applyVideoTypePreset('wide_single_cam_working_v1');
   loadSavedSetupOrDefaults();
   drawMaskOverlay();
+  setMaskDrawButtons();
   updateMaskWarning();
   document.querySelectorAll('input, select').forEach((el) => {
     if(el.id === 'file') return;
