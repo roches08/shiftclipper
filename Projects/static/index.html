@@ -14,6 +14,8 @@
     .videoWrap { position: relative; max-width: 900px; }
     video { width:100%; background:black; border-radius:8px; }
     canvas { position:absolute; left:0; top:0; pointer-events:none; }
+    #maskCanvas { pointer-events:auto; }
+    .maskEditorPanel { margin-top:8px; border:1px solid #d9e2ef; border-radius:8px; padding:8px; background:#f9fbff; }
     details { margin-top: 8px; }
     pre { background:#101827; color:#d0e0ff; padding:8px; border-radius:6px; overflow:auto; }
     progress { width: 100%; height: 16px; }
@@ -152,6 +154,31 @@
       </label>
     </div>
   </details>
+  <details>
+    <summary>Mask Editor</summary>
+    <div class="maskEditorPanel">
+      <div class="row">
+        <label><input id="useRinkMask" type="checkbox" checked /> use_rink_mask</label>
+        <label><input id="useBenchMask" type="checkbox" checked /> use_bench_mask</label>
+        <label><input id="usePenaltyMask" type="checkbox" /> use_penalty_mask</label>
+      </div>
+      <div class="row">
+        <label>Polygon type</label>
+        <select id="maskTarget">
+          <option value="rink">Rink polygon</option>
+          <option value="bench_0">Bench polygon (left)</option>
+          <option value="bench_1">Bench polygon (right)</option>
+          <option value="penalty_0">Penalty polygon (left)</option>
+          <option value="penalty_1">Penalty polygon (right)</option>
+        </select>
+        <button id="btnEditPolygons" type="button">Edit Polygons</button>
+        <button id="btnClearPolygon" type="button">Clear Selected</button>
+        <button id="btnSavePolygons" type="button">Save Polygons</button>
+      </div>
+      <div id="maskWarning" class="warn" style="display:none;"></div>
+      <div class="hint">Click points on video while editing. Right-click to undo last point.</div>
+    </div>
+  </details>
 </div>
 
 <div class="card">
@@ -165,7 +192,7 @@
 </div>
 
 <div class="card">
-  <div class="videoWrap"><video id="vid" controls></video><canvas id="seedCanvas"></canvas></div>
+  <div class="videoWrap"><video id="vid" controls></video><canvas id="maskCanvas"></canvas><canvas id="seedCanvas"></canvas></div>
 </div>
 <div class="card"><h3>Status</h3><pre id="out">{}</pre></div>
 <div class="card"><h3>Results</h3><div id="resultsMessage">—</div><div id="artifacts"></div><pre id="clips">—</pre></div>

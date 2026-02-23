@@ -75,6 +75,38 @@ def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
     return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
 
+def _normalize_point(raw: Any) -> Dict[str, float] | None:
+    try:
+        if isinstance(raw, dict):
+            x = float(raw.get("x"))
+            y = float(raw.get("y"))
+        elif isinstance(raw, (list, tuple)) and len(raw) == 2:
+            x = float(raw[0])
+            y = float(raw[1])
+        else:
+            return None
+    except Exception:
+        return None
+    return {"x": max(0.0, min(1.0, x)), "y": max(0.0, min(1.0, y))}
+
+
+def _normalize_polygon(poly: Any) -> list[Dict[str, float]]:
+    if not isinstance(poly, list):
+        return []
+    out = []
+    for point in poly:
+        norm = _normalize_point(point)
+        if norm is not None:
+            out.append(norm)
+    return out
+
+
+def _normalize_polygon_list(polys: Any) -> list[list[Dict[str, float]]]:
+    if not isinstance(polys, list):
+        return []
+    return [_normalize_polygon(poly) for poly in polys if isinstance(poly, list)]
+
+
 def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     src = dict(payload or {})
     for key in ("config_ui_raw", "config_resolved", "config_hash"):
@@ -183,6 +215,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "closeup_bbox_area_ratio": _as_float(src, "closeup_bbox_area_ratio", 0.18),
         "use_rink_mask": bool(src.get("use_rink_mask", True)),
         "use_bench_mask": bool(src.get("use_bench_mask", True)),
+        "use_penalty_mask": bool(src.get("use_penalty_mask", False)),
         "reid_enable": bool(src.get("reid_enable", src.get("use_reid", True))),
         "reid_model": str(src.get("reid_model") or "osnet_x0_25"),
         "reid_fail_policy": str(src.get("reid_fail_policy") or "disable").lower(),
@@ -222,10 +255,10 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "swap_guard_seconds": _as_float(src, "swap_guard_seconds", 2.5),
         "swap_guard_bonus": _as_float(src, "swap_guard_bonus", 0.1),
         "locked_grace_seconds": _as_float(src, "locked_grace_seconds", 0.75),
-        "rink_polygon": src.get("rink_polygon") or [],
+        "rink_polygon": _normalize_polygon(src.get("rink_polygon") or []),
         "polygon_coords_normalized": bool(src.get("polygon_coords_normalized", True)),
-        "bench_polygons": src.get("bench_polygons") or [],
-        "penalty_polygons": src.get("penalty_polygons") or [],
+        "bench_polygons": _normalize_polygon_list(src.get("bench_polygons") or []),
+        "penalty_polygons": _normalize_polygon_list(src.get("penalty_polygons") or []),
     }
     if setup["reid_model"] not in {"osnet_x0_25", "osnet_x1_0"}:
         setup["reid_model"] = "osnet_x0_25"
