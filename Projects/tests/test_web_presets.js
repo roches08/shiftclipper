@@ -10,9 +10,9 @@ test('video type order is deterministic and default first', () => {
 test('new working preset includes expected profile values', () => {
   const preset = getVideoTypePreset('wide_single_cam_working_v1');
   assert.equal(preset.preset_name, 'Wide Single Cam — Working (Test 2 profile)');
-  assert.equal(preset.values.allow_seed_clips, true);
-  assert.equal(preset.values.score_unlock_threshold, 0.44);
-  assert.equal(preset.values.reacquire_window_seconds, 14);
+  assert.equal(preset.values.allow_seed_clips, false);
+  assert.equal(preset.values.score_unlock_threshold, 0.25);
+  assert.equal(preset.values.reacquire_window_seconds, 90);
 });
 
 test('editing applied preset does not mutate source preset', () => {
