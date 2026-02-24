@@ -688,7 +688,7 @@ function registerMaskPoint(evt){
   evt.preventDefault();
   const point = normalizedPointFromCanvasEvent(evt);
   if (!point) return;
-  const poly = state.drawMode === 'rink' ? state.maskPolygons.rink_polygon : state.maskPolygons.bench_polygons[0];
+  const poly = getMaskPolygonByTarget();
   if (!poly) return;
   if (evt.button === 2) poly.pop();
   else poly.push(point);
@@ -1006,10 +1006,14 @@ async function loadSetup(){
     setValueIfDefined('transcodeFps', setup.transcode_fps);
     setCheckedIfDefined('transcodeDeinterlace', setup.transcode_deinterlace);
     setCheckedIfDefined('transcodeDenoise', setup.transcode_denoise);
+    setCheckedIfDefined('useRinkMask', setup.use_rink_mask);
+    setCheckedIfDefined('useBenchMask', setup.use_bench_mask);
+    setCheckedIfDefined('usePenaltyMask', setup.use_penalty_mask);
+    const rawSetup = setup.config_ui_raw || {};
     state.maskPolygons = {
-      rink_polygon: normalizePolygon(setup.rink_polygon || state.maskPolygons.rink_polygon || []),
-      bench_polygons: normalizePolygonList(setup.bench_polygons || state.maskPolygons.bench_polygons || []),
-      penalty_polygons: normalizePolygonList(setup.penalty_polygons || state.maskPolygons.penalty_polygons || []),
+      rink_polygon: normalizePolygon(setup.rink_polygon || rawSetup.rink_polygon || state.maskPolygons.rink_polygon || []),
+      bench_polygons: normalizePolygonList(setup.bench_polygons || rawSetup.bench_polygons || state.maskPolygons.bench_polygons || []),
+      penalty_polygons: normalizePolygonList(setup.penalty_polygons || rawSetup.penalty_polygons || state.maskPolygons.penalty_polygons || []),
     };
     drawMaskOverlay();
     updateMaskWarning();
