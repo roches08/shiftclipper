@@ -1056,12 +1056,22 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
     penalty_polygons = [_normalize_polygon(poly, w, h, polygon_normalized) for poly in (setup.get("penalty_polygons") or [])]
 
     mask_warnings: List[str] = []
-    if params.use_rink_mask and len(rink_polygon) < 3:
-        mask_warnings.append("Mask enabled but polygon empty; ignoring mask until polygons provided. (rink)")
-    if params.use_bench_mask and not any(len(poly) >= 3 for poly in bench_polygons):
-        mask_warnings.append("Mask enabled but polygon empty; ignoring mask until polygons provided. (bench)")
-    if bool(setup.get("use_penalty_mask", params.use_penalty_mask)) and not any(len(poly) >= 3 for poly in penalty_polygons):
-        mask_warnings.append("Mask enabled but polygon empty; ignoring mask until polygons provided. (penalty)")
+    use_rink_mask_effective = bool(params.use_rink_mask)
+    if use_rink_mask_effective and len(rink_polygon) < 3:
+        use_rink_mask_effective = False
+        mask_warnings.append("Mask auto-disabled: use_rink_mask=true but rink_polygon is empty/invalid (<3 points).")
+
+    use_bench_mask_effective = bool(params.use_bench_mask)
+    bench_invalid_polygons = any(len(poly) < 3 for poly in bench_polygons)
+    if use_bench_mask_effective and (not bench_polygons or bench_invalid_polygons):
+        use_bench_mask_effective = False
+        mask_warnings.append("Mask auto-disabled: use_bench_mask=true but bench_polygons is empty/invalid (<3 points polygon found).")
+
+    use_penalty_mask_effective = bool(setup.get("use_penalty_mask", params.use_penalty_mask))
+    penalty_invalid_polygons = any(len(poly) < 3 for poly in penalty_polygons)
+    if use_penalty_mask_effective and (not penalty_polygons or penalty_invalid_polygons):
+        use_penalty_mask_effective = False
+        mask_warnings.append("Mask auto-disabled: use_penalty_mask=true but penalty_polygons is empty/invalid (<3 points polygon found).")
 
     loss_timeout_sec = float(setup.get("loss_timeout_sec", setup.get("LOSS_TIMEOUT_SEC", params.loss_timeout_sec)))
     reacquire_confirm_frames = max(1, int(setup.get("reacquire_confirm_frames", setup.get("REACQUIRE_CONFIRM_FRAMES", params.reacquire_confirm_frames))))
@@ -1314,21 +1324,23 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
 
             best, ocr_used = None, 0
             candidates = []
+            confirmed_tracks_count = 0
             for tr in tracks:
                 if not tr.is_confirmed():
                     continue
+                confirmed_tracks_count += 1
                 box = _clip(tr.to_ltrb(), w, h)
                 feet = _bbox_feet_point(box)
-                rink_active = bool(params.use_rink_mask and len(rink_polygon) >= 3)
-                bench_active = bool(params.use_bench_mask and any(len(poly) >= 3 for poly in bench_polygons))
-                penalty_active = bool(setup.get("use_penalty_mask", params.use_penalty_mask) and any(len(poly) >= 3 for poly in penalty_polygons))
+                rink_active = use_rink_mask_effective
+                bench_active = use_bench_mask_effective
+                penalty_active = use_penalty_mask_effective
                 in_rink = True if not rink_active else _poly_contains_with_margin(feet, rink_polygon, edge_margin_px)
                 in_bench = _in_any_polygon(feet, bench_polygons, edge_margin_px) if bench_active else False
                 in_penalty = _in_any_polygon(feet, penalty_polygons, edge_margin_px) if penalty_active else False
                 on_ice = (in_rink and not in_bench and not in_penalty) if rink_active else (not in_bench and not in_penalty)
                 if not on_ice:
                     continue
-                if state in {"SEARCH", "LOST"} and params.use_bench_mask and in_bench and not bool(setup.get("allow_bench_reacquire", params.allow_bench_reacquire)):
+                if state in {"SEARCH", "LOST"} and use_bench_mask_effective and in_bench and not bool(setup.get("allow_bench_reacquire", params.allow_bench_reacquire)):
                     continue
                 cscore = _color_score(frame, box, jersey_hsv, params.color_tolerance)
                 mean_hsv = _mean_hsv(frame, box)
@@ -1368,6 +1380,22 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     "opponent_penalty": opponent_penalty,
                     "target_dist": target_dist,
                     "opponent_dist": opponent_dist,
+                })
+
+            mask_filtered_out_all_candidates = bool(
+                confirmed_tracks_count > 0
+                and not candidates
+                and (use_rink_mask_effective or use_bench_mask_effective or use_penalty_mask_effective)
+            )
+            if state in {"SEARCH", "LOST"} and mask_filtered_out_all_candidates:
+                timeline.append({
+                    "t": t,
+                    "event": "search_no_candidates_after_mask",
+                    "reason": "Mask removed all candidates (empty polygon?)",
+                    "confirmed_tracks": confirmed_tracks_count,
+                    "use_rink_mask_effective": use_rink_mask_effective,
+                    "use_bench_mask_effective": use_bench_mask_effective,
+                    "use_penalty_mask_effective": use_penalty_mask_effective,
                 })
 
             reid_enabled = bool(params.reid_enable and reid_embedder is not None)
@@ -2571,7 +2599,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     present = False
             clip_reason = "allowed"
             if state in {"SEARCH", "LOST"}:
-                clip_reason = "reid_gate_search" if reid_gate_required and not reid_gate_ok else "searching"
+                if mask_filtered_out_all_candidates:
+                    clip_reason = "mask_removed_all_candidates"
+                else:
+                    clip_reason = "reid_gate_search" if reid_gate_required and not reid_gate_ok else "searching"
             elif state != "LOCKED":
                 clip_reason = "state_not_locked"
             elif reid_gate_required and not reid_gate_has_value and not reid_missing_grace_active:

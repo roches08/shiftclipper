@@ -281,6 +281,23 @@ def test_normalize_setup_strips_nested_config_keys():
     assert "config_hash" not in normalized
 
 
+
+def test_setup_preserves_mask_polygons_in_config_ui_raw(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
+
+    job_id = api_main.create_job({"name": "mask-ui-raw"})["job_id"]
+    payload = {
+        "use_rink_mask": True,
+        "use_bench_mask": True,
+        "rink_polygon": [{"x": 0.1, "y": 0.1}, {"x": 0.9, "y": 0.1}, {"x": 0.9, "y": 0.9}],
+        "bench_polygons": [[{"x": 0.0, "y": 0.0}, {"x": 0.2, "y": 0.0}, {"x": 0.2, "y": 0.2}]],
+    }
+    api_main.setup_job(job_id, payload)
+
+    setup = json.loads((tmp_path / job_id / "setup.json").read_text())
+    assert setup["config_ui_raw"]["rink_polygon"] == payload["rink_polygon"]
+    assert setup["config_ui_raw"]["bench_polygons"] == payload["bench_polygons"]
+
 def test_process_job_skips_combined_when_no_clips(tmp_path, monkeypatch):
     monkeypatch.setattr(api_main, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(worker_tasks, "JOBS_DIR", tmp_path)

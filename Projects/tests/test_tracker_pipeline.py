@@ -642,3 +642,70 @@ def test_locked_continuity_uses_grace_when_lost_timeout_disabled():
     assert keep is True
     assert grace_start == 10.0
     assert grace_active is True
+
+
+
+def test_invalid_mask_polygons_are_auto_disabled(tmp_path, monkeypatch):
+    from worker import tasks as worker_tasks
+
+    class _FakeCapture:
+        def __init__(self, _):
+            pass
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == worker_tasks.cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_COUNT:
+                return 0
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_WIDTH:
+                return 1920
+            if prop == worker_tasks.cv2.CAP_PROP_FRAME_HEIGHT:
+                return 1080
+            return 0
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            return None
+
+    class _FakeYOLO:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    if worker_tasks.cv2 is None:
+        class _FakeCv2:
+            CAP_PROP_FPS = 5
+            CAP_PROP_FRAME_COUNT = 7
+            CAP_PROP_FRAME_WIDTH = 3
+            CAP_PROP_FRAME_HEIGHT = 4
+            VideoCapture = _FakeCapture
+
+        monkeypatch.setattr(worker_tasks, "cv2", _FakeCv2)
+    else:
+        monkeypatch.setattr(worker_tasks.cv2, "VideoCapture", _FakeCapture)
+    monkeypatch.setattr(worker_tasks, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(worker_tasks, "resolve_device", lambda: ("cuda:0", 0))
+    monkeypatch.setattr(worker_tasks, "warm_easyocr_models", lambda *_: None)
+    monkeypatch.setattr(worker_tasks, "_build_ocr_reader", lambda *_: (None, False))
+    monkeypatch.setattr(worker_tasks, "_hex_to_hsv", lambda *_: (60, 80, 80))
+
+    setup = {
+        "reid_enable": False,
+        "debug_timeline": True,
+        "use_rink_mask": True,
+        "use_bench_mask": True,
+        "rink_polygon": [],
+        "bench_polygons": [
+            [{"x": 0.1, "y": 0.1}, {"x": 0.2, "y": 0.1}, {"x": 0.2, "y": 0.2}],
+            [{"x": 0.8, "y": 0.1}, {"x": 0.9, "y": 0.1}],
+        ],
+    }
+    out = worker_tasks.track_presence(str(tmp_path / "dummy.mp4"), setup)
+
+    warnings = [e.get("warning", "") for e in out["timeline"] if e.get("event") == "mask_warning"]
+    assert any("use_rink_mask=true" in w for w in warnings)
+    assert any("use_bench_mask=true" in w for w in warnings)
