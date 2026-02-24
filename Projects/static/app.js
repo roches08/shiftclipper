@@ -63,18 +63,18 @@ const SETUP_STORAGE_PREFIX = 'setup:';
 const MASK_STORAGE_KEY = 'shiftclipper_mask_polygons';
 const DEFAULT_SETUP = {
   video_type: 'wide_single_cam_working_v1',
-  score_lock_threshold: 0.50,
-  score_unlock_threshold: 0.38,
-  lock_threshold_normal: 0.50,
-  lock_threshold_reacquire: 0.35,
-  lock_threshold_seed: 0.38,
-  lost_timeout: 6,
-  locked_grace_seconds: 1.25,
-  reacquire_window_seconds: 14,
-  reacquire_score_lock_threshold: 0.32,
-  reacquire_max_sec: 3,
+  score_lock_threshold: 0.45,
+  score_unlock_threshold: 0.25,
+  lock_threshold_normal: 0.45,
+  lock_threshold_reacquire: 0.30,
+  lock_threshold_seed: 0.30,
+  lost_timeout: 18,
+  locked_grace_seconds: 2.0,
+  reacquire_window_seconds: 90,
+  reacquire_score_lock_threshold: 0.30,
+  reacquire_max_sec: 25,
   loss_timeout_sec: 2,
-  gap_merge_seconds: 3.0,
+  gap_merge_seconds: 12,
   lock_seconds_after_confirm: 4,
   min_track_seconds: 0.85,
   min_clip_seconds: 1.0,
@@ -82,17 +82,18 @@ const DEFAULT_SETUP = {
   allow_bench_reacquire: false,
   reid_enable: true,
   reid_every_n_frames: 3,
-  reid_weight: 0.55,
+  reid_weight: 0.65,
   reid_min_sim: 0.45,
   reid_crop_expand: 0.20,
   reid_batch: 16,
   reid_device: 'cuda:0',
-  allow_seed_clips: true,
-  seed_lock_seconds: 4,
+  allow_seed_clips: false,
+  export_seed_clips: false,
+  seed_lock_seconds: 12,
   seed_iou_min: 0.18,
   seed_dist_max: 0.16,
   seed_bonus: 0.8,
-  seed_window_s: 60,
+  seed_window_s: 45,
   max_clip_len_sec: 0,
   cold_lock_mode: 'require_seed',
   cold_lock_reid_min_similarity: 0.5,
@@ -207,7 +208,7 @@ function applyVideoTypePreset(videoType){
     !!val('allow_bench_reacquire', getChecked('allowBenchReacquire', false))
   );
   setCheckedIfPresent('allowSeedClips',
-    !!val('allow_seed_clips', getChecked('allowSeedClips', true))
+    !!val('export_seed_clips', val('allow_seed_clips', getChecked('allowSeedClips', false)))
   );
   $('seedLockSeconds').value = val('seed_lock_seconds', $('seedLockSeconds').value);
   $('seedIouMin').value = val('seed_iou_min', $('seedIouMin').value);
@@ -296,7 +297,7 @@ function applySetupValues(setup){
   setValueIfDefined('reidCropExpand', setup.reid_crop_expand);
   setValueIfDefined('reidBatch', setup.reid_batch);
   setValueIfDefined('reidDevice', setup.reid_device);
-  setCheckedIfDefined('allowSeedClips', setup.allow_seed_clips);
+  setCheckedIfDefined('allowSeedClips', setup.export_seed_clips ?? setup.allow_seed_clips);
   setValueIfDefined('seedLockSeconds', setup.seed_lock_seconds);
   setValueIfDefined('seedIouMin', setup.seed_iou_min);
   setValueIfDefined('seedDistMax', setup.seed_dist_max);
@@ -761,7 +762,8 @@ function payload(){
     bench_polygons: normalizePolygonList(state.maskPolygons.bench_polygons),
     penalty_polygons: normalizePolygonList(state.maskPolygons.penalty_polygons),
     allow_unconfirmed_clips: getChecked('allowUnconfirmedClips', false),
-    allow_seed_clips: getChecked('allowSeedClips', true),
+    allow_seed_clips: getChecked('allowSeedClips', false),
+    export_seed_clips: getChecked('allowSeedClips', false),
     min_track_seconds: toNumber('minTrack'),
     min_clip_seconds: toNumber('minClipSeconds'),
     seed_lock_seconds: toNumber('seedLockSeconds'),
@@ -993,7 +995,7 @@ async function loadSetup(){
     if (setup.preset_name && setup.preset_version) updatePresetLabel(setup.preset_name, setup.preset_version);
     setValueIfDefined('benchZone', setup.bench_zone_ratio);
     setCheckedIfDefined('allowUnconfirmedClips', setup.allow_unconfirmed_clips);
-    setCheckedIfDefined('allowSeedClips', setup.allow_seed_clips);
+    setCheckedIfDefined('allowSeedClips', setup.export_seed_clips ?? setup.allow_seed_clips);
     setCheckedIfDefined('allowBenchReacquire', setup.allow_bench_reacquire);
     setCheckedIfDefined('ocrDisable', setup.ocr_disable);
     setCheckedIfDefined('debugOverlay', setup.debug_overlay);
