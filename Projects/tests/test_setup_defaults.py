@@ -377,3 +377,9 @@ def test_process_job_skips_on_ffmpeg_combine_error(tmp_path, monkeypatch):
     result = json.loads((job_dir / "job.json").read_text())
     assert result["status"] == "done"
     assert result.get("error") in (None, "")
+
+
+def test_clip_continue_threshold_defaults_to_unlock_threshold_when_missing():
+    setup = api_main.normalize_setup({"score_unlock_threshold": 0.31})
+    assert setup["clip_continue_threshold"] == 0.31
+
