@@ -22,14 +22,15 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert setup["opponent_color"] == "#ffffff"
     assert setup["ocr_veto_conf"] == 0.92
     assert setup["ocr_veto_seconds"] == 1.0
-    assert setup["reacquire_window_seconds"] == 8.0
-    assert setup["lost_timeout"] == 4.0
+    assert setup["reacquire_window_seconds"] == 90.0
+    assert setup["lost_timeout"] == 18.0
     assert setup["reacquire_score_lock_threshold"] == 0.30
-    assert setup["score_lock_threshold"] == 0.55
-    assert setup["score_unlock_threshold"] == 0.33
+    assert setup["score_lock_threshold"] == 0.45
+    assert setup["score_unlock_threshold"] == 0.25
+    assert setup["clip_continue_threshold"] == setup["score_unlock_threshold"]
     assert setup["swap_guard_seconds"] == 2.5
     assert setup["swap_guard_bonus"] == 0.1
-    assert setup["locked_grace_seconds"] == 0.75
+    assert setup["locked_grace_seconds"] == 2.0
     assert setup["reid_enable"] is True
     assert setup["reid_fail_policy"] == "disable"
     assert setup["reid_weights_path"] == "/workspace/shiftclipper/Projects/models/reid/osnet_x0_25_msmt17.pth"
@@ -38,12 +39,12 @@ def test_setup_json_persists_tracker_defaults(tmp_path, monkeypatch):
     assert "use_reid" not in setup
     assert setup["reid_model"] == "osnet_x0_25"
     assert setup["reid_every_n_frames"] == 5
-    assert setup["reid_weight"] == 0.45
+    assert setup["reid_weight"] == 0.65
     assert setup["reid_min_sim"] == 0.50
     assert setup["reid_crop_expand"] == 0.15
     assert setup["reid_batch"] == 16
     assert setup["reid_device"] == "cuda:0"
-    assert setup["gap_merge_seconds"] == 1.5
+    assert setup["gap_merge_seconds"] == 12.0
     assert setup["transcode_enabled"] is False
     assert setup["transcode_scale_max"] == 1080
     assert setup["transcode_fps"] is None

@@ -13,6 +13,7 @@
         tracker_type: 'bytetrack',
         score_lock_threshold: 0.45,
         score_unlock_threshold: 0.25,
+        clip_continue_threshold: 0.25,
         lock_threshold_normal: 0.45,
         lock_threshold_reacquire: 0.30,
         lock_threshold_seed: 0.30,

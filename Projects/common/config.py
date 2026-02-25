@@ -120,11 +120,11 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         tracking_mode = "clip"
 
     mode_defaults = {
-        "score_lock_threshold": 0.55,
-        "score_unlock_threshold": 0.33,
+        "score_lock_threshold": 0.45,
+        "score_unlock_threshold": 0.25,
         "clip_continue_threshold": 0.25,
-        "lost_timeout": 4.0,
-        "reacquire_window_seconds": 8.0,
+        "lost_timeout": 18.0,
+        "reacquire_window_seconds": 90.0,
         "reacquire_score_lock_threshold": 0.30,
         "ocr_veto_conf": 0.92,
         "ocr_veto_seconds": 1.0,
@@ -137,6 +137,9 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
     preset = CAMERA_PRESETS[camera_mode]
     verify_mode = bool(src.get("verify_mode", False))
     extend_sec = max(0.0, min(60.0, _as_float(src, "extend_sec", 20.0)))
+    score_lock_threshold = _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"])
+    score_unlock_threshold = _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"])
+    clip_continue_threshold = _as_float(src, "clip_continue_threshold", score_unlock_threshold)
 
     jersey_color_hex = str(src.get("jersey_color_hex") or src.get("jersey_color") or "#203524")
     jr, jg, jb = _hex_to_rgb(jersey_color_hex)
@@ -167,7 +170,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "skip_seeding": bool(src.get("skip_seeding", False)),
         "clicks": clicks,
         "clicks_count": len(clicks),
-        "detect_stride": _as_int(src, "detect_stride", preset["detect_stride"]),
+        "detect_stride": _as_int(src, "detect_stride", 1),
         "yolo_imgsz": _as_int(src, "yolo_imgsz", preset["yolo_imgsz"]),
         "ocr_every_n": _as_int(src, "ocr_every_n", preset["ocr_every_n"]),
         "ocr_every_n_frames": _as_int(src, "ocr_every_n_frames", _as_int(src, "ocr_every_n", preset["ocr_every_n"])),
@@ -177,15 +180,15 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "tracker_type": tracker_type,
         "ocr_min_conf": _as_float(src, "ocr_min_conf", preset["ocr_min_conf"]),
         "lock_seconds_after_confirm": _as_float(src, "lock_seconds_after_confirm", preset["lock_seconds_after_confirm"]),
-        "gap_merge_seconds": _as_float(src, "gap_merge_seconds", 1.5),
+        "gap_merge_seconds": _as_float(src, "gap_merge_seconds", 12.0),
         "lost_timeout": _as_float(src, "lost_timeout", mode_defaults["lost_timeout"]),
         "reacquire_window_seconds": _as_float(src, "reacquire_window_seconds", mode_defaults["reacquire_window_seconds"]),
         "reacquire_score_lock_threshold": _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"]),
         "min_track_seconds": _as_float(src, "min_track_seconds", preset["min_track_seconds"]),
         "min_clip_seconds": _as_float(src, "min_clip_seconds", 1.0),
-        "score_lock_threshold": _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]),
-        "score_unlock_threshold": _as_float(src, "score_unlock_threshold", mode_defaults["score_unlock_threshold"]),
-        "clip_continue_threshold": _as_float(src, "clip_continue_threshold", mode_defaults["clip_continue_threshold"]),
+        "score_lock_threshold": score_lock_threshold,
+        "score_unlock_threshold": score_unlock_threshold,
+        "clip_continue_threshold": clip_continue_threshold,
         "seed_lock_seconds": _as_float(src, "seed_lock_seconds", 8.0),
         "seed_iou_min": _as_float(src, "seed_iou_min", _as_float(src, "seed_min_iou", 0.12)),
         "seed_dist_max": _as_float(src, "seed_dist_max", 0.22),
@@ -225,7 +228,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reid_weights_path": str(src.get("reid_weights_path") or DEFAULT_REID_WEIGHTS_PATH),
         "reid_weights_url": str(src.get("reid_weights_url") or DEFAULT_REID_WEIGHTS_URL),
         "reid_auto_download": bool(src.get("reid_auto_download", True)),
-        "reid_weight": _as_float(src, "reid_weight", 0.45),
+        "reid_weight": _as_float(src, "reid_weight", 0.65),
         "reid_min_sim": _as_float(src, "reid_min_sim", 0.50),
         "reid_crop_expand": _as_float(src, "reid_crop_expand", 0.15),
         "reid_batch": max(1, _as_int(src, "reid_batch", 16)),
@@ -235,9 +238,9 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reacquire_confirm_frames": _as_int(src, "reacquire_confirm_frames", _as_int(src, "REACQUIRE_CONFIRM_FRAMES", 5)),
         "reid_sim_threshold": _as_float(src, "reid_sim_threshold", _as_float(src, "REID_SIM_THRESHOLD", 0.35)),
         "max_clip_len_sec": _as_float(src, "max_clip_len_sec", 0.0),
-        "lock_threshold_normal": _as_float(src, "lock_threshold_normal", _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"])),
+        "lock_threshold_normal": _as_float(src, "lock_threshold_normal", score_lock_threshold),
         "lock_threshold_reacquire": _as_float(src, "lock_threshold_reacquire", _as_float(src, "reacquire_score_lock_threshold", mode_defaults["reacquire_score_lock_threshold"])),
-        "lock_threshold_seed": _as_float(src, "lock_threshold_seed", _as_float(src, "lock_threshold_normal", _as_float(src, "score_lock_threshold", mode_defaults["score_lock_threshold"]))),
+        "lock_threshold_seed": _as_float(src, "lock_threshold_seed", _as_float(src, "lock_threshold_normal", score_lock_threshold)),
         "cold_lock_mode": str(src.get("cold_lock_mode") or "allow").lower(),
         "cold_lock_reid_min_similarity": _as_float(src, "cold_lock_reid_min_similarity", _as_float(src, "reid_min_sim", 0.5)),
         "cold_lock_margin_min": _as_float(src, "cold_lock_margin_min", 0.08),
@@ -257,7 +260,7 @@ def normalize_setup(payload: Dict[str, Any] | None) -> Dict[str, Any]:
         "reid_reacquire_hysteresis": max(0.0, _as_float(src, "reid_reacquire_hysteresis", 0.02)),
         "swap_guard_seconds": _as_float(src, "swap_guard_seconds", 2.5),
         "swap_guard_bonus": _as_float(src, "swap_guard_bonus", 0.1),
-        "locked_grace_seconds": _as_float(src, "locked_grace_seconds", 0.75),
+        "locked_grace_seconds": _as_float(src, "locked_grace_seconds", 2.0),
         "rink_polygon": _normalize_polygon(src.get("rink_polygon") or []),
         "polygon_coords_normalized": bool(src.get("polygon_coords_normalized", True)),
         "bench_polygons": _normalize_polygon_list(src.get("bench_polygons") or []),

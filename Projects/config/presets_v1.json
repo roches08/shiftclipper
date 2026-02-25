@@ -155,6 +155,7 @@
         "locked_grace_seconds": 2.0,
         "score_lock_threshold": 0.45,
         "score_unlock_threshold": 0.25,
+        "clip_continue_threshold": 0.25,
         "reacquire_window_seconds": 90,
         "reacquire_score_lock_threshold": 0.3,
         "reacquire_max_sec": 25,
