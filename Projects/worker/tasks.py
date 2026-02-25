@@ -2947,6 +2947,40 @@ def process_job(job_id: str) -> Dict[str, Any]:
             stage["name"] = stage_name
         stage["updated"] = time.time()
 
+    def run_with_stage_heartbeat(stage_name: str, fn, interval_s: float = 2.0):
+        """Run a blocking function while keeping the watchdog alive.
+
+        Some operations (notably per-clip ffmpeg cuts) can run longer than the
+        generic STALL_TIMEOUT_S without emitting progress. The watchdog only
+        observes stage['updated'], so we periodically 'touch' the stage while
+        the operation is in-flight.
+        """
+        done = False
+        err: Exception | None = None
+
+        def _runner():
+            nonlocal done, err
+            try:
+                fn()
+            except Exception as e:
+                err = e
+            finally:
+                done = True
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        # Keep the watchdog alive until the work finishes.
+        while not done:
+            if cancel_check():
+                # We can't reliably interrupt ffmpeg mid-run here, but we can
+                # stop further work and report cancellation.
+                raise RuntimeError("cancelled")
+            touch_stage(stage_name)
+            time.sleep(max(0.25, float(interval_s)))
+        t.join()
+        if err is not None:
+            raise err
+
     def cancel_check() -> bool:
         if not meta_path.exists():
             return False
@@ -3083,7 +3117,18 @@ def process_job(job_id: str) -> Dict[str, Any]:
         segment_count = max(1, len(data["segments"]))
         for i, (a, b, _) in enumerate(data["segments"], start=1):
             outp = clips_dir / f"clip_{i:03d}.mp4"
-            cut_clip(tracking_input_path, a, b + float(setup.get("post_roll", setup.get("extend_sec", 2.0))), str(outp))
+            # cut_clip is ffmpeg-backed and can take longer than the watchdog timeout,
+            # especially on large clips / slow IO. Keep the watchdog alive.
+            run_with_stage_heartbeat(
+                "clips",
+                lambda a=a, b=b, outp=outp: cut_clip(
+                    tracking_input_path,
+                    a,
+                    b + float(setup.get("post_roll", setup.get("extend_sec", 2.0))),
+                    str(outp),
+                ),
+                interval_s=2.0,
+            )
             clip_paths.append(str(outp))
             clips.append({"start": a, "end": b, "path": str(outp), "url": f"/data/jobs/{job_id}/clips/{outp.name}"})
             clip_progress = 70 + int((i / segment_count) * 20)
@@ -3281,3 +3326,4 @@ def process_job(job_id: str) -> Dict[str, Any]:
 
 def self_test_task(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {"ok": True, "payload": payload or {}, "worker_pid": os.getpid(), "updated_at": time.time()}
+
