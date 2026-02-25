@@ -52,6 +52,7 @@
     <label>Video Type</label>
     <select id="videoType">
       <option value="wide_single_cam_working_v1">Wide Single Cam — Working (Test 2 profile)</option>
+      <option value="hockey_wide_single_cam_stable">Hockey — Wide Single Cam (Stable)</option>
       <option value="coach_cam">Coach Cam (Single-cam, stable)</option>
       <option value="wide_single_cam">Wide Single Cam (Live barn / fixed wide)</option>
       <option value="broadcast">Broadcast (cuts/zooms)</option>
@@ -80,6 +81,21 @@
     <label>Opponent color</label><input id="opponentColor" type="color" value="#ffffff" />
     <label>Color tolerance</label><input id="colorTolerance" type="range" min="5" max="60" value="26" />
     <label>Extend sec</label><input id="extendSec" type="number" value="4" />
+  </div>
+
+  <div class="card" style="margin-top:8px;">
+    <h4 style="margin:0 0 8px 0;">Hockey Quick-Tune (Recommended)</h4>
+    <div class="row">
+      <label>Stability (Lock threshold)</label><input id="qtStability" type="number" step="0.01" value="0.45" min="0" max="1" />
+      <label>Keep clip alive (Continue/Unlock)</label><input id="qtClipAlive" type="number" step="0.01" value="0.25" min="0" max="1" />
+      <label>Reacquire strength</label><input id="qtReacquireStrength" type="number" step="0.01" value="0.30" min="0" max="1" />
+      <label>Reacquire window seconds</label><input id="qtReacquireWindow" type="number" step="0.1" value="90" min="0" />
+      <label>Lost timeout seconds</label><input id="qtLostTimeout" type="number" step="0.1" value="18" min="0" />
+      <label>Gap merge seconds</label><input id="qtGapMerge" type="number" step="0.1" value="12" min="0" />
+      <label>ReID strength</label><input id="qtReidStrength" type="number" step="0.01" value="0.65" min="0" max="1" />
+      <label>Swap guard</label><input id="qtSwapGuard" type="number" step="0.1" value="10" min="0" />
+      <button id="btnApplyHockeyTune" type="button">Apply Hockey Tune</button>
+    </div>
   </div>
 
   <details>

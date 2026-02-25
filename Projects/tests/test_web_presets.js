@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { VIDEO_TYPE_PRESETS, getVideoTypePreset, VIDEO_TYPE_ORDER } = require('../static/presets.js');
 
 test('video type order is deterministic and default first', () => {
-  assert.deepEqual(VIDEO_TYPE_ORDER, ['wide_single_cam_working_v1', 'coach_cam', 'wide_single_cam', 'broadcast']);
+  assert.deepEqual(VIDEO_TYPE_ORDER, ['wide_single_cam_working_v1', 'hockey_wide_single_cam_stable', 'coach_cam', 'wide_single_cam', 'broadcast']);
 });
 
 test('new working preset includes expected profile values', () => {
@@ -29,4 +29,12 @@ test('broadcast preset keeps cold lock gating enabled', () => {
   assert.equal(preset.values.seed_window_s, 45);
   assert.equal(preset.values.cold_lock_mode, 'require_seed');
   assert.equal(preset.values.swap_guard_seconds, 10);
+});
+
+test('hockey stable preset exposes expected stable defaults', () => {
+  const preset = getVideoTypePreset('hockey_wide_single_cam_stable');
+  assert.equal(preset.values.score_lock_threshold, 0.47);
+  assert.equal(preset.values.clip_continue_threshold, 0.23);
+  assert.equal(preset.values.reacquire_window_s, 110);
+  assert.equal(preset.values.swap_guard_bonus, 0.3);
 });

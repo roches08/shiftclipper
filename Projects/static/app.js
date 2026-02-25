@@ -111,6 +111,25 @@ const DEFAULT_SETUP = {
   penalty_polygons: [[], []],
 };
 
+const HOCKEY_TUNE_PRESET = {
+  stability: 0.47,
+  clipAlive: 0.23,
+  reacquireStrength: 0.30,
+  reacquireWindow: 110,
+  lostTimeout: 20,
+  gapMerge: 10,
+  reidStrength: 0.70,
+  swapGuard: 12,
+};
+
+const HOCKEY_QUICK_TUNE_MAP = {
+  qtStability: ['scoreLockThreshold', 'lockThresholdNormal'],
+  qtClipAlive: ['scoreUnlockThreshold', 'clipContinueThreshold'],
+  qtReacquireStrength: ['lockThresholdReacquire', 'reacquireScoreLockThreshold'],
+  qtReacquireWindow: ['reacquireWindowSeconds'],
+  qtLostTimeout: ['lostTimeout'],
+  qtGapMerge: ['mergeGap'],
+};
 
 const STAGE_META = [
   { key: 'uploading', label: 'Uploading', icon: '⬆️' },
@@ -252,10 +271,54 @@ function applyVideoTypePreset(videoType){
   setCheckedIfDefined('debugTimeline', p.debug_timeline);
   setCheckedIfDefined('generateCombined', p.generate_combined);
   updatePresetLabel(preset.preset_name, preset.preset_version);
+  syncQuickTuneFromAdvanced();
 }
 
 function getVideoTypeSetupKey(videoType){
   return `${SETUP_STORAGE_PREFIX}${videoType || 'wide_single_cam_working_v1'}`;
+}
+
+function clamp01(v){
+  return Math.max(0, Math.min(1, Number(v) || 0));
+}
+
+function syncQuickTuneFromAdvanced(){
+  setValueIfDefined('qtStability', getValue('scoreLockThreshold', HOCKEY_TUNE_PRESET.stability));
+  setValueIfDefined('qtClipAlive', getValue('scoreUnlockThreshold', HOCKEY_TUNE_PRESET.clipAlive));
+  setValueIfDefined('qtReacquireStrength', getValue('lockThresholdReacquire', HOCKEY_TUNE_PRESET.reacquireStrength));
+  setValueIfDefined('qtReacquireWindow', getValue('reacquireWindowSeconds', HOCKEY_TUNE_PRESET.reacquireWindow));
+  setValueIfDefined('qtLostTimeout', getValue('lostTimeout', HOCKEY_TUNE_PRESET.lostTimeout));
+  setValueIfDefined('qtGapMerge', getValue('mergeGap', HOCKEY_TUNE_PRESET.gapMerge));
+  setValueIfDefined('qtReidStrength', getValue('reidWeight', HOCKEY_TUNE_PRESET.reidStrength));
+  setValueIfDefined('qtSwapGuard', getValue('swapGuardSeconds', HOCKEY_TUNE_PRESET.swapGuard));
+}
+
+function applyQuickTuneToAdvanced(){
+  Object.entries(HOCKEY_QUICK_TUNE_MAP).forEach(([quickId, advancedIds]) => {
+    const val = getValue(quickId, '');
+    advancedIds.forEach((advancedId) => setValueIfDefined(advancedId, val));
+  });
+
+  const reidStrength = clamp01(getNumber('qtReidStrength', HOCKEY_TUNE_PRESET.reidStrength));
+  setValueIfDefined('reidWeight', reidStrength);
+  setValueIfDefined('reidMinSim', clamp01(reidStrength - 0.22));
+
+  const swapGuardSeconds = Math.max(0, getNumber('qtSwapGuard', HOCKEY_TUNE_PRESET.swapGuard));
+  setValueIfDefined('swapGuardSeconds', swapGuardSeconds);
+  setValueIfDefined('swapGuardBonus', clamp01(swapGuardSeconds / 40));
+}
+
+function applyHockeyTunePreset(){
+  setValueIfDefined('qtStability', HOCKEY_TUNE_PRESET.stability);
+  setValueIfDefined('qtClipAlive', HOCKEY_TUNE_PRESET.clipAlive);
+  setValueIfDefined('qtReacquireStrength', HOCKEY_TUNE_PRESET.reacquireStrength);
+  setValueIfDefined('qtReacquireWindow', HOCKEY_TUNE_PRESET.reacquireWindow);
+  setValueIfDefined('qtLostTimeout', HOCKEY_TUNE_PRESET.lostTimeout);
+  setValueIfDefined('qtGapMerge', HOCKEY_TUNE_PRESET.gapMerge);
+  setValueIfDefined('qtReidStrength', HOCKEY_TUNE_PRESET.reidStrength);
+  setValueIfDefined('qtSwapGuard', HOCKEY_TUNE_PRESET.swapGuard);
+  applyQuickTuneToAdvanced();
+  persistSetup();
 }
 
 function collectSetupFromUI(){
@@ -319,6 +382,7 @@ function applySetupValues(setup){
   setCheckedIfDefined('useRinkMask', setup.use_rink_mask);
   setCheckedIfDefined('useBenchMask', setup.use_bench_mask);
   setCheckedIfDefined('usePenaltyMask', setup.use_penalty_mask);
+  syncQuickTuneFromAdvanced();
   state.maskPolygons = {
     rink_polygon: normalizePolygon(setup.rink_polygon || state.maskPolygons.rink_polygon || []),
     bench_polygons: normalizePolygonList(setup.bench_polygons || state.maskPolygons.bench_polygons || []),
@@ -1016,6 +1080,7 @@ async function loadSetup(){
     setCheckedIfDefined('useRinkMask', setup.use_rink_mask);
     setCheckedIfDefined('useBenchMask', setup.use_bench_mask);
     setCheckedIfDefined('usePenaltyMask', setup.use_penalty_mask);
+  syncQuickTuneFromAdvanced();
     const rawSetup = setup.config_ui_raw || {};
     state.maskPolygons = {
       rink_polygon: normalizePolygon(setup.rink_polygon || rawSetup.rink_polygon || state.maskPolygons.rink_polygon || []),
@@ -1031,6 +1096,7 @@ async function loadSetup(){
     state.clicks = [];
     drawClickMarkers();
   }
+  syncQuickTuneFromAdvanced();
   refreshHelp();
   updateRunButtonState();
 }
@@ -1118,6 +1184,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindClick('btnStopDrawing', stopDrawingMode);
   bindClick('btnClearPolygon', clearSelectedPolygon);
   bindClick('btnSavePolygons', savePolygons);
+  bindClick('btnApplyHockeyTune', applyHockeyTunePreset);
 
   bindChange('cameraMode', applyPreset);
   bindChange('videoType', () => {
@@ -1133,6 +1200,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindChange('useRinkMask', () => { persistSetup(); updateMaskWarning(); });
   bindChange('useBenchMask', () => { persistSetup(); updateMaskWarning(); });
   bindChange('usePenaltyMask', () => { persistSetup(); updateMaskWarning(); });
+  ['qtStability', 'qtClipAlive', 'qtReacquireStrength', 'qtReacquireWindow', 'qtLostTimeout', 'qtGapMerge', 'qtReidStrength', 'qtSwapGuard'].forEach((id) => {
+    bindChange(id, () => { applyQuickTuneToAdvanced(); persistSetup(); });
+    const el = $(id);
+    if (el) el.addEventListener('input', () => { applyQuickTuneToAdvanced(); persistSetup(); });
+  });
 
   const vid = $('vid');
   const maskCanvas = $('maskCanvas');
@@ -1156,7 +1228,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('resize', () => { drawClickMarkers(); drawMaskOverlay(); });
   loadMaskPolygonsFromStorage();
   applyPreset();
-  applyVideoTypePreset('wide_single_cam_working_v1');
+  applyVideoTypePreset(getValue('videoType', DEFAULT_SETUP.video_type));
   loadSavedSetupOrDefaults();
   drawMaskOverlay();
   setMaskDrawButtons();

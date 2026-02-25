@@ -429,7 +429,7 @@ def _validate_setup_payload(payload: Dict[str, Any]) -> None:
             raise HTTPException(status_code=400, detail=f"{name} must be >= 0")
 
     for nm in [
-        "score_lock_threshold", "score_unlock_threshold", "reacquire_score_lock_threshold",
+        "score_lock_threshold", "score_unlock_threshold", "clip_continue_threshold", "reacquire_score_lock_threshold",
         "seed_iou_min", "seed_dist_max", "ocr_min_conf", "ocr_veto_conf", "swap_guard_bonus", "reid_weight", "reid_min_sim", "reid_crop_expand", "lock_threshold_normal", "lock_threshold_reacquire", "lock_threshold_seed", "cold_lock_reid_min_similarity", "cold_lock_margin_min",
     ]:
         _check_01(nm)

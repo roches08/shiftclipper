@@ -1,7 +1,7 @@
 (function initShiftClipperPresets(global) {
   const PRESET_VERSION = 'v1';
   const DEFAULT_VIDEO_TYPE = 'wide_single_cam_working_v1';
-  const VIDEO_TYPE_ORDER = ['wide_single_cam_working_v1', 'coach_cam', 'wide_single_cam', 'broadcast'];
+  const VIDEO_TYPE_ORDER = ['wide_single_cam_working_v1', 'hockey_wide_single_cam_stable', 'coach_cam', 'wide_single_cam', 'broadcast'];
   const VIDEO_TYPE_PRESETS = {
     wide_single_cam_working_v1: {
       preset_name: 'Wide Single Cam — Working (Test 2 profile)',
@@ -77,6 +77,38 @@
         transcode_fps: null,
         transcode_deinterlace: true,
         transcode_denoise: false,
+      },
+    },
+    hockey_wide_single_cam_stable: {
+      preset_name: 'Hockey — Wide Single Cam (Stable)',
+      preset_version: PRESET_VERSION,
+      values: {
+        video_type: 'hockey_wide_single_cam_stable',
+        score_lock_threshold: 0.47,
+        score_unlock_threshold: 0.23,
+        clip_continue_threshold: 0.23,
+        lock_threshold_normal: 0.47,
+        lock_threshold_reacquire: 0.30,
+        reacquire_score_lock_threshold: 0.30,
+        reacquire_window_s: 110,
+        reacquire_max_sec: 30,
+        lost_timeout: 20,
+        locked_grace_seconds: 2.5,
+        gap_merge_seconds: 10,
+        min_track_seconds: 0.90,
+        min_clip_seconds: 1.20,
+        extend_sec: 1.5,
+        reid_every_n_frames: 4,
+        reid_weight: 0.70,
+        reid_min_similarity: 0.48,
+        reid_min_px: 14,
+        swap_guard_seconds: 12,
+        swap_guard_bonus: 0.30,
+        ocr_every_n_frames: 5,
+        ocr_min_confidence: 0.25,
+        allow_bench_reacquire: false,
+        allow_seed_clips: false,
+        export_seed_clips: false,
       },
     },
     coach_cam: {
