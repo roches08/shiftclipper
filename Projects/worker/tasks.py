@@ -99,6 +99,7 @@ class TrackingParams:
     post_roll: float = 2.0
     score_lock_threshold: float = 0.55
     score_unlock_threshold: float = 0.33
+    clip_continue_threshold: float = 0.25
     seed_lock_seconds: float = 8.0
     seed_iou_min: float = 0.12
     seed_dist_max: float = 0.22
@@ -2371,7 +2372,8 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     reacquire_failed_logged = False
 
             allow_unconfirmed = bool(setup.get("allow_unconfirmed_clips", params.allow_unconfirmed_clips))
-            clip_score_threshold = threshold_used if lock_state == "PROVISIONAL" else float(setup.get("score_lock_threshold", params.score_lock_threshold))
+            clip_start_threshold = threshold_used if lock_state == "PROVISIONAL" else score_lock_threshold
+            clip_continue_threshold = _clamp01(float(setup.get("clip_continue_threshold", params.clip_continue_threshold)))
             identity_score = _clamp01(float(best["score"])) if best else 0.0
             min_track_seconds = float(setup.get("min_track_seconds", params.min_track_seconds))
             chosen_id = best.get("track_id") if best else None
@@ -2463,7 +2465,7 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 (
                     state == "LOCKED"
                     and chosen_id is not None
-                    and identity_score >= clip_score_threshold
+                    and identity_score >= clip_start_threshold
                     and unlock_gate_open
                     and (lock_state == "CONFIRMED" or allow_unconfirmed)
                 )
@@ -2530,9 +2532,10 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                     or reid_recent_ok
                 )
             )
-            if state == "LOCKED" and lock_state in {"CONFIRMED", "PROVISIONAL"} and identity_score >= clip_score_threshold and (not reid_gate_required or reid_gate_ok or (not reid_gate_has_value and reid_recent_ok)):
-                last_good_lock_t = t
             clip_is_active = bool(clip_start_time is not None or present_prev)
+            active_clip_threshold = clip_continue_threshold if clip_is_active else clip_start_threshold
+            if state == "LOCKED" and lock_state in {"CONFIRMED", "PROVISIONAL"} and identity_score >= active_clip_threshold and (not reid_gate_required or reid_gate_ok or (not reid_gate_has_value and reid_recent_ok)):
+                last_good_lock_t = t
             if reid_gate_required and reid_gate_has_value and not reid_gate_ok:
                 if clip_is_active and state == "LOCKED":
                     if locked_recent_seen:
@@ -2609,11 +2612,11 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 clip_reason = "reid_dropout_grace" if dropout_grace_active else "reid_unavailable"
             elif reid_gate_required and reid_gate_has_value and not reid_gate_ok:
                 clip_reason = "reid_dropout_grace" if dropout_grace_active else "reid_mismatch"
-            elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_score_threshold:
+            elif lock_state == "PROVISIONAL" and not allow_unconfirmed and identity_score < clip_start_threshold:
                 clip_reason = "provisional_disallowed" if not provisional_clip_ready else "allowed"
             elif identity_score < unlock_threshold:
                 clip_reason = "locked_grace" if locked_grace_active else "identity_below_unlock_threshold"
-            elif identity_score < clip_score_threshold:
+            elif identity_score < active_clip_threshold:
                 clip_reason = "identity_below_threshold"
             elif not gate_held:
                 clip_reason = "min_track_not_met"
@@ -2665,7 +2668,9 @@ def track_presence(video_path: str, setup: Dict[str, Any], heartbeat=None, cance
                 "t_minus_last_seen": t_minus_last_seen,
                 "allow_unconfirmed_clips": allow_unconfirmed,
                 "min_track_seconds": min_track_seconds,
-                "clip_score_threshold": clip_score_threshold,
+                "clip_score_threshold": active_clip_threshold,
+                "clip_continue_threshold": clip_continue_threshold,
+                "clip_start_threshold": clip_start_threshold,
                 "provisional_clip_threshold": provisional_clip_threshold,
                 "provisional_age": provisional_age,
                 "provisional_clip_ready": provisional_clip_ready,

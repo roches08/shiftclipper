@@ -65,6 +65,7 @@ const DEFAULT_SETUP = {
   video_type: 'wide_single_cam_working_v1',
   score_lock_threshold: 0.45,
   score_unlock_threshold: 0.25,
+  clip_continue_threshold: 0.25,
   lock_threshold_normal: 0.45,
   lock_threshold_reacquire: 0.30,
   lock_threshold_seed: 0.30,
@@ -73,6 +74,7 @@ const DEFAULT_SETUP = {
   reacquire_window_seconds: 90,
   reacquire_score_lock_threshold: 0.30,
   reacquire_max_sec: 25,
+  reacquire_confirm_frames: 5,
   loss_timeout_sec: 2,
   gap_merge_seconds: 12,
   lock_seconds_after_confirm: 4,
@@ -95,7 +97,7 @@ const DEFAULT_SETUP = {
   seed_bonus: 0.8,
   seed_window_s: 45,
   max_clip_len_sec: 0,
-  cold_lock_mode: 'require_seed',
+  cold_lock_mode: 'allow',
   cold_lock_reid_min_similarity: 0.5,
   cold_lock_margin_min: 0.08,
   cold_lock_max_seconds: 3,
@@ -196,6 +198,7 @@ function applyVideoTypePreset(videoType){
   $('videoType').value = videoType;
   $('scoreLockThreshold').value = val('score_lock_threshold', $('scoreLockThreshold').value);
   $('scoreUnlockThreshold').value = val('score_unlock_threshold', $('scoreUnlockThreshold').value);
+  $('clipContinueThreshold').value = val('clip_continue_threshold', $('clipContinueThreshold').value);
   $('lockThresholdNormal').value = val('lock_threshold_normal', $('lockThresholdNormal').value);
   $('lockThresholdReacquire').value = val('lock_threshold_reacquire', $('lockThresholdReacquire').value);
   $('lockThresholdSeed').value = val('lock_threshold_seed', $('lockThresholdSeed').value);
@@ -278,6 +281,7 @@ function applySetupValues(setup){
   setValueIfDefined('videoType', setup.video_type);
   setValueIfDefined('scoreLockThreshold', setup.score_lock_threshold);
   setValueIfDefined('scoreUnlockThreshold', setup.score_unlock_threshold);
+  setValueIfDefined('clipContinueThreshold', setup.clip_continue_threshold);
   setValueIfDefined('lostTimeout', setup.lost_timeout);
   setValueIfDefined('lockedGraceSeconds', setup.locked_grace_seconds);
   setValueIfDefined('reacquireWindowSeconds', setup.reacquire_window_seconds);
@@ -741,17 +745,19 @@ function payload(){
     ocr_veto_conf: toNumber('ocrVetoConf'),
     ocr_veto_seconds: toNumber('ocrVetoSeconds'),
     lock_seconds_after_confirm: toNumber('lockSeconds'),
-    lost_timeout: toNumber('lostTimeout'),
-    gap_merge_seconds: toNumber('mergeGap'),
-    score_lock_threshold: toNumber('scoreLockThreshold'),
-    score_unlock_threshold: toNumber('scoreUnlockThreshold'),
-    reacquire_window_seconds: toNumber('reacquireWindowSeconds'),
+    lost_timeout: toNumber('lostTimeout', DEFAULT_SETUP.lost_timeout),
+    gap_merge_seconds: toNumber('mergeGap', DEFAULT_SETUP.gap_merge_seconds),
+    score_lock_threshold: toNumber('scoreLockThreshold', DEFAULT_SETUP.score_lock_threshold),
+    score_unlock_threshold: toNumber('scoreUnlockThreshold', DEFAULT_SETUP.score_unlock_threshold),
+    clip_continue_threshold: toNumber('clipContinueThreshold', DEFAULT_SETUP.clip_continue_threshold),
+    reacquire_window_seconds: toNumber('reacquireWindowSeconds', DEFAULT_SETUP.reacquire_window_seconds),
     reacquire_score_lock_threshold: toNumber('reacquireScoreLockThreshold'),
     lock_threshold_normal: toNumber('lockThresholdNormal'),
-    lock_threshold_reacquire: toNumber('lockThresholdReacquire'),
-    lock_threshold_seed: toNumber('lockThresholdSeed'),
-    locked_grace_seconds: toNumber('lockedGraceSeconds'),
-    reacquire_max_sec: toNumber('reacquireMaxSec'),
+    lock_threshold_reacquire: toNumber('lockThresholdReacquire', DEFAULT_SETUP.lock_threshold_reacquire),
+    lock_threshold_seed: toNumber('lockThresholdSeed', DEFAULT_SETUP.lock_threshold_seed),
+    locked_grace_seconds: toNumber('lockedGraceSeconds', DEFAULT_SETUP.locked_grace_seconds),
+    reacquire_max_sec: toNumber('reacquireMaxSec', DEFAULT_SETUP.reacquire_max_sec),
+    reacquire_confirm_frames: toInt('reacquireConfirmFrames', DEFAULT_SETUP.reacquire_confirm_frames),
     loss_timeout_sec: toNumber('lossTimeoutSec'),
     allow_bench_reacquire: getChecked('allowBenchReacquire', false),
     use_rink_mask: getChecked('useRinkMask', true),
@@ -766,13 +772,13 @@ function payload(){
     export_seed_clips: getChecked('allowSeedClips', false),
     min_track_seconds: toNumber('minTrack'),
     min_clip_seconds: toNumber('minClipSeconds'),
-    seed_lock_seconds: toNumber('seedLockSeconds'),
+    seed_lock_seconds: toNumber('seedLockSeconds', DEFAULT_SETUP.seed_lock_seconds),
     seed_iou_min: toNumber('seedIouMin'),
     seed_dist_max: toNumber('seedDistMax'),
     seed_bonus: toNumber('seedBonus'),
-    seed_window_s: toNumber('seedWindowS'),
+    seed_window_s: toNumber('seedWindowS', DEFAULT_SETUP.seed_window_s),
     max_clip_len_sec: toNumber('maxClipLenSec'),
-    cold_lock_mode: getValue('coldLockMode', 'require_seed'),
+    cold_lock_mode: getValue('coldLockMode', DEFAULT_SETUP.cold_lock_mode),
     cold_lock_reid_min_similarity: toNumber('coldLockReidMinSimilarity'),
     cold_lock_margin_min: toNumber('coldLockMarginMin'),
     cold_lock_max_seconds: toNumber('coldLockMaxSeconds'),
@@ -954,6 +960,7 @@ async function loadSetup(){
     setValueIfDefined('mergeGap', setup.gap_merge_seconds);
     setValueIfDefined('scoreLockThreshold', setup.score_lock_threshold);
     setValueIfDefined('scoreUnlockThreshold', setup.score_unlock_threshold);
+  setValueIfDefined('clipContinueThreshold', setup.clip_continue_threshold);
     setValueIfDefined('reacquireWindowSeconds', setup.reacquire_window_seconds);
     setValueIfDefined('reacquireScoreLockThreshold', setup.reacquire_score_lock_threshold);
     setValueIfDefined('lockedGraceSeconds', setup.locked_grace_seconds);
